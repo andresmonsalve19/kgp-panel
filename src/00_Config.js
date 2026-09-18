@@ -30,7 +30,7 @@ function CFG() {
   var props = PropertiesService.getScriptProperties();
   var templateSheetId = props.getProperty('TEMPLATE_SHEET_ID') || '';
   var templateTabName = props.getProperty('TEMPLATE_TAB_NAME') || null;
-  // Pestaña de la ORDEN DE INSPECCIÓN DE SERVICIO dentro del MISMO archivo
+  // Pestaña de la ORDEN INTERNA DE SERVICIO dentro del MISMO archivo
   // plantilla (el que convirtió admin_convertTemplate). A diferencia de
   // TEMPLATE_TAB_NAME, esta sí tiene un valor por defecto: el documento de la
   // OIS es una copia de esa única hoja, así que no hay un "usar la primera

@@ -213,7 +213,7 @@ function api_updateEstablecimiento(idEstablecimiento, datos) {
 }
 
 // ---------------------------------------------------------------------
-// API — OIS (orden de inspección de servicio)
+// API — OIS (orden interna de servicio)
 // ---------------------------------------------------------------------
 
 /**

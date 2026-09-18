@@ -1,5 +1,5 @@
 /**
- * Orquestación de la ORDEN DE INSPECCIÓN DE SERVICIO (OIS).
+ * Orquestación de la ORDEN INTERNA DE SERVICIO (OIS).
  *
  * Una OIS nace de UNA cotización al aprobar su garantía (popup "Garantía
  * aprobada" -> "Crear OIS" en Gestionar cotización). Una cotización produce a

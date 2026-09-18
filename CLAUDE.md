@@ -312,7 +312,7 @@ abre la vista, sin sacrificar frescura:
   siempre. No hace falta tocar `KGP.nav` en `ui/JsCore.js.html` para esto:
   solo reordena el HTML de `ui/Sidebar.html`.
 
-## 10. OIS (orden de inspección de servicio)
+## 10. OIS (orden interna de servicio)
 
 - Aprobar una garantía **siempre** crea su orden en la misma transacción:
   "Garantía aprobada" abre el popup OIS / OIP / Cancelar, y "OIS" llama

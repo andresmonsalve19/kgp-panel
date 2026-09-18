@@ -1,6 +1,6 @@
 # KGP Panel
 
-Panel web interno de **KGP** para gestionar el ciclo comercial y operativo de los servicios de inspección: desde la **cotización** hasta la **orden de inspección de servicio (OIS)**, con generación automática de documentos Excel a partir de la plantilla oficial de la empresa.
+Panel web interno de **KGP** para gestionar el ciclo comercial y operativo de sus servicios: desde la **cotización** hasta la **orden interna de servicio (OIS)**, con generación automática de documentos Excel a partir de la plantilla oficial de la empresa.
 
 Está construido como una **Web App de Google Apps Script**: no requiere servidores propios ni base de datos externa. Los datos viven en Google Sheets y los documentos generados en Google Drive.
 
@@ -39,7 +39,7 @@ Antes de este panel, las cotizaciones se armaban a mano sobre una plantilla de E
 |---|---|
 | **Crear cotización** | Formulario de nueva cotización. Selección de cliente, solicitante (contacto), establecimiento y su encargado, con alta/edición rápida de cualquiera de ellos en un modal sin salir del formulario. Hasta **10 servicios** por cotización, cada uno con hasta **10 actividades**. El código UNSPSC se autocompleta según el tipo de servicio. Al guardar se genera el documento. |
 | **Gestionar cotización** | Listado filtrable/paginado de cotizaciones y vista de detalle para editar datos generales, servicios, **tarifas** (tarifa × cantidad), observaciones acumulativas, asesor comercial y tiempo de entrega. Calcula **SUBTOTAL, IVA (19 %) y TOTAL**. Botones **"Garantía aprobada" / "Garantía rechazada"** para decidir el estado (una sola vez). "Guardar cambios" regenera el **mismo** documento. |
-| **Gestionar OIS** | Listado y detalle de las órdenes de inspección. Gestión de tareas (responsable, fechas, observación, marcar como finalizada), plazo y datos compartidos con la cotización. El estado de la OIS se deriva solo: **En curso / Vencida / Finalizada**. |
+| **Gestionar OIS** | Listado y detalle de las órdenes internas de servicio. Gestión de tareas (responsable, fechas, observación, marcar como finalizada), plazo y datos compartidos con la cotización. El estado de la OIS se deriva solo: **En curso / Vencida / Finalizada**. |
 | **Gestión de empleados** | Alta, edición y baja del personal de KGP (`PERSONAL_KGP`). Se usa para trazabilidad ("Elaborado por", "Revisado y aprobado por", "Asesor comercial") y como responsables de tareas de OIS. |
 | **Dashboard** | KPIs, gráficos (distribución por estado, evolución mensual, vigencia, tipos de servicio), tabla con búsqueda, filtros por año/cliente/estado, ordenamiento y paginación, y panel de calidad de datos. |
 
