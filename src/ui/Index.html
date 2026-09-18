@@ -1,0 +1,45 @@
+<!-- Shell de la Web App. doGet() (50_WebApp.js) evalúa esta plantilla con
+     initialView = 'cotizacion' | 'dashboard'.
+
+     Router en memoria (no location.hash): dentro del iframe sandbox de
+     Apps Script el hash de la URL del navegador no es accesible desde el
+     documento, así que el estado de "vista activa" vive solo en JS
+     (ver JsCore.js.html: KGP.nav). -->
+<?!= include('ui/Styles.css'); ?>
+
+<!-- Visible de inmediato desde el HTML (no depende de JS para aparecer, así
+     no hay flash de contenido vacío). Solo se oculta cuando la vista inicial
+     terminó de cargar TODOS sus datos (ver KGP.hideLoader en JsCore.js.html). -->
+<div class="page-loader" id="page-loader">
+  <div class="page-loader-box">
+    <span class="spinner-lg"></span>
+    <div class="page-loader-text">Cargando KGP Panel…</div>
+  </div>
+</div>
+
+<div class="app-shell">
+  <?!= include('ui/Sidebar'); ?>
+
+  <main class="main">
+    <?!= include('ui/ViewCotizacion'); ?>
+    <?!= include('ui/ViewDashboard'); ?>
+    <?!= include('ui/ViewGestion'); ?>
+    <?!= include('ui/ViewOis'); ?>
+    <?!= include('ui/ViewEmpleados'); ?>
+  </main>
+</div>
+
+<div id="toast-stack"></div>
+
+<script>
+  window.KGP_INITIAL_VIEW = <?!= JSON.stringify(initialView); ?>;
+</script>
+<?!= include('ui/JsCore.js'); ?>
+<?!= include('ui/JsCotizacion.js'); ?>
+<?!= include('ui/JsDashboard.js'); ?>
+<?!= include('ui/JsGestion.js'); ?>
+<?!= include('ui/JsOis.js'); ?>
+<?!= include('ui/JsEmpleados.js'); ?>
+<script>
+  KGP.init();
+</script>

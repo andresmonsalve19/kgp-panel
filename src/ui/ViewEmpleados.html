@@ -1,0 +1,63 @@
+<!-- Vista "Gestión de empleados": listado completo de PERSONAL_KGP con alta,
+     edición y baja. Reutiliza KGP.entityModal (ver ui/JsCore.js.html, tipo
+     "empleado") para el alta/edición rápida — mismos campos que un contacto
+     (nombre/correo/teléfono/cargo), así que no hace falta un modal aparte. -->
+<section class="view" id="view-empleados">
+  <div class="page-header">
+    <div>
+      <h1>Gestión de empleados</h1>
+      <div class="desc">Administra el personal de KGP: agrega, edita o elimina empleados.</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="filters-row">
+      <input type="text" class="search-input" id="emp-search" placeholder="Buscar por nombre, correo o cargo…">
+      <select id="emp-page-size" title="Resultados por página">
+        <option value="10">10 / página</option>
+        <option value="20">20 / página</option>
+        <option value="50">50 / página</option>
+      </select>
+      <button type="button" class="btn btn-sm" id="emp-refresh-btn">
+        <span id="emp-refresh-spinner" style="display:none;" class="spinner dark"></span>
+        Actualizar
+      </button>
+      <button type="button" class="btn btn-primary btn-sm" id="emp-nuevo-btn">+ Nuevo empleado</button>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Nombre</th>
+            <th>Correo</th>
+            <th>Teléfono</th>
+            <th>Cargo</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="emp-tbody">
+          <tr><td colspan="6" class="empty-state">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination-row">
+      <span id="emp-page-info">—</span>
+      <div style="display:flex; gap:8px;">
+        <button type="button" class="btn btn-sm" id="emp-prev">← Anterior</button>
+        <button type="button" class="btn btn-sm" id="emp-next">Siguiente →</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<template id="tpl-modal-empleado">
+  <div class="field-grid">
+    <div class="field span-2" data-field="nombre"><label>Nombre <span class="req">*</span></label><input type="text" data-f="nombre"><div class="err">El nombre es obligatorio.</div></div>
+    <div class="field" data-field="cargo"><label>Cargo</label><input type="text" data-f="cargo"></div>
+    <div class="field" data-field="telefono"><label>Teléfono</label><input type="tel" inputmode="numeric" autocomplete="off" data-f="telefono"><div class="err">Solo se permiten números.</div></div>
+    <div class="field span-2" data-field="correo"><label>Correo</label><input type="email" data-f="correo"><div class="err">Ingresa un correo electrónico válido.</div></div>
+  </div>
+</template>

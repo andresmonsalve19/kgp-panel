@@ -1,0 +1,704 @@
+<script>
+/**
+ * Lógica de la vista "Crear cotización": bootstrap de datos, dropdowns
+ * dependientes con el modal reutilizable de "Agregar/Editar" (ver
+ * KGP.entityModal en JsCore.js.html), servicios y actividades dinámicos
+ * (máx 10 y 10), y el envío en dos fases (BD, luego documento) con
+ * idempotencia vía requestId.
+ *
+ * Regla de UX: crear/editar cliente, contacto o establecimiento NUNCA
+ * vuelve a pedir el sheet completo (api_getClienteDetalle) tras guardar —
+ * el nuevo/editado registro se inserta o actualiza directamente en los
+ * <select> ya en pantalla, así la selección queda hecha al instante y no
+ * "se resetea" a pedir que se vuelva a elegir.
+ *
+ * Tras crear con éxito, el formulario se reemplaza por una pantalla de
+ * resumen (#cz-resultado) con el código y 2 acciones: crear otra cotización
+ * o ir a "Gestionar cotización" (ver JsGestion.js.html) ya abierta en el
+ * detalle de la que se acaba de crear.
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  var data = {
+    bootstrapped: false,
+    requestId: null,
+    tiposServicio: [],
+    unspscMap: {},
+    clientes: [],
+    estados: ['En revisión', 'Aprobada', 'Rechazada'],
+    estadoInicial: 'En revisión',
+    clienteDetalle: null, // { cliente, contactos:[], establecimientos:[] } del cliente actualmente seleccionado
+    servicios: [] // [{localId, tipo, codigoUnspsc, descripcion, actividades:[]}], editados vía KGP.servicioModal
+  };
+
+  var lastCreatedId = null;
+  var servicioSeq = 0;
+  var eventsWired = false;
+
+  // ---------------- Entrada de la vista ----------------
+
+  KGP.cotizacion.onEnter = function () {
+    if (!data.bootstrapped) bootstrap();
+  };
+
+  function bootstrap() {
+    wireEvents();
+    setFormBusy(true);
+    data.requestId = KGP.uuid();
+    KGP.catalog.load().then(function (res) {
+      data.bootstrapped = true;
+      applyBootstrapData(res);
+    }).catch(function (err) {
+      KGP.toast('No se pudo cargar el formulario: ' + KGP.friendlyError(err), 'error', 7000);
+    }).finally(function () {
+      setFormBusy(false);
+      KGP.hideLoader();
+    });
+  }
+
+  function applyBootstrapData(res) {
+    data.tiposServicio = res.tiposServicio || [];
+    data.unspscMap = KGP.ui.buildUnspscMap(res.catalogoPares || []);
+    data.clientes = res.clientes || [];
+    data.estados = (res.estados && res.estados.length) ? res.estados : data.estados;
+    data.estadoInicial = (res.defaults && res.defaults.estado) || data.estadoInicial;
+
+    setEstadoField(data.estadoInicial);
+    populateClientes();
+    setDefaults(res.defaults);
+    renderWarnings(res.warnings || []);
+    document.getElementById('cz-codigo-preview').value = res.codigoTentativo || '—';
+  }
+
+  function setFormBusy(busy) {
+    var form = document.getElementById('cz-form');
+    if (form) form.style.opacity = busy ? '0.6' : '1';
+  }
+
+  function renderWarnings(warnings) {
+    var box = document.getElementById('cz-bootstrap-warnings');
+    if (!box) return;
+    if (!warnings.length) { box.innerHTML = ''; return; }
+    box.innerHTML = warnings.map(function (w) {
+      return '<div class="warn-banner">⚠ ' + KGP.escapeHtml(w) + '</div>';
+    }).join('');
+  }
+
+  function setDefaults(defaults) {
+    var fecha = document.getElementById('cz-fecha');
+    var plazo = document.getElementById('cz-plazo');
+    // La fecha de elaboración es siempre "hoy" y no es editable por el usuario.
+    if (defaults && defaults.fechaElaboracion) fecha.value = defaults.fechaElaboracion;
+    if (defaults && defaults.plazo && !plazo.value) plazo.value = defaults.plazo;
+    recomputeVencimiento();
+  }
+
+  function setEstadoField(estado) {
+    var el = document.getElementById('cz-estado');
+    if (el) el.value = estado;
+  }
+
+  function populateClientes() {
+    var sel = document.getElementById('cz-cliente-select');
+    var prev = sel.value;
+    KGP.ui.rebuildSelect(sel, data.clientes, function (c) { return c.idCliente; }, KGP.ui.clientLabel, '— Selecciona —');
+    if (prev && sel.querySelector('option[value="' + prev + '"]')) sel.value = prev;
+  }
+
+  // ---------------- Dropdowns dependientes (contactos / establecimientos) ----------------
+
+  function currentClienteId() { return document.getElementById('cz-cliente-select').value; }
+
+  function handleClienteChange() {
+    var val = currentClienteId();
+    setDependentButtonsEnabled(!!val);
+
+    if (!val) {
+      data.clienteDetalle = null;
+      resetDependents('— Primero selecciona un cliente —');
+      return;
+    }
+    // "Editar cliente" no debe esperar a que carguen sus contactos/
+    // establecimientos (cargarDependientesDeCliente, más pesado): se trae
+    // el cliente aparte, en paralelo, y en cuanto llega ya se puede editar.
+    cargarClienteBasico(val);
+    cargarDependientesDeCliente(val);
+  }
+
+  function cargarClienteBasico(idCliente) {
+    return KGP.apiCall('api_getCliente', [idCliente]).then(function (cliente) {
+      if (data.clienteDetalle) {
+        data.clienteDetalle.cliente = cliente;
+      } else {
+        data.clienteDetalle = { cliente: cliente, contactos: [], establecimientos: [] };
+      }
+    }).catch(function () { /* "Editar cliente" sigue deshabilitado hasta que cargarDependientesDeCliente traiga el detalle completo */ });
+  }
+
+  /** Solo se usa al CAMBIAR de cliente (o cargarlo por primera vez): trae contactos/establecimientos del servidor. */
+  function cargarDependientesDeCliente(idCliente) {
+    var solSel = document.getElementById('cz-solicitante-select');
+    var estSel = document.getElementById('cz-establecimiento-select');
+    var encSel = document.getElementById('cz-encargado-select');
+
+    solSel.disabled = true; estSel.disabled = true; encSel.disabled = true;
+    solSel.innerHTML = '<option value="">Cargando…</option>';
+    estSel.innerHTML = '<option value="">Cargando…</option>';
+
+    return KGP.apiCall('api_getClienteDetalle', [idCliente]).then(function (detalle) {
+      data.clienteDetalle = detalle;
+      populateDependientesFromDetalle(detalle);
+    }).catch(function (err) {
+      KGP.toast('No se pudo cargar el cliente: ' + KGP.friendlyError(err), 'error');
+      resetDependents('— Error al cargar, intenta de nuevo —');
+      throw err;
+    });
+  }
+
+  function populateDependientesFromDetalle(detalle) {
+    var solSel = document.getElementById('cz-solicitante-select');
+    var estSel = document.getElementById('cz-establecimiento-select');
+
+    KGP.ui.rebuildSelect(solSel, detalle.contactos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+      detalle.contactos.length ? '— Selecciona —' : '— Sin contactos registrados —');
+    solSel.disabled = false;
+
+    KGP.ui.rebuildSelect(estSel, detalle.establecimientos, function (e) { return e.idEstablecimiento; }, KGP.ui.establecimientoLabel,
+      detalle.establecimientos.length ? '— Selecciona —' : '— Sin establecimientos registrados —');
+    estSel.disabled = false;
+
+    refreshEncargadoOptions();
+
+    syncEditButtons();
+  }
+
+  function resetDependents(placeholder) {
+    ['cz-solicitante-select', 'cz-establecimiento-select', 'cz-encargado-select'].forEach(function (id) {
+      var sel = document.getElementById(id);
+      sel.innerHTML = '<option value="">' + KGP.escapeHtml(placeholder) + '</option>';
+      sel.disabled = true;
+    });
+    syncEditButtons();
+  }
+
+  function setDependentButtonsEnabled(enabled) {
+    ['cz-solicitante-nuevo-btn', 'cz-establecimiento-nuevo-btn', 'cz-encargado-nuevo-btn'].forEach(function (id) {
+      var btn = document.getElementById(id);
+      if (btn) btn.disabled = !enabled;
+    });
+  }
+
+  var EDIT_BTN_PAIRS = [
+    ['cz-cliente-select', 'cz-cliente-editar-btn'],
+    ['cz-solicitante-select', 'cz-solicitante-editar-btn'],
+    ['cz-establecimiento-select', 'cz-establecimiento-editar-btn'],
+    ['cz-encargado-select', 'cz-encargado-editar-btn']
+  ];
+
+  function syncEditButtons() {
+    EDIT_BTN_PAIRS.forEach(function (pair) {
+      var sel = document.getElementById(pair[0]);
+      var btn = document.getElementById(pair[1]);
+      if (sel && btn) btn.disabled = !sel.value;
+    });
+  }
+
+  /**
+   * Al elegir un establecimiento, el <select> de encargado se limita a los
+   * contactos del cliente que tienen ESE establecimiento asignado
+   * (CONTACTOS_CLIENTES.ID ESTABLECIMIENTO) — ya no se listan todos los
+   * contactos del cliente. Si hay un solo candidato, se autoselecciona.
+   */
+  function refreshEncargadoOptions() {
+    var idEstablecimiento = document.getElementById('cz-establecimiento-select').value;
+    var encSel = document.getElementById('cz-encargado-select');
+    if (!idEstablecimiento || !data.clienteDetalle) {
+      encSel.innerHTML = '<option value="">— Selecciona un establecimiento primero —</option>';
+      encSel.disabled = true;
+      syncEditButtons();
+      return;
+    }
+    var candidatos = data.clienteDetalle.contactos.filter(function (c) { return c.idEstablecimiento === idEstablecimiento; });
+    KGP.ui.rebuildSelect(encSel, candidatos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+      candidatos.length ? '— Selecciona —' : '— Sin contactos asignados a este establecimiento —');
+    encSel.disabled = false;
+    if (candidatos.length === 1) encSel.value = candidatos[0].idContacto;
+    syncEditButtons();
+  }
+
+  function findContacto(idContacto) {
+    if (!data.clienteDetalle) return null;
+    return data.clienteDetalle.contactos.filter(function (c) { return c.idContacto === idContacto; })[0] || null;
+  }
+  function findEstablecimiento(idEstablecimiento) {
+    if (!data.clienteDetalle) return null;
+    return data.clienteDetalle.establecimientos.filter(function (e) { return e.idEstablecimiento === idEstablecimiento; })[0] || null;
+  }
+
+  // ---------------- Modal genérico (KGP.entityModal): Cliente / Contacto / Establecimiento ----------------
+
+  function crearClienteModal(datos) {
+    return KGP.apiCall('api_createCliente', [datos]).then(function (creado) {
+      KGP.toast('Cliente "' + creado.razonSocial + '" guardado.', 'success');
+
+      data.clientes.push({ idCliente: creado.idCliente, razonSocial: creado.razonSocial, numeroIdentificacion: creado.numeroIdentificacion });
+      KGP.ui.addOptionAndSelect(document.getElementById('cz-cliente-select'), creado.idCliente, KGP.ui.clientLabel(creado));
+
+      data.clienteDetalle = { cliente: Object.assign({ idCliente: creado.idCliente, activo: 1 }, datos), contactos: [], establecimientos: [] };
+      populateDependientesFromDetalle(data.clienteDetalle);
+      setDependentButtonsEnabled(true);
+      syncEditButtons();
+    }).catch(function (err) {
+      if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+        KGP.toast('Ya existe un cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+      } else {
+        KGP.toast('No se pudo guardar el cliente: ' + KGP.friendlyError(err), 'error');
+      }
+      throw err;
+    });
+  }
+
+  function editarClienteModal(idCliente, datos) {
+    return KGP.apiCall('api_updateCliente', [idCliente, datos]).then(function () {
+      KGP.toast('Cliente actualizado.', 'success');
+
+      if (data.clienteDetalle && data.clienteDetalle.cliente && data.clienteDetalle.cliente.idCliente === idCliente) {
+        data.clienteDetalle.cliente = Object.assign({}, data.clienteDetalle.cliente, datos);
+      }
+      var entry = data.clientes.filter(function (c) { return c.idCliente === idCliente; })[0];
+      if (entry) { entry.razonSocial = datos.razonSocial; entry.numeroIdentificacion = datos.numeroIdentificacion; }
+
+      KGP.ui.updateOptionLabel(document.getElementById('cz-cliente-select'), idCliente, KGP.ui.clientLabel(datos));
+    }).catch(function (err) {
+      if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+        KGP.toast('Ya existe otro cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+      } else {
+        KGP.toast('No se pudo actualizar el cliente: ' + KGP.friendlyError(err), 'error');
+      }
+      throw err;
+    });
+  }
+
+  function crearContactoModal(target, datos) {
+    var idCliente = currentClienteId();
+    if (!idCliente) { KGP.toast('Primero selecciona o crea un cliente.', 'error'); return Promise.reject({ code: 'VALIDATION' }); }
+
+    // Un contacto creado como encargado queda asociado de una vez al
+    // establecimiento actualmente seleccionado (columna ID ESTABLECIMIENTO
+    // en CONTACTOS_CLIENTES), para que refreshEncargadoOptions lo proponga
+    // solo la próxima vez que se elija ese mismo establecimiento.
+    if (target === 'encargado') {
+      datos = Object.assign({}, datos, { idEstablecimiento: document.getElementById('cz-establecimiento-select').value });
+    }
+
+    return KGP.apiCall('api_createContacto', [idCliente, datos]).then(function (creado) {
+      KGP.toast('Contacto "' + creado.nombre + '" guardado.', 'success');
+      var full = Object.assign({ idContacto: creado.idContacto, idCliente: idCliente }, datos);
+      if (data.clienteDetalle) data.clienteDetalle.contactos.push(full);
+
+      // El solicitante siempre lista todos los contactos del cliente.
+      KGP.ui.addOption(document.getElementById('cz-solicitante-select'), full.idContacto, KGP.ui.contactoLabel(full));
+
+      if (target === 'encargado') {
+        // Ya quedó asociado al establecimiento seleccionado: refresca la
+        // lista filtrada de encargado y selecciónalo.
+        refreshEncargadoOptions();
+        document.getElementById('cz-encargado-select').value = full.idContacto;
+      } else {
+        document.getElementById('cz-solicitante-select').value = full.idContacto;
+      }
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el contacto: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function editarContactoModal(idContacto, datos) {
+    return KGP.apiCall('api_updateContacto', [idContacto, datos]).then(function () {
+      KGP.toast('Contacto actualizado.', 'success');
+      var full = Object.assign({ idContacto: idContacto }, datos);
+      if (data.clienteDetalle) {
+        data.clienteDetalle.contactos = data.clienteDetalle.contactos.map(function (c) {
+          return c.idContacto === idContacto ? Object.assign({}, c, full) : c;
+        });
+      }
+      ['cz-solicitante-select', 'cz-encargado-select'].forEach(function (id) {
+        KGP.ui.updateOptionLabel(document.getElementById(id), idContacto, KGP.ui.contactoLabel(full));
+      });
+    }).catch(function (err) {
+      KGP.toast('No se pudo actualizar el contacto: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function crearEstablecimientoModal(datos) {
+    var idCliente = currentClienteId();
+    if (!idCliente) { KGP.toast('Primero selecciona o crea un cliente.', 'error'); return Promise.reject({ code: 'VALIDATION' }); }
+    var idContacto = document.getElementById('cz-encargado-select').value;
+
+    return KGP.apiCall('api_createEstablecimiento', [idCliente, datos, idContacto]).then(function (creado) {
+      KGP.toast('Establecimiento "' + creado.nombre + '" guardado.', 'success');
+      var full = Object.assign({ idEstablecimiento: creado.idEstablecimiento, idCliente: idCliente }, datos);
+      if (data.clienteDetalle) {
+        data.clienteDetalle.establecimientos.push(full);
+        // El servidor asoció el encargado del lado del contacto
+        // (con_setEstablecimiento_): refleja lo mismo localmente para que
+        // refreshEncargadoOptions lo filtre bien sin recargar el cliente.
+        if (idContacto) {
+          data.clienteDetalle.contactos = data.clienteDetalle.contactos.map(function (c) {
+            return c.idContacto === idContacto ? Object.assign({}, c, { idEstablecimiento: full.idEstablecimiento }) : c;
+          });
+        }
+      }
+      KGP.ui.addOptionAndSelect(document.getElementById('cz-establecimiento-select'), full.idEstablecimiento, KGP.ui.establecimientoLabel(full));
+      refreshEncargadoOptions();
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el establecimiento: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function editarEstablecimientoModal(idEstablecimiento, datos) {
+    return KGP.apiCall('api_updateEstablecimiento', [idEstablecimiento, datos]).then(function () {
+      KGP.toast('Establecimiento actualizado.', 'success');
+      if (data.clienteDetalle) {
+        data.clienteDetalle.establecimientos = data.clienteDetalle.establecimientos.map(function (e) {
+          return e.idEstablecimiento === idEstablecimiento ? Object.assign({}, e, datos) : e;
+        });
+      }
+      KGP.ui.updateOptionLabel(document.getElementById('cz-establecimiento-select'), idEstablecimiento, KGP.ui.establecimientoLabel(datos));
+    }).catch(function (err) {
+      KGP.toast('No se pudo actualizar el establecimiento: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  // ---------------- Servicios: popup de agregar/editar (KGP.servicioModal) ----------------
+
+  /**
+   * data.servicios guarda el detalle completo de cada servicio en memoria
+   * ({localId, tipo, codigoUnspsc, descripcion, actividades[]}) — el
+   * popup (KGP.servicioModal) es el único lugar donde se editan esos campos;
+   * la lista en pantalla solo muestra un renglón resumen por servicio.
+   * Nada de esto llega al servidor hasta enviar el formulario completo
+   * (handleSubmit -> collectServicios).
+   */
+  function openServicioModal(servicio) {
+    KGP.servicioModal.open({
+      tiposServicio: data.tiposServicio,
+      unspscMap: data.unspscMap,
+      initial: servicio || null,
+      onSave: function (servicioData) {
+        if (servicio) {
+          Object.assign(servicio, servicioData);
+        } else {
+          data.servicios.push(Object.assign({ localId: 'srv' + (++servicioSeq) }, servicioData));
+        }
+        renderServiciosList();
+      }
+    });
+  }
+
+  function addServicioBlock() {
+    if (data.servicios.length >= 10) {
+      KGP.toast('Ya alcanzaste el máximo de 10 servicios.', 'warning');
+      return;
+    }
+    openServicioModal(null);
+  }
+
+  function removeServicioBlock(localId) {
+    data.servicios = data.servicios.filter(function (s) { return s.localId !== localId; });
+    renderServiciosList();
+  }
+
+  function servicioSummary(s) {
+    var numActividades = (s.actividades || []).length;
+    return (s.tipo || 'Sin tipo elegido') + ' — ' + numActividades + ' actividad' + (numActividades === 1 ? '' : 'es');
+  }
+
+  function renderServiciosList() {
+    var list = document.getElementById('cz-servicios-list');
+    list.innerHTML = '';
+    data.servicios.forEach(function (s, idx) {
+      var tpl = document.getElementById('tpl-servicio');
+      var frag = tpl.content.cloneNode(true);
+      var row = frag.querySelector('[data-servicio]');
+      row.dataset.localId = s.localId;
+      row.querySelector('[data-numero]').textContent = String(idx + 1);
+      row.querySelector('[data-servicio-summary]').textContent = servicioSummary(s);
+      row.querySelector('[data-edit-servicio]').addEventListener('click', function () { openServicioModal(s); });
+      row.querySelector('[data-remove-servicio]').addEventListener('click', function () { removeServicioBlock(s.localId); });
+      list.appendChild(frag);
+    });
+    document.getElementById('cz-servicios-count').textContent = '(' + data.servicios.length + '/10)';
+    document.getElementById('cz-add-servicio').disabled = data.servicios.length >= 10;
+  }
+
+  function collectServicios() {
+    return data.servicios.map(function (s, idx) {
+      return {
+        numero: idx + 1,
+        tipo: s.tipo,
+        codigoUnspsc: s.codigoUnspsc,
+        descripcion: s.descripcion,
+        actividades: (s.actividades || []).slice()
+      };
+    });
+  }
+
+  // ---------------- Fecha de vencimiento (solo visual) ----------------
+
+  function recomputeVencimiento() {
+    var fecha = document.getElementById('cz-fecha').value;
+    var plazo = Number(document.getElementById('cz-plazo').value);
+    var out = document.getElementById('cz-fecha-venc');
+    if (!fecha || !plazo || plazo < 1) { out.value = '—'; return; }
+    var d = new Date(fecha + 'T12:00:00');
+    d.setDate(d.getDate() + Math.trunc(plazo));
+    var iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    out.value = iso;
+  }
+
+  // ---------------- Validación visual (formulario principal) ----------------
+
+  function fieldEl(key) { return document.querySelector('#cz-form .field[data-field="' + key + '"]'); }
+  function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+  function clearInvalid() { document.querySelectorAll('#cz-form .field.invalid').forEach(function (f) { f.classList.remove('invalid'); }); }
+
+  // ---------------- Envío (2 fases) ----------------
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    clearInvalid();
+
+    var fecha = document.getElementById('cz-fecha').value;
+    var plazo = Number(document.getElementById('cz-plazo').value);
+    var descripcion = document.getElementById('cz-descripcion').value;
+    var estado = document.getElementById('cz-estado').value;
+
+    var clienteSel = currentClienteId();
+    var solicitanteSel = document.getElementById('cz-solicitante-select').value;
+    var establecimientoSel = document.getElementById('cz-establecimiento-select').value;
+
+    var hasError = false;
+    if (!fecha) { markInvalid('fechaElaboracion'); hasError = true; }
+    if (!plazo || plazo < 1) { markInvalid('plazo'); hasError = true; }
+    if (!descripcion.trim()) { markInvalid('descripcion'); hasError = true; }
+    if (!clienteSel) { markInvalid('cliente'); hasError = true; }
+    if (!solicitanteSel) { markInvalid('solicitante'); hasError = true; }
+    if (!establecimientoSel) { markInvalid('establecimiento'); hasError = true; }
+
+    var servicios = collectServicios();
+    if (!servicios.length) { KGP.toast('Agrega al menos 1 servicio.', 'error'); hasError = true; }
+
+    if (hasError) {
+      KGP.toast('Revisa los campos marcados en rojo.', 'error');
+      return;
+    }
+
+    // Cliente, solicitante y establecimiento siempre se guardan de inmediato
+    // desde el modal "Agregar/Editar" (botón Guardar), así que al enviar la
+    // cotización siempre son registros "existente" ya persistidos.
+    var payload = {
+      requestId: data.requestId,
+      fechaElaboracion: fecha,
+      plazo: plazo,
+      descripcion: descripcion,
+      estado: estado,
+      cliente: { modo: 'existente', idCliente: clienteSel },
+      solicitante: { modo: 'existente', idContacto: solicitanteSel },
+      establecimiento: { modo: 'existente', idEstablecimiento: establecimientoSel },
+      servicios: servicios
+    };
+
+    runCreateFlow(payload);
+  }
+
+  function runCreateFlow(payload) {
+    setSubmitBusy(true);
+
+    KGP.apiCall('api_createQuotation', [payload]).then(function (created) {
+      (created.warnings || []).forEach(function (w) { KGP.toast(w, 'warning', 6000); });
+
+      if (!created.numServicios && created.numServicios !== 0) {
+        // resultado de idempotencia (reenvío detectado): no relanzar generación de documento automáticamente.
+        KGP.toast('Esta cotización ya existía (' + created.codigo + ').', 'warning', 6000);
+        showResultScreen(created);
+        return;
+      }
+
+      KGP.toast('Cotización ' + created.codigo + ' guardada.', 'success');
+      showResultScreen(created);
+      showDocStatus('Generando documento…', 'busy');
+      generateDoc(created.idCotizacion, payload.requestId);
+    }).catch(function (err) {
+      handleCreateError(err);
+    }).finally(function () {
+      setSubmitBusy(false);
+    });
+  }
+
+  function generateDoc(idCotizacion, requestId) {
+    KGP.apiCall('api_generateDocument', [idCotizacion, requestId]).then(function (doc) {
+      showDocStatus('Documento generado.', 'success', doc.docUrl);
+      KGP.toast('Documento generado correctamente.', 'success');
+    }).catch(function (docErr) {
+      showDocStatus('La cotización se guardó, pero el documento falló: ' + KGP.friendlyError(docErr), 'error', null, function () {
+        showDocStatus('Reintentando generación del documento…', 'busy');
+        generateDoc(idCotizacion, requestId);
+      });
+    });
+  }
+
+  function handleCreateError(err) {
+    if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+      KGP.toast('Ya existe un cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+    } else if (err.code === 'VALIDATION' && Array.isArray(err.details) && err.details.length) {
+      KGP.toast(err.details.slice(0, 3).join(' · '), 'error', 8000);
+    } else {
+      KGP.toast('No se pudo guardar la cotización: ' + KGP.friendlyError(err), 'error', 6000);
+    }
+  }
+
+  function setSubmitBusy(busy) {
+    document.getElementById('cz-submit').disabled = busy;
+    document.getElementById('cz-submit-spinner').hidden = !busy;
+    document.getElementById('cz-submit-label').textContent = busy ? 'Creando cotización…' : 'Crear cotización';
+  }
+
+  // ---------------- Pantalla de resumen tras crear ----------------
+
+  function showResultScreen(created) {
+    lastCreatedId = created.idCotizacion;
+    document.getElementById('cz-form-wrap').hidden = true;
+    document.getElementById('cz-resultado').hidden = false;
+    document.getElementById('cz-resultado-codigo').textContent = created.codigo;
+
+    var clienteNombre = (data.clienteDetalle && data.clienteDetalle.cliente) ? data.clienteDetalle.cliente.razonSocial : '';
+    var estSel = document.getElementById('cz-establecimiento-select');
+    var estNombre = (estSel.selectedIndex >= 0 && estSel.options[estSel.selectedIndex]) ? estSel.options[estSel.selectedIndex].textContent : '';
+    document.getElementById('cz-resultado-detalle').textContent = [clienteNombre, estNombre].filter(Boolean).join(' — ');
+
+    document.getElementById('cz-resultado-doc').innerHTML = '';
+  }
+
+  function showDocStatus(text, kind, url, retryFn) {
+    var el = document.getElementById('cz-resultado-doc');
+    var html = '<div class="progress-note">';
+    if (kind === 'busy') html += '<span class="spinner dark"></span>';
+    html += '<span>' + KGP.escapeHtml(text) + '</span></div>';
+    el.innerHTML = html;
+
+    if (url) {
+      var link = document.createElement('div');
+      link.style.marginTop = '10px';
+      link.innerHTML = '<a class="link" href="' + url + '" target="_blank" rel="noopener">Abrir documento generado ↗</a>';
+      el.appendChild(link);
+    }
+    if (retryFn) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm';
+      btn.style.marginTop = '10px';
+      btn.textContent = 'Reintentar';
+      btn.addEventListener('click', retryFn);
+      el.appendChild(btn);
+    }
+  }
+
+  function resetForm() {
+    document.getElementById('cz-form').reset();
+    data.servicios = [];
+    renderServiciosList();
+    data.clienteDetalle = null;
+    data.requestId = KGP.uuid();
+    document.getElementById('cz-cliente-select').value = '';
+    resetDependents('— Primero selecciona un cliente —');
+    setDependentButtonsEnabled(false);
+    populateClientes();
+    syncEditButtons();
+    setEstadoField(data.estadoInicial);
+    setDefaults({ fechaElaboracion: new Date().toISOString().slice(0, 10), plazo: 15 });
+
+    // Un solo round-trip: refresca clientes, catálogo y el código tentativo
+    // por si se agregó algo nuevo durante este envío.
+    document.getElementById('cz-codigo-preview').value = '—';
+    KGP.catalog.load(true).then(function (res) {
+      applyBootstrapData(res);
+    }).catch(function () { /* no crítico */ });
+  }
+
+  // ---------------- Wiring ----------------
+
+  function wireEvents() {
+    if (eventsWired) return;
+    eventsWired = true;
+
+    document.getElementById('cz-fecha').addEventListener('change', recomputeVencimiento);
+    document.getElementById('cz-plazo').addEventListener('input', recomputeVencimiento);
+
+    document.getElementById('cz-cliente-select').addEventListener('change', function () { handleClienteChange(); syncEditButtons(); });
+    document.getElementById('cz-solicitante-select').addEventListener('change', syncEditButtons);
+    document.getElementById('cz-establecimiento-select').addEventListener('change', refreshEncargadoOptions);
+    document.getElementById('cz-encargado-select').addEventListener('change', syncEditButtons);
+
+    document.getElementById('cz-cliente-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'cliente', mode: 'create', onSave: crearClienteModal });
+    });
+    document.getElementById('cz-cliente-editar-btn').addEventListener('click', function () {
+      if (!data.clienteDetalle || !data.clienteDetalle.cliente) return;
+      var id = currentClienteId();
+      KGP.entityModal.open({ type: 'cliente', mode: 'edit', editId: id, initial: data.clienteDetalle.cliente, onSave: function (datos) { return editarClienteModal(id, datos); } });
+    });
+
+    document.getElementById('cz-solicitante-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'contacto', mode: 'create', target: 'solicitante', onSave: function (datos) { return crearContactoModal('solicitante', datos); } });
+    });
+    document.getElementById('cz-solicitante-editar-btn').addEventListener('click', function () {
+      var id = document.getElementById('cz-solicitante-select').value;
+      var c = findContacto(id);
+      if (!c) return;
+      KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'solicitante', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+
+    document.getElementById('cz-encargado-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'contacto', mode: 'create', target: 'encargado', onSave: function (datos) { return crearContactoModal('encargado', datos); } });
+    });
+    document.getElementById('cz-encargado-editar-btn').addEventListener('click', function () {
+      var id = document.getElementById('cz-encargado-select').value;
+      var c = findContacto(id);
+      if (!c) return;
+      KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'encargado', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+
+    document.getElementById('cz-establecimiento-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'establecimiento', mode: 'create', onSave: crearEstablecimientoModal });
+    });
+    document.getElementById('cz-establecimiento-editar-btn').addEventListener('click', function () {
+      var id = document.getElementById('cz-establecimiento-select').value;
+      var est = findEstablecimiento(id);
+      if (!est) return;
+      KGP.entityModal.open({ type: 'establecimiento', mode: 'edit', editId: id, initial: est, onSave: function (datos) { return editarEstablecimientoModal(id, datos); } });
+    });
+
+    document.getElementById('cz-add-servicio').addEventListener('click', addServicioBlock);
+    document.getElementById('cz-form').addEventListener('submit', handleSubmit);
+
+    document.getElementById('cz-resultado-nueva').addEventListener('click', function () {
+      document.getElementById('cz-resultado').hidden = true;
+      document.getElementById('cz-form-wrap').hidden = false;
+      resetForm();
+    });
+    document.getElementById('cz-resultado-gestionar').addEventListener('click', function () {
+      if (lastCreatedId) KGP.gestion.openDetail(lastCreatedId);
+    });
+  }
+
+}(window.KGP));
+</script>

@@ -1,0 +1,161 @@
+<!-- Dashboard de cotizaciones.
+
+     Todo lo dinámico se inyecta desde JsDashboard.js.html sobre los
+     contenedores con id de este archivo: la vista descarga UN snapshot
+     completo por versión de datos y deriva KPIs, gráficas, filtros, orden y
+     paginación en el cliente (ningún filtro ni cambio de página cuesta un
+     round-trip). Ver ds_getSnapshot_ en 32_DashboardService.js. -->
+<section class="view" id="view-dashboard">
+  <div class="page-header">
+    <div>
+      <h1>Dashboard de cotizaciones</h1>
+      <div class="desc" id="dash-summary">Seguimiento en tiempo real.</div>
+    </div>
+    <div class="dash-header-actions">
+      <span class="dash-updated" id="dash-updated"></span>
+      <button type="button" class="btn btn-sm" id="dash-refresh">
+        <span id="dash-refresh-spinner" style="display:none;" class="spinner dark"></span>
+        Actualizar
+      </button>
+    </div>
+  </div>
+
+  <!-- Bloquea todo el dashboard (KPIs, gráficas, tabla) hasta que llega el
+       primer snapshot de la sesión — mismo patrón que el detalle de
+       "Gestionar cotización" (ge-detail-loading/ge-detail-content en
+       ViewGestion.html): nunca se ve un tablero a medio pintar (KPIs en
+       cero, gráficas vacías) mientras se espera la respuesta. Si ya hay un
+       snapshot en KGP.localCache (stale-while-revalidate, CLAUDE.md §2.2),
+       JsDashboard.js.html nunca llega a mostrar este loader — pinta directo
+       con el dato cacheado y refresca en segundo plano. Solo aparece en el
+       primer ingreso real (sin caché) de la sesión. -->
+  <div id="dash-loading" class="detail-loading">
+    <span class="spinner-lg"></span>
+    <div class="page-loader-text" id="dash-loading-text">Cargando dashboard…</div>
+  </div>
+
+  <div id="dash-content" hidden>
+
+  <!-- Aviso de snapshot recortado (LIMITS.DASHBOARD_MAX_COTIZACIONES). -->
+  <div class="warn-banner" id="dash-banner" hidden></div>
+
+  <!-- KPIs: cada tarjeta es además un filtro rápido (ver Vistas en JsDashboard). -->
+  <div class="kpi-grid dash-kpis" id="dash-kpis"></div>
+
+  <div class="dash-charts">
+    <div class="card chart-card">
+      <div class="section-title-row">
+        <div class="section-title">Distribución por estado</div>
+        <span class="chart-meta" id="dash-donut-meta"></span>
+      </div>
+      <div class="donut-wrap">
+        <div class="donut" id="dash-donut">
+          <div class="donut-hole">
+            <span class="donut-value" id="dash-donut-total">0</span>
+            <span class="donut-caption">cotiz.</span>
+          </div>
+        </div>
+        <ul class="chart-legend" id="dash-donut-legend"></ul>
+      </div>
+    </div>
+
+    <div class="card chart-card">
+      <div class="section-title-row">
+        <div class="section-title">Cotizaciones creadas</div>
+        <span class="chart-meta" id="dash-bars-meta"></span>
+      </div>
+      <div class="bars-chart" id="dash-bars"></div>
+      <ul class="chart-legend chart-legend-inline">
+        <li><span class="legend-dot legend-dot-decidida"></span>Aprobadas / rechazadas</li>
+        <li><span class="legend-dot legend-dot-revision"></span>En revisión</li>
+      </ul>
+    </div>
+
+    <div class="card chart-card">
+      <div class="section-title-row">
+        <div class="section-title">Ventana de vigencia</div>
+        <span class="chart-meta">días a vencimiento</span>
+      </div>
+      <div class="hbar-list" id="dash-vigencia"></div>
+    </div>
+
+    <div class="card chart-card">
+      <div class="section-title-row">
+        <div class="section-title">Servicios por tipo</div>
+        <span class="chart-meta" id="dash-tipos-meta"></span>
+      </div>
+      <div class="hbar-list hbar-list-labeled" id="dash-tipos"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="filters-row">
+      <input type="text" class="search-input" id="dash-search" placeholder="Buscar por código, cliente o contacto…">
+      <select id="dash-filter-anio" title="Año de elaboración">
+        <option value="">Todos los años</option>
+      </select>
+      <select id="dash-filter-cliente" title="Cliente">
+        <option value="">Todos los clientes</option>
+      </select>
+      <select id="dash-filter-estado" title="Estado">
+        <option value="">Todos los estados</option>
+      </select>
+      <select id="dash-sort-by" title="Ordenar por">
+        <option value="codigo">Ordenar por código</option>
+        <option value="cliente">Ordenar por cliente</option>
+        <option value="fechaElaboracion">Ordenar por elaboración</option>
+        <option value="fechaVencimiento">Ordenar por vencimiento</option>
+        <option value="diasRestantes">Ordenar por días restantes</option>
+        <option value="numServicios">Ordenar por servicios</option>
+        <option value="estado">Ordenar por estado</option>
+        <option value="total">Ordenar por total</option>
+      </select>
+      <button type="button" class="btn btn-sm" id="dash-sort-dir" title="Cambiar orden ascendente/descendente">↑ Ascendente</button>
+      <select id="dash-page-size" title="Resultados por página">
+        <option value="20">20 / página</option>
+        <option value="50">50 / página</option>
+        <option value="100">100 / página</option>
+      </select>
+      <button type="button" class="btn btn-sm btn-ghost" id="dash-reset">Limpiar</button>
+    </div>
+
+    <!-- Chips de filtros activos: cada uno se quita con un clic. -->
+    <div class="filter-chips" id="dash-chips" hidden></div>
+
+    <div class="table-wrap">
+      <table class="data-table data-table-expandable">
+        <thead>
+          <tr>
+            <th>Código</th>
+            <th>Cliente</th>
+            <th>Elaboración</th>
+            <th>Vencimiento</th>
+            <th>Días</th>
+            <th>Servicios</th>
+            <th>Estado</th>
+            <th class="col-num">Total</th>
+            <th>Documento</th>
+            <th class="col-expand"><span class="sr-only">Detalle</span></th>
+          </tr>
+        </thead>
+        <tbody id="dash-tbody">
+          <tr><td colspan="10" class="empty-state">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination-row">
+      <span id="dash-page-info">—</span>
+      <div style="display:flex; gap:8px;">
+        <button type="button" class="btn btn-sm" id="dash-prev">← Anterior</button>
+        <button type="button" class="btn btn-sm" id="dash-next">Siguiente →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Calidad de datos: se calcula sobre el mismo universo que los KPIs
+       (el año filtrado). Cada tarjeta es un atajo al subconjunto afectado. -->
+  <div class="calidad-grid" id="dash-calidad"></div>
+
+  </div>
+</section>

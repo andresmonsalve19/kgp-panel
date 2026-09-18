@@ -1,0 +1,1112 @@
+<script>
+/**
+ * Lógica de la vista "Gestionar OIS". Calca "Gestionar cotización"
+ * (JsGestion.js.html): listado con KGP.localCache (stale-while-revalidate,
+ * CLAUDE.md §2.2) y un detalle que siempre se trae fresco y bloquea la vista
+ * hasta terminar de cargar (§3).
+ *
+ * Los datos compartidos (cliente/solicitante/establecimiento/encargado y
+ * servicios) son los de la COTIZACIÓN padre: se editan con los mismos
+ * modales compartidos (KGP.entityModal, KGP.servicioModal SIN tarifas) y al
+ * guardar se reescriben en la cotización (api_updateOis decide si hubo
+ * cambios compartidos y devuelve cotizacionCambio). Lo propio de la OIS es
+ * el plazo y las tareas (popup #tarea-modal-overlay, solo en memoria hasta
+ * "Guardar cambios").
+ *
+ * "Guardar cambios" = 2 fases, como en la cotización: api_updateOis (BD) y
+ * después los documentos, fuera del lock: el de la cotización SOLO si
+ * cotizacionCambio, el de la OIS siempre.
+ *
+ * El ESTADO de la OIS nunca se edita a mano: lo deriva el servidor (tareas +
+ * fecha de vencimiento). Una OIS Finalizada queda de solo lectura.
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  var ESTADO_EN_CURSO = 'En curso';      // = CFG().OIS_ESTADO_INICIAL / TAREA_ESTADO_INICIAL
+  var ESTADO_FINALIZADA = 'Finalizada';  // = CFG().OIS_ESTADO_FINALIZADA / TAREA_ESTADO_FINALIZADA
+  var ESTADO_VENCIDA = 'Vencida';        // = CFG().OIS_ESTADO_VENCIDA
+  var MAX_TAREAS = 20;                   // = CFG().LIMITS.MAX_TAREAS
+  var MAX_SERVICIOS = 10;                // = CFG().LIMITS.MAX_SERVICIOS
+
+  var listState = {
+    page: 1,
+    pageSize: 20,
+    total: 0,
+    filters: { anio: '', estado: '', q: '' },
+    sortBy: 'codigo',
+    sortDir: 'asc',
+    loaded: false,
+    everLoaded: false
+  };
+
+  var detail = {
+    idOis: null,
+    ois: null,              // DTO de la OIS tal como vino del servidor (estado derivado incluido)
+    idCotizacion: null,
+    codigoCotizacion: '',
+    clienteDetalle: null,   // {cliente, contactos:[], establecimientos:[]}
+    servicios: [],          // [{localId, idServicio|null, tipo, codigoUnspsc, descripcion, actividades[]}]
+    tareas: [],             // [{localId, idTarea|null, tarea, idEmpleado, responsable, fechaInicio, fechaEntrega, estado, observacion}]
+    tiposServicio: [],
+    unspscMap: {},
+    empleados: [],
+    // true si en esta edición se creó/editó un cliente, contacto o
+    // establecimiento desde un modal: esos cambios ya se guardaron, pero el
+    // documento de la cotización también los muestra, así que hay que
+    // regenerarlo aunque no hayan cambiado las FKs.
+    entidadesEditadas: false
+  };
+
+  var pendingOpenId = null;
+  var servicioSeq = 0;
+  var tareaSeq = 0;
+  var eventsWired = false;
+  var yearsPopulated = false;
+  var detailLoadToken = 0; // mismo propósito que en JsGestion.js.html: descartar respuestas tardías
+  var DETAIL_CALL_OPTS = { timeoutMs: 25000 };
+
+  function $(id) { return document.getElementById(id); }
+
+  // ---------------- Entrada de la vista ----------------
+
+  KGP.ois.onEnter = function () {
+    wireEvents();
+    if (!yearsPopulated) { populateYearsFilter(); yearsPopulated = true; }
+
+    if (pendingOpenId) {
+      var id = pendingOpenId;
+      pendingOpenId = null;
+      openDetail(id);
+      return;
+    }
+    if (listState.loaded) return;
+
+    if (!listState.everLoaded) {
+      listState.everLoaded = true;
+      var cached = KGP.localCache.get('ois:list');
+      if (cached && isDefaultListQuery()) {
+        listState.total = cached.total;
+        renderTable(cached.rows);
+        renderPaginationInfo();
+        fetchList({ silent: true });
+        return;
+      }
+    }
+    fetchList();
+  };
+
+  function isDefaultListQuery() {
+    return !listState.filters.anio && !listState.filters.estado && !listState.filters.q && listState.page === 1 &&
+      listState.sortBy === 'codigo' && listState.sortDir === 'asc' && listState.pageSize === 20;
+  }
+
+  /** Punto de entrada externo (botón "Ver OIS" de Gestionar cotización). */
+  KGP.ois.openDetail = function (idOis) {
+    if (KGP.state.view === 'ois') {
+      openDetail(idOis);
+    } else {
+      pendingOpenId = idOis;
+      KGP.nav('ois');
+    }
+  };
+
+  // ---------------- Listado ----------------
+
+  function showList() {
+    detailLoadToken++;
+    setDetailBusy(false);
+    $('oi-detail-wrap').hidden = true;
+    $('oi-list-wrap').hidden = false;
+    if (!listState.loaded) fetchList();
+  }
+
+  function fetchList(opts) {
+    opts = opts || {};
+    var tbody = $('oi-tbody');
+    if (!opts.silent) tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Cargando…</td></tr>';
+    setListRefreshSpinner(true);
+
+    var params = {
+      anio: listState.filters.anio || null,
+      estado: listState.filters.estado || null,
+      q: listState.filters.q || '',
+      page: listState.page,
+      pageSize: listState.pageSize,
+      sortBy: listState.sortBy,
+      sortDir: listState.sortDir
+    };
+
+    return KGP.apiCall('api_listOis', [params]).then(function (res) {
+      listState.loaded = true;
+      listState.total = res.total;
+      renderTable(res.rows);
+      renderPaginationInfo();
+      if (isDefaultListQuery()) KGP.localCache.set('ois:list', { total: res.total, rows: res.rows });
+    }).catch(function (err) {
+      if (!opts.silent) tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No se pudo cargar el listado.</td></tr>';
+      KGP.toast('No se pudo cargar el listado de OIS: ' + KGP.friendlyError(err), 'error');
+    }).finally(function () {
+      setListRefreshSpinner(false);
+    });
+  }
+
+  function setListRefreshSpinner(show) {
+    var el = $('oi-refresh-spinner');
+    if (el) el.style.display = show ? 'inline-block' : 'none';
+  }
+
+  /** Insignia del estado de una OIS o de una tarea. */
+  function estadoBadgeClass(estado) {
+    if (estado === ESTADO_FINALIZADA) return 'badge-aprobado';
+    if (estado === ESTADO_VENCIDA) return 'badge-rechazado';
+    return 'badge-revision';
+  }
+
+  function renderTable(rows) {
+    var tbody = $('oi-tbody');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No hay OIS que coincidan con los filtros.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(function (r) {
+      return '<tr class="gestion-row" data-id="' + KGP.escapeHtml(r.idOis) + '">' +
+        '<td class="cell-mono">' + KGP.escapeHtml(r.codigo) + '</td>' +
+        '<td class="cell-mono">' + KGP.escapeHtml(r.codigoCotizacion || '—') + '</td>' +
+        '<td>' + KGP.escapeHtml(r.clienteNombre || '—') + '</td>' +
+        '<td class="cell-muted">' + KGP.escapeHtml(r.fechaElaboracion || '—') + '</td>' +
+        '<td class="cell-muted">' + KGP.escapeHtml(r.fechaVencimiento || '—') + '</td>' +
+        '<td>' + (r.numTareasFinalizadas || 0) + '/' + (r.numTareas || 0) + '</td>' +
+        '<td><span class="badge ' + estadoBadgeClass(r.estado) + '">' + KGP.escapeHtml(r.estado) + '</span></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function renderPaginationInfo() {
+    var total = listState.total;
+    var start = total ? (listState.page - 1) * listState.pageSize + 1 : 0;
+    var end = Math.min(listState.page * listState.pageSize, total);
+    $('oi-page-info').textContent = total ? ('Mostrando ' + start + '–' + end + ' de ' + total) : 'Sin resultados';
+    $('oi-prev').disabled = listState.page <= 1;
+    $('oi-next').disabled = end >= total;
+  }
+
+  function populateYearsFilter() {
+    var sel = $('oi-filter-anio');
+    var current = new Date().getFullYear();
+    for (var y = current; y >= current - 4; y--) {
+      var opt = document.createElement('option');
+      opt.value = String(y);
+      opt.textContent = String(y);
+      sel.appendChild(opt);
+    }
+  }
+
+  function debounce(fn, ms) {
+    var t;
+    return function () {
+      var args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(null, args); }, ms);
+    };
+  }
+
+  function onFilterChange() {
+    listState.page = 1;
+    fetchList();
+  }
+
+  // ---------------- Detalle / edición ----------------
+
+  function currentClienteId() { return $('oi-cliente-select').value; }
+
+  function openDetail(idOis) {
+    var token = ++detailLoadToken;
+    $('oi-list-wrap').hidden = true;
+    $('oi-detail-wrap').hidden = false;
+    detail.idOis = idOis;
+    setDetailBusy(true);
+
+    Promise.resolve().then(function () {
+      resetDetailForm();
+      return Promise.all([
+        KGP.apiCall('api_getOis', [idOis], DETAIL_CALL_OPTS),
+        KGP.catalog.load()
+      ]);
+    }).then(function (results) {
+      if (token !== detailLoadToken) return;
+      var d = results[0];
+      var cat = results[1];
+
+      detail.tiposServicio = cat.tiposServicio || [];
+      detail.unspscMap = KGP.ui.buildUnspscMap(cat.catalogoPares || []);
+      detail.empleados = cat.empleados || [];
+      detail.ois = d.ois;
+      detail.idCotizacion = d.ois.idCotizacion;
+      detail.codigoCotizacion = d.ois.codigoCotizacion || d.cotizacion.codigo || '';
+
+      fillGeneral(d.ois);
+
+      detail.servicios = [];
+      (d.servicios || []).forEach(addServicioToDetail);
+      renderServiciosList();
+
+      detail.tareas = [];
+      (d.tareas || []).forEach(addTareaToDetail);
+      renderTareasList(); // también pinta el resumen
+
+      return KGP.apiCall('api_getClienteDetalle', [d.cotizacion.idCliente], DETAIL_CALL_OPTS).then(function (det) {
+        if (token !== detailLoadToken) return;
+        detail.clienteDetalle = det;
+        populateClienteSelects(det, d.cotizacion, d.establecimiento);
+        applyLockState();
+      });
+    }).catch(function (err) {
+      if (token !== detailLoadToken) return;
+      KGP.toast('No se pudo cargar la OIS: ' + KGP.friendlyError(err), 'error', 7000);
+      showList();
+    }).finally(function () {
+      if (token === detailLoadToken) setDetailBusy(false);
+    });
+  }
+
+  function resetDetailForm() {
+    $('oi-servicios-list').innerHTML = '';
+    $('oi-tareas-list').innerHTML = '';
+    $('oi-doc-status').innerHTML = '';
+    detail.ois = null;
+    detail.idCotizacion = null;
+    detail.codigoCotizacion = '';
+    detail.servicios = [];
+    detail.tareas = [];
+    detail.clienteDetalle = null;
+    detail.entidadesEditadas = false;
+    setDocButton(null, null);
+    clearInvalid();
+    tareaModal.close();
+  }
+
+  function setDetailBusy(busy, text) {
+    $('oi-detail-loading').hidden = !busy;
+    $('oi-detail-content').hidden = busy;
+    if (busy) $('oi-detail-loading-text').textContent = text || 'Cargando OIS…';
+  }
+
+  function fillGeneral(o) {
+    $('oi-codigo').value = o.codigo || '—';
+    $('oi-cotizacion').value = detail.codigoCotizacion || '—';
+    $('oi-id-cotizacion').textContent = o.idCotizacion ? ('ID: ' + o.idCotizacion) : '';
+    $('oi-fecha').value = o.fechaElaboracion || '—';
+    $('oi-plazo').value = o.plazo === '' || o.plazo == null ? '' : o.plazo;
+    $('oi-fecha-venc').value = o.fechaVencimiento || '—';
+    setDocButton(o.urlDocumento, o.docEstado);
+  }
+
+  function setDocButton(url, docEstado) {
+    var btn = $('oi-abrir-doc-btn');
+    if (url && docEstado === 'OK') {
+      btn.href = url;
+      btn.hidden = false;
+    } else {
+      btn.hidden = true;
+      btn.removeAttribute('href');
+    }
+  }
+
+  /** Misma fórmula que el servidor: FECHA ELABORACION + PLAZO (días). */
+  function recomputeVencimiento() {
+    var fecha = detail.ois ? detail.ois.fechaElaboracion : '';
+    var plazo = Number($('oi-plazo').value);
+    var out = $('oi-fecha-venc');
+    if (!fecha || !plazo || plazo < 1) { out.value = '—'; renderResumen(); return; }
+    var d = new Date(fecha + 'T12:00:00');
+    d.setDate(d.getDate() + Math.trunc(plazo));
+    out.value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    renderResumen();
+  }
+
+  function populateClienteSelects(det, cotizacion, establecimiento) {
+    var clienteSel = $('oi-cliente-select');
+    KGP.ui.rebuildSelect(clienteSel, (KGP.catalog.current() || {}).clientes || [], function (c) { return c.idCliente; }, KGP.ui.clientLabel, '— Selecciona —');
+    clienteSel.value = cotizacion.idCliente;
+
+    var solSel = $('oi-solicitante-select');
+    KGP.ui.rebuildSelect(solSel, det.contactos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+      det.contactos.length ? '— Selecciona —' : '— Sin contactos registrados —');
+    solSel.value = cotizacion.idSolicitante;
+    solSel.disabled = false;
+
+    var estSel = $('oi-establecimiento-select');
+    KGP.ui.rebuildSelect(estSel, det.establecimientos, function (e) { return e.idEstablecimiento; }, KGP.ui.establecimientoLabel,
+      det.establecimientos.length ? '— Selecciona —' : '— Sin establecimientos registrados —');
+    estSel.value = cotizacion.idEstablecimiento;
+    estSel.disabled = false;
+
+    refreshEncargadoOptions();
+    syncEditButtons();
+  }
+
+  function resetDependentsEmpty() {
+    ['oi-solicitante-select', 'oi-establecimiento-select', 'oi-encargado-select'].forEach(function (id) {
+      var sel = $(id);
+      sel.innerHTML = '<option value="">— Ninguno registrado aún —</option>';
+      sel.disabled = false;
+    });
+    syncEditButtons();
+  }
+
+  function handleClienteChange() {
+    var val = currentClienteId();
+    if (!val) {
+      detail.clienteDetalle = null;
+      ['oi-solicitante-select', 'oi-establecimiento-select', 'oi-encargado-select'].forEach(function (id) {
+        var sel = $(id);
+        sel.innerHTML = '<option value="">— Primero selecciona un cliente —</option>';
+        sel.disabled = true;
+      });
+      syncEditButtons();
+      return;
+    }
+
+    cargarClienteBasico(val);
+
+    var solSel = $('oi-solicitante-select');
+    var estSel = $('oi-establecimiento-select');
+    var encSel = $('oi-encargado-select');
+    solSel.disabled = true; estSel.disabled = true; encSel.disabled = true;
+    solSel.innerHTML = '<option value="">Cargando…</option>';
+    estSel.innerHTML = '<option value="">Cargando…</option>';
+
+    KGP.apiCall('api_getClienteDetalle', [val]).then(function (det) {
+      detail.clienteDetalle = det;
+      KGP.ui.rebuildSelect(solSel, det.contactos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+        det.contactos.length ? '— Selecciona —' : '— Sin contactos registrados —');
+      solSel.disabled = false;
+      KGP.ui.rebuildSelect(estSel, det.establecimientos, function (e) { return e.idEstablecimiento; }, KGP.ui.establecimientoLabel,
+        det.establecimientos.length ? '— Selecciona —' : '— Sin establecimientos registrados —');
+      estSel.disabled = false;
+      refreshEncargadoOptions();
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo cargar el cliente: ' + KGP.friendlyError(err), 'error');
+      ['oi-solicitante-select', 'oi-establecimiento-select'].forEach(function (id) {
+        $(id).innerHTML = '<option value="">— Error al cargar, intenta de nuevo —</option>';
+      });
+    });
+  }
+
+  function cargarClienteBasico(idCliente) {
+    return KGP.apiCall('api_getCliente', [idCliente]).then(function (cliente) {
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.cliente = cliente;
+      } else {
+        detail.clienteDetalle = { cliente: cliente, contactos: [], establecimientos: [] };
+      }
+    }).catch(function () { /* "Editar cliente" sigue deshabilitado hasta que llegue el detalle completo */ });
+  }
+
+  /** Mismo criterio que JsGestion: el encargado se limita a los contactos asignados al establecimiento elegido. */
+  function refreshEncargadoOptions() {
+    var idEstablecimiento = $('oi-establecimiento-select').value;
+    var encSel = $('oi-encargado-select');
+    if (!idEstablecimiento || !detail.clienteDetalle) {
+      encSel.innerHTML = '<option value="">— Selecciona un establecimiento primero —</option>';
+      encSel.disabled = true;
+      syncEditButtons();
+      return;
+    }
+    var candidatos = detail.clienteDetalle.contactos.filter(function (c) { return c.idEstablecimiento === idEstablecimiento; });
+    KGP.ui.rebuildSelect(encSel, candidatos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+      candidatos.length ? '— Selecciona —' : '— Sin contactos asignados a este establecimiento —');
+    encSel.disabled = isCerrada();
+    if (candidatos.length === 1) encSel.value = candidatos[0].idContacto;
+    syncEditButtons();
+  }
+
+  var EDIT_BTN_PAIRS = [
+    ['oi-cliente-select', 'oi-cliente-editar-btn'],
+    ['oi-solicitante-select', 'oi-solicitante-editar-btn'],
+    ['oi-establecimiento-select', 'oi-establecimiento-editar-btn'],
+    ['oi-encargado-select', 'oi-encargado-editar-btn']
+  ];
+
+  function syncEditButtons() {
+    EDIT_BTN_PAIRS.forEach(function (pair) {
+      var sel = $(pair[0]);
+      var btn = $(pair[1]);
+      if (sel && btn) btn.disabled = !sel.value;
+    });
+  }
+
+  function findContacto(idContacto) {
+    if (!detail.clienteDetalle) return null;
+    return detail.clienteDetalle.contactos.filter(function (c) { return c.idContacto === idContacto; })[0] || null;
+  }
+  function findEstablecimiento(idEstablecimiento) {
+    if (!detail.clienteDetalle) return null;
+    return detail.clienteDetalle.establecimientos.filter(function (e) { return e.idEstablecimiento === idEstablecimiento; })[0] || null;
+  }
+
+  // ---------------- Modal genérico (KGP.entityModal) ----------------
+  // Mismo patrón que JsGestion.js.html, con los ids de esta vista. Cada alta/
+  // edición exitosa marca detail.entidadesEditadas: esos datos también salen
+  // en el documento de la cotización, que hay que regenerar al guardar.
+
+  function crearClienteModal(datos) {
+    return KGP.apiCall('api_createCliente', [datos]).then(function (creado) {
+      KGP.toast('Cliente "' + creado.razonSocial + '" guardado.', 'success');
+      detail.entidadesEditadas = true;
+      KGP.catalog.load(true);
+      KGP.ui.addOptionAndSelect($('oi-cliente-select'), creado.idCliente, KGP.ui.clientLabel(creado));
+      detail.clienteDetalle = { cliente: Object.assign({ idCliente: creado.idCliente, activo: 1 }, datos), contactos: [], establecimientos: [] };
+      resetDependentsEmpty();
+    }).catch(function (err) {
+      if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+        KGP.toast('Ya existe un cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+      } else {
+        KGP.toast('No se pudo guardar el cliente: ' + KGP.friendlyError(err), 'error');
+      }
+      throw err;
+    });
+  }
+
+  function editarClienteModal(idCliente, datos) {
+    return KGP.apiCall('api_updateCliente', [idCliente, datos]).then(function () {
+      KGP.toast('Cliente actualizado.', 'success');
+      detail.entidadesEditadas = true;
+      KGP.catalog.load(true);
+      if (detail.clienteDetalle && detail.clienteDetalle.cliente) {
+        detail.clienteDetalle.cliente = Object.assign({}, detail.clienteDetalle.cliente, datos);
+      }
+      KGP.ui.updateOptionLabel($('oi-cliente-select'), idCliente, KGP.ui.clientLabel(datos));
+    }).catch(function (err) {
+      if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+        KGP.toast('Ya existe otro cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+      } else {
+        KGP.toast('No se pudo actualizar el cliente: ' + KGP.friendlyError(err), 'error');
+      }
+      throw err;
+    });
+  }
+
+  function crearContactoModal(target, datos) {
+    var idCliente = currentClienteId();
+    if (!idCliente) { KGP.toast('Primero selecciona o crea un cliente.', 'error'); return Promise.reject({ code: 'VALIDATION' }); }
+    if (target === 'encargado') {
+      datos = Object.assign({}, datos, { idEstablecimiento: $('oi-establecimiento-select').value });
+    }
+    return KGP.apiCall('api_createContacto', [idCliente, datos]).then(function (creado) {
+      KGP.toast('Contacto "' + creado.nombre + '" guardado.', 'success');
+      detail.entidadesEditadas = true;
+      var full = Object.assign({ idContacto: creado.idContacto, idCliente: idCliente }, datos);
+      if (detail.clienteDetalle) detail.clienteDetalle.contactos.push(full);
+      KGP.ui.addOption($('oi-solicitante-select'), full.idContacto, KGP.ui.contactoLabel(full));
+      if (target === 'encargado') {
+        refreshEncargadoOptions();
+        $('oi-encargado-select').value = full.idContacto;
+      } else {
+        $('oi-solicitante-select').value = full.idContacto;
+      }
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el contacto: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function editarContactoModal(idContacto, datos) {
+    return KGP.apiCall('api_updateContacto', [idContacto, datos]).then(function () {
+      KGP.toast('Contacto actualizado.', 'success');
+      detail.entidadesEditadas = true;
+      var full = Object.assign({ idContacto: idContacto }, datos);
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.contactos = detail.clienteDetalle.contactos.map(function (c) {
+          return c.idContacto === idContacto ? Object.assign({}, c, full) : c;
+        });
+      }
+      ['oi-solicitante-select', 'oi-encargado-select'].forEach(function (id) {
+        KGP.ui.updateOptionLabel($(id), idContacto, KGP.ui.contactoLabel(full));
+      });
+    }).catch(function (err) {
+      KGP.toast('No se pudo actualizar el contacto: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function crearEstablecimientoModal(datos) {
+    var idCliente = currentClienteId();
+    if (!idCliente) { KGP.toast('Primero selecciona o crea un cliente.', 'error'); return Promise.reject({ code: 'VALIDATION' }); }
+    var idContacto = $('oi-encargado-select').value;
+    return KGP.apiCall('api_createEstablecimiento', [idCliente, datos, idContacto]).then(function (creado) {
+      KGP.toast('Establecimiento "' + creado.nombre + '" guardado.', 'success');
+      detail.entidadesEditadas = true;
+      var full = Object.assign({ idEstablecimiento: creado.idEstablecimiento, idCliente: idCliente }, datos);
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.establecimientos.push(full);
+        if (idContacto) {
+          detail.clienteDetalle.contactos = detail.clienteDetalle.contactos.map(function (c) {
+            return c.idContacto === idContacto ? Object.assign({}, c, { idEstablecimiento: full.idEstablecimiento }) : c;
+          });
+        }
+      }
+      KGP.ui.addOptionAndSelect($('oi-establecimiento-select'), full.idEstablecimiento, KGP.ui.establecimientoLabel(full));
+      refreshEncargadoOptions();
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el establecimiento: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function editarEstablecimientoModal(idEstablecimiento, datos) {
+    return KGP.apiCall('api_updateEstablecimiento', [idEstablecimiento, datos]).then(function () {
+      KGP.toast('Establecimiento actualizado.', 'success');
+      detail.entidadesEditadas = true;
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.establecimientos = detail.clienteDetalle.establecimientos.map(function (e) {
+          return e.idEstablecimiento === idEstablecimiento ? Object.assign({}, e, datos) : e;
+        });
+      }
+      KGP.ui.updateOptionLabel($('oi-establecimiento-select'), idEstablecimiento, KGP.ui.establecimientoLabel(datos));
+    }).catch(function (err) {
+      KGP.toast('No se pudo actualizar el establecimiento: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  // ---------------- Servicios (KGP.servicioModal SIN tarifas) ----------------
+
+  function stripActPrefix(texto) {
+    return String(texto || '').replace(/^\d+\.\d+\s+/, '');
+  }
+
+  function openServicioModal(servicio) {
+    KGP.servicioModal.open({
+      tiposServicio: detail.tiposServicio,
+      unspscMap: detail.unspscMap,
+      showTarifas: false, // la OIS no muestra ni edita tarifas (el servidor conserva las de la cotización)
+      initial: servicio || null,
+      onSave: function (servicioData) {
+        if (servicio) {
+          Object.assign(servicio, servicioData);
+        } else {
+          detail.servicios.push(Object.assign({ localId: 'osrv' + (++servicioSeq), idServicio: null }, servicioData));
+        }
+        renderServiciosList();
+      }
+    });
+  }
+
+  function addServicioToDetail(s) {
+    detail.servicios.push({
+      localId: 'osrv' + (++servicioSeq),
+      idServicio: s.idServicio,
+      tipo: s.tipo || '',
+      codigoUnspsc: s.codigoUnspsc || '',
+      descripcion: s.descripcion || '',
+      actividades: (s.actividades || []).map(stripActPrefix)
+    });
+  }
+
+  function servicioSummary(s) {
+    var n = (s.actividades || []).length;
+    return (s.tipo || 'Sin tipo elegido') + ' — ' + n + ' actividad' + (n === 1 ? '' : 'es');
+  }
+
+  function renderServiciosList() {
+    var list = $('oi-servicios-list');
+    list.innerHTML = '';
+    var cerrada = isCerrada();
+    detail.servicios.forEach(function (s, idx) {
+      var frag = $('tpl-servicio').content.cloneNode(true);
+      var row = frag.querySelector('[data-servicio]');
+      row.dataset.localId = s.localId;
+      row.querySelector('[data-numero]').textContent = String(idx + 1);
+      row.querySelector('[data-servicio-summary]').textContent = servicioSummary(s);
+      if (cerrada) {
+        row.querySelector('.servicio-row-actions').hidden = true;
+      } else {
+        row.querySelector('[data-edit-servicio]').addEventListener('click', function () { openServicioModal(s); });
+        row.querySelector('[data-remove-servicio]').addEventListener('click', function () {
+          detail.servicios = detail.servicios.filter(function (x) { return x.localId !== s.localId; });
+          renderServiciosList();
+        });
+      }
+      list.appendChild(frag);
+    });
+    $('oi-servicios-count').textContent = '(' + detail.servicios.length + '/' + MAX_SERVICIOS + ')';
+    $('oi-add-servicio').disabled = detail.servicios.length >= MAX_SERVICIOS;
+    $('oi-add-servicio').hidden = cerrada;
+  }
+
+  function collectServicios() {
+    return detail.servicios.map(function (s) {
+      return {
+        idServicio: s.idServicio || '',
+        tipo: s.tipo,
+        codigoUnspsc: s.codigoUnspsc,
+        descripcion: s.descripcion,
+        actividades: (s.actividades || []).slice()
+      };
+    });
+  }
+
+  // ---------------- Tareas ----------------
+
+  /** "Cédula - Nombre" si el empleado tiene cédula registrada; si no, solo el nombre. */
+  function empleadoLabel(e) {
+    return (e.cedula ? e.cedula + ' - ' : '') + e.nombre + (e.cargo ? ' (' + e.cargo + ')' : '');
+  }
+
+  function addTareaToDetail(t) {
+    detail.tareas.push({
+      localId: 'otar' + (++tareaSeq),
+      idTarea: t.idTarea || null,
+      tarea: t.tarea || '',
+      idEmpleado: t.idEmpleado || '',
+      responsable: t.responsable || '',
+      fechaInicio: t.fechaInicio || '',
+      fechaEntrega: t.fechaEntrega || '',
+      estado: t.estado === ESTADO_FINALIZADA ? ESTADO_FINALIZADA : ESTADO_EN_CURSO,
+      observacion: t.observacion || ''
+    });
+  }
+
+  function renderTareasList() {
+    var list = $('oi-tareas-list');
+    list.innerHTML = '';
+    var cerrada = isCerrada();
+    if (!detail.tareas.length) {
+      list.innerHTML = '<div class="empty-state tareas-empty">Aún no hay tareas en esta OIS.</div>';
+    }
+    detail.tareas.forEach(function (t, idx) {
+      var frag = $('tpl-tarea').content.cloneNode(true);
+      var row = frag.querySelector('[data-tarea]');
+      var finalizada = t.estado === ESTADO_FINALIZADA;
+      row.classList.toggle('tarea-finalizada', finalizada);
+      row.querySelector('[data-numero]').textContent = String(idx + 1);
+      row.querySelector('[data-tarea-title]').textContent = t.tarea;
+      row.querySelector('[data-tarea-meta]').textContent =
+        (t.responsable || '—') + ' · ' + (t.fechaInicio || '—') + ' → ' + (t.fechaEntrega || '—');
+      var badge = row.querySelector('[data-tarea-estado]');
+      badge.className = 'badge ' + estadoBadgeClass(t.estado);
+      badge.textContent = t.estado;
+
+      var btnFin = row.querySelector('[data-finalizar-tarea]');
+      btnFin.title = finalizada ? 'Marcar como en curso' : 'Marcar como finalizada';
+      btnFin.setAttribute('aria-label', btnFin.title);
+      btnFin.classList.toggle('is-done', finalizada);
+
+      if (cerrada) {
+        row.querySelector('.servicio-row-actions').hidden = true;
+      } else {
+        btnFin.addEventListener('click', function () {
+          t.estado = t.estado === ESTADO_FINALIZADA ? ESTADO_EN_CURSO : ESTADO_FINALIZADA;
+          renderTareasList();
+        });
+        row.querySelector('[data-edit-tarea]').addEventListener('click', function () { tareaModal.open(t); });
+        row.querySelector('[data-remove-tarea]').addEventListener('click', function () {
+          detail.tareas = detail.tareas.filter(function (x) { return x.localId !== t.localId; });
+          renderTareasList();
+        });
+      }
+      list.appendChild(frag);
+    });
+    $('oi-tareas-count').textContent = '(' + detail.tareas.length + '/' + MAX_TAREAS + ')';
+    $('oi-add-tarea').disabled = detail.tareas.length >= MAX_TAREAS;
+    $('oi-add-tarea').hidden = cerrada;
+    renderResumen();
+  }
+
+  function collectTareas() {
+    return detail.tareas.map(function (t) {
+      return {
+        idTarea: t.idTarea || '',
+        tarea: t.tarea,
+        idEmpleado: t.idEmpleado,
+        fechaInicio: t.fechaInicio,
+        fechaEntrega: t.fechaEntrega,
+        estado: t.estado,
+        observacion: t.observacion || ''
+      };
+    });
+  }
+
+  /**
+   * Popup de agregar/editar una tarea. Solo toca detail.tareas en memoria
+   * (mismo contrato que KGP.servicioModal): nada llega a la BD hasta
+   * "Guardar cambios". OBSERVACION es acumulativa: las anteriores se muestran
+   * en solo lectura y lo escrito se agrega como una línea nueva.
+   */
+  var tareaModal = (function () {
+    var state = { tarea: null, observacionPrevia: '' };
+
+    function fieldEl(key) { return document.querySelector('#tarea-modal-body .field[data-field="' + key + '"]'); }
+    function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+    function clearInvalidModal() {
+      document.querySelectorAll('#tarea-modal-body .field.invalid').forEach(function (f) { f.classList.remove('invalid'); });
+    }
+
+    function syncIdEmpleado() {
+      $('tm-id-empleado').value = $('tm-responsable').value || '—';
+    }
+
+    function open(tarea) {
+      state.tarea = tarea || null;
+      clearInvalidModal();
+      $('tarea-modal-title').textContent = tarea ? 'Editar tarea' : 'Agregar tarea';
+
+      var sel = $('tm-responsable');
+      KGP.ui.rebuildSelect(sel, detail.empleados, function (e) { return e.idEmpleado; }, empleadoLabel, '— Selecciona el responsable —');
+      // Si el responsable guardado ya no está en PERSONAL_KGP, se conserva
+      // como opción para no perder el dato al editar otra cosa de la tarea.
+      if (tarea && tarea.idEmpleado && !sel.querySelector('option[value="' + tarea.idEmpleado + '"]')) {
+        KGP.ui.addOption(sel, tarea.idEmpleado, tarea.responsable || tarea.idEmpleado);
+      }
+      sel.value = tarea ? tarea.idEmpleado : '';
+      syncIdEmpleado();
+
+      $('tm-tarea').value = tarea ? tarea.tarea : '';
+      $('tm-fecha-inicio').value = tarea ? tarea.fechaInicio : '';
+      $('tm-fecha-entrega').value = tarea ? tarea.fechaEntrega : '';
+      $('tm-obs-nueva').value = '';
+      state.observacionPrevia = tarea ? String(tarea.observacion || '') : '';
+      var box = $('tm-obs-historial');
+      var lines = state.observacionPrevia.split('\n').filter(function (l) { return l.trim(); });
+      box.hidden = !lines.length;
+      box.innerHTML = lines.map(function (l) { return '<div class="obs-item">' + KGP.escapeHtml(l) + '</div>'; }).join('');
+
+      $('tarea-modal-overlay').classList.add('open');
+      setTimeout(function () { $('tm-tarea').focus(); }, 50);
+    }
+
+    function close() {
+      var el = $('tarea-modal-overlay');
+      if (el) el.classList.remove('open');
+      state.tarea = null;
+    }
+
+    function save() {
+      clearInvalidModal();
+      var texto = $('tm-tarea').value.trim();
+      var idEmpleado = $('tm-responsable').value;
+      var inicio = $('tm-fecha-inicio').value;
+      var entrega = $('tm-fecha-entrega').value;
+      var ok = true;
+      if (!texto) { markInvalid('tarea'); ok = false; }
+      if (!idEmpleado) { markInvalid('responsable'); ok = false; }
+      if (!inicio) { markInvalid('fechaInicio'); ok = false; }
+      $('tm-fecha-entrega-err').textContent = 'Elige la fecha de entrega.';
+      if (!entrega) {
+        markInvalid('fechaEntrega'); ok = false;
+      } else if (inicio && entrega < inicio) {
+        $('tm-fecha-entrega-err').textContent = 'La fecha de entrega no puede ser anterior a la de inicio.';
+        markInvalid('fechaEntrega'); ok = false;
+      }
+      if (!ok) { KGP.toast('Revisa los campos marcados en rojo.', 'error'); return; }
+
+      var emp = detail.empleados.filter(function (e) { return e.idEmpleado === idEmpleado; })[0];
+      var nueva = $('tm-obs-nueva').value.trim();
+      var previa = state.observacionPrevia.trim();
+      var datos = {
+        tarea: texto,
+        idEmpleado: idEmpleado,
+        responsable: emp ? emp.nombre : ((state.tarea && state.tarea.responsable) || ''),
+        fechaInicio: inicio,
+        fechaEntrega: entrega,
+        observacion: nueva ? (previa ? previa + '\n' + nueva : nueva) : previa
+      };
+
+      if (state.tarea) {
+        Object.assign(state.tarea, datos);
+      } else {
+        addTareaToDetail(Object.assign({ estado: ESTADO_EN_CURSO }, datos));
+      }
+      close();
+      renderTareasList();
+    }
+
+    function wire() {
+      $('tarea-modal-close').addEventListener('click', close);
+      $('tarea-modal-cancel').addEventListener('click', close);
+      $('tarea-modal-save').addEventListener('click', save);
+      $('tm-responsable').addEventListener('change', syncIdEmpleado);
+      $('tarea-modal-overlay').addEventListener('click', function (e) {
+        if (e.target.id === 'tarea-modal-overlay') close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && $('tarea-modal-overlay').classList.contains('open')) close();
+      });
+    }
+
+    return { open: open, close: close, wire: wire };
+  }());
+
+  // ---------------- Resumen ----------------
+
+  function renderResumen() {
+    var o = detail.ois || {};
+    $('oi-res-title').textContent = o.codigo || '—';
+    $('oi-res-cot').textContent = detail.codigoCotizacion || '—';
+    $('oi-res-fecha').textContent = o.fechaElaboracion || '—';
+    $('oi-res-venc').textContent = $('oi-fecha-venc').value || '—';
+    var finalizadas = detail.tareas.filter(function (t) { return t.estado === ESTADO_FINALIZADA; }).length;
+    $('oi-res-tareas').textContent = finalizadas + '/' + detail.tareas.length;
+    $('oi-res-elaborado').textContent = o.elaboradoPor || '—';
+    $('oi-res-actualizado').textContent = o.actualizadoPor || '—';
+
+    var estado = o.estado || ESTADO_EN_CURSO;
+    var badge = $('oi-res-estado');
+    badge.className = 'badge resumen-estado ' + estadoBadgeClass(estado);
+    badge.textContent = estado;
+
+    var cerrada = isCerrada();
+    $('oi-res-cerrada').hidden = !cerrada;
+    // Aviso previo al cierre: todas las tareas marcadas en pantalla, pero aún sin guardar.
+    $('oi-res-cierre').hidden = cerrada || !(detail.tareas.length && finalizadas === detail.tareas.length);
+  }
+
+  // ---------------- Bloqueo (OIS finalizada = solo lectura) ----------------
+
+  function isCerrada() {
+    return !!detail.ois && detail.ois.estado === ESTADO_FINALIZADA;
+  }
+
+  function applyLockState() {
+    var cerrada = isCerrada();
+    $('oi-plazo').readOnly = cerrada;
+    ['oi-cliente-select', 'oi-solicitante-select', 'oi-establecimiento-select', 'oi-encargado-select'].forEach(function (id) {
+      $(id).disabled = cerrada || $(id).disabled;
+    });
+    ['oi-cliente-nuevo-btn', 'oi-solicitante-nuevo-btn', 'oi-establecimiento-nuevo-btn', 'oi-encargado-nuevo-btn', 'oi-guardar-btn'].forEach(function (id) {
+      $(id).hidden = cerrada;
+    });
+    EDIT_BTN_PAIRS.forEach(function (pair) { $(pair[1]).hidden = cerrada; });
+    renderServiciosList();
+    renderTareasList();
+  }
+
+  // ---------------- Validación visual ----------------
+
+  function fieldEl(key) { return document.querySelector('#oi-detail-wrap .field[data-field="' + key + '"]'); }
+  function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+  function clearInvalid() { document.querySelectorAll('#oi-detail-wrap .field.invalid').forEach(function (f) { f.classList.remove('invalid'); }); }
+
+  function validateGeneral() {
+    clearInvalid();
+    var hasError = false;
+    var plazo = Number($('oi-plazo').value);
+    if (!plazo || plazo < 1 || plazo > 365) { markInvalid('plazo'); hasError = true; }
+    if (!currentClienteId()) { markInvalid('cliente'); hasError = true; }
+    if (!$('oi-solicitante-select').value) { markInvalid('solicitante'); hasError = true; }
+    if (!$('oi-establecimiento-select').value) { markInvalid('establecimiento'); hasError = true; }
+    return !hasError;
+  }
+
+  // ---------------- Guardar cambios (BD -> documentos) ----------------
+
+  function showDocStatus(text, kind, retryFn) {
+    var el = $('oi-doc-status');
+    var html = '<div class="progress-note">';
+    if (kind === 'busy') html += '<span class="spinner dark"></span>';
+    html += '<span>' + KGP.escapeHtml(text) + '</span></div>';
+    el.innerHTML = html;
+    if (retryFn) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm';
+      btn.style.marginTop = '8px';
+      btn.textContent = 'Reintentar';
+      btn.addEventListener('click', retryFn);
+      el.appendChild(btn);
+    }
+  }
+
+  function handleGuardar() {
+    if (!validateGeneral()) {
+      KGP.toast('Revisa los campos marcados en rojo.', 'error');
+      return;
+    }
+    var servicios = collectServicios();
+    if (!servicios.length) {
+      KGP.toast('La OIS debe tener al menos 1 servicio.', 'error');
+      return;
+    }
+
+    var payload = {
+      plazo: Number($('oi-plazo').value),
+      cliente: { idCliente: currentClienteId() },
+      solicitante: { idContacto: $('oi-solicitante-select').value },
+      establecimiento: { idEstablecimiento: $('oi-establecimiento-select').value },
+      servicios: servicios,
+      tareas: collectTareas(),
+      entidadesEditadas: !!detail.entidadesEditadas
+    };
+
+    var idOis = detail.idOis;
+    var idCotizacion = detail.idCotizacion;
+    setDetailBusy(true, 'Guardando cambios en la base de datos…');
+
+    KGP.apiCall('api_updateOis', [idOis, payload]).then(function (res) {
+      KGP.toast('OIS ' + res.codigo + ' actualizada.', 'success');
+      detail.entidadesEditadas = false;
+      detail.ois.estado = res.estado;
+      detail.ois.fechaVencimiento = res.fechaVencimiento;
+      detail.ois.plazo = payload.plazo;
+      detail.tareas = [];
+      (res.tareas || []).forEach(addTareaToDetail);
+
+      // Ids de servicios recién creados (para que un segundo guardado los
+      // actualice en vez de duplicarlos) + "actualizado por".
+      return KGP.apiCall('api_getOis', [idOis]).then(function (fresh) {
+        detail.ois = fresh.ois;
+        detail.servicios = [];
+        (fresh.servicios || []).forEach(addServicioToDetail);
+      }).catch(function () { /* no crítico */ }).then(function () {
+        recomputeVencimiento();
+        applyLockState();
+        return regenerarDocs(idOis, idCotizacion, !!res.cotizacionCambio);
+      });
+    }).catch(function (err) {
+      if (err.code === 'VALIDATION' && Array.isArray(err.details) && err.details.length) {
+        KGP.toast(err.details.slice(0, 3).join(' · '), 'error', 8000);
+      } else {
+        KGP.toast('No se pudo guardar: ' + KGP.friendlyError(err), 'error', 6000);
+      }
+    }).finally(function () {
+      setDetailBusy(false);
+    });
+  }
+
+  /**
+   * Fase 2: documentos. El de la cotización solo si cambió algo compartido
+   * (nota 3 del usuario: no regenerarlo por cambios que solo afectan tareas);
+   * el de la OIS siempre. Si uno falla, "Reintentar" repite solo lo que falta.
+   */
+  function regenerarDocs(idOis, idCotizacion, conCotizacion) {
+    var pasoCot = conCotizacion
+      ? function () {
+        setDetailBusy(true, 'Actualizando el documento de la cotización…');
+        return KGP.apiCall('api_regenerateDocument', [idCotizacion]);
+      }
+      : function () { return Promise.resolve(null); };
+
+    return pasoCot().then(function () {
+      setDetailBusy(true, 'Actualizando el documento de la OIS…');
+      return KGP.apiCall('api_regenerateOisDocument', [idOis]).then(function (doc) {
+        setDocButton(doc.docUrl, 'OK');
+        showDocStatus(conCotizacion ? 'Documentos de la OIS y de la cotización actualizados.' : 'Documento de la OIS actualizado.', 'success');
+      }).catch(function (err) {
+        showDocStatus('Los cambios se guardaron, pero el documento de la OIS falló: ' + KGP.friendlyError(err), 'error', function () {
+          regenerarDocs(idOis, idCotizacion, false).finally(function () { setDetailBusy(false); });
+        });
+      });
+    }, function (err) {
+      showDocStatus('Los cambios se guardaron, pero el documento de la cotización falló: ' + KGP.friendlyError(err), 'error', function () {
+        regenerarDocs(idOis, idCotizacion, true).finally(function () { setDetailBusy(false); });
+      });
+    });
+  }
+
+  // ---------------- Wiring ----------------
+
+  function wireEvents() {
+    if (eventsWired) return;
+    eventsWired = true;
+
+    $('oi-search').addEventListener('input', debounce(function (e) {
+      listState.filters.q = e.target.value;
+      onFilterChange();
+    }, 350));
+    $('oi-filter-anio').addEventListener('change', function (e) { listState.filters.anio = e.target.value; onFilterChange(); });
+    $('oi-filter-estado').addEventListener('change', function (e) { listState.filters.estado = e.target.value; onFilterChange(); });
+    $('oi-sort-by').addEventListener('change', function (e) { listState.sortBy = e.target.value; onFilterChange(); });
+    $('oi-sort-dir').addEventListener('click', function () {
+      listState.sortDir = listState.sortDir === 'asc' ? 'desc' : 'asc';
+      $('oi-sort-dir').textContent = listState.sortDir === 'asc' ? '↑ Ascendente' : '↓ Descendente';
+      onFilterChange();
+    });
+    $('oi-page-size').addEventListener('change', function (e) { listState.pageSize = Number(e.target.value); onFilterChange(); });
+    $('oi-refresh-btn').addEventListener('click', function () { fetchList({ silent: true }); });
+    $('oi-prev').addEventListener('click', function () {
+      if (listState.page <= 1) return;
+      listState.page--;
+      fetchList();
+    });
+    $('oi-next').addEventListener('click', function () {
+      if (listState.page * listState.pageSize >= listState.total) return;
+      listState.page++;
+      fetchList();
+    });
+    $('oi-tbody').addEventListener('click', function (e) {
+      var row = e.target.closest('.gestion-row');
+      if (row) openDetail(row.getAttribute('data-id'));
+    });
+
+    $('oi-back-btn').addEventListener('click', function () {
+      showList();
+      fetchList({ silent: true });
+    });
+    $('oi-ver-cot-btn').addEventListener('click', function () {
+      if (detail.idCotizacion && KGP.gestion.openDetail) KGP.gestion.openDetail(detail.idCotizacion);
+    });
+
+    $('oi-plazo').addEventListener('input', recomputeVencimiento);
+    $('oi-cliente-select').addEventListener('change', function () { handleClienteChange(); syncEditButtons(); });
+    $('oi-solicitante-select').addEventListener('change', syncEditButtons);
+    $('oi-establecimiento-select').addEventListener('change', refreshEncargadoOptions);
+    $('oi-encargado-select').addEventListener('change', syncEditButtons);
+
+    $('oi-cliente-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'cliente', mode: 'create', onSave: crearClienteModal });
+    });
+    $('oi-cliente-editar-btn').addEventListener('click', function () {
+      if (!detail.clienteDetalle || !detail.clienteDetalle.cliente) return;
+      var id = currentClienteId();
+      KGP.entityModal.open({ type: 'cliente', mode: 'edit', editId: id, initial: detail.clienteDetalle.cliente, onSave: function (datos) { return editarClienteModal(id, datos); } });
+    });
+    $('oi-solicitante-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'contacto', mode: 'create', target: 'solicitante', onSave: function (datos) { return crearContactoModal('solicitante', datos); } });
+    });
+    $('oi-solicitante-editar-btn').addEventListener('click', function () {
+      var id = $('oi-solicitante-select').value;
+      var c = findContacto(id);
+      if (!c) return;
+      KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'solicitante', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+    $('oi-encargado-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'contacto', mode: 'create', target: 'encargado', onSave: function (datos) { return crearContactoModal('encargado', datos); } });
+    });
+    $('oi-encargado-editar-btn').addEventListener('click', function () {
+      var id = $('oi-encargado-select').value;
+      var c = findContacto(id);
+      if (!c) return;
+      KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'encargado', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+    $('oi-establecimiento-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'establecimiento', mode: 'create', onSave: crearEstablecimientoModal });
+    });
+    $('oi-establecimiento-editar-btn').addEventListener('click', function () {
+      var id = $('oi-establecimiento-select').value;
+      var est = findEstablecimiento(id);
+      if (!est) return;
+      KGP.entityModal.open({ type: 'establecimiento', mode: 'edit', editId: id, initial: est, onSave: function (datos) { return editarEstablecimientoModal(id, datos); } });
+    });
+
+    $('oi-add-servicio').addEventListener('click', function () {
+      if (detail.servicios.length >= MAX_SERVICIOS) { KGP.toast('Ya alcanzaste el máximo de ' + MAX_SERVICIOS + ' servicios.', 'warning'); return; }
+      openServicioModal(null);
+    });
+    $('oi-add-tarea').addEventListener('click', function () {
+      if (detail.tareas.length >= MAX_TAREAS) { KGP.toast('Ya alcanzaste el máximo de ' + MAX_TAREAS + ' tareas.', 'warning'); return; }
+      tareaModal.open(null);
+    });
+    $('oi-guardar-btn').addEventListener('click', handleGuardar);
+
+    tareaModal.wire();
+  }
+
+}(window.KGP));
+</script>

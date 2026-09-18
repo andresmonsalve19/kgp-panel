@@ -1,0 +1,18 @@
+# Credenciales de clasp (normalmente viven en el home, por si acaso)
+.clasprc.json
+
+# Herramientas locales de IA (skills instaladas, config local)
+.agents/
+.claude/
+skills-lock.json
+
+# Carpetas y archivos temporales
+_verify_pull/
+*.tmp
+_check_*.js
+
+# Node / SO / editores
+node_modules/
+.DS_Store
+Thumbs.db
+.vscode/

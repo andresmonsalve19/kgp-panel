@@ -1,0 +1,1804 @@
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-alt: #fafbfc;
+    --border: #e2e5ea;
+    --border-strong: #cbd0d8;
+    --text: #1a1d23;
+    --text-muted: #64707d;
+    --text-faint: #97a1ac;
+    --primary: #6b7c3f;
+    --primary-hover: #566432;
+    --primary-bg: #eef1e1;
+    --primary-soft: #dde3c9;
+    --success: #16a34a;
+    --success-bg: #e9f9ef;
+    --warning: #b45309;
+    --warning-bg: #fff4e0;
+    --danger: #dc2626;
+    --danger-bg: #fdecec;
+    --edit: #eab308;
+    --edit-bg: #fef9e6;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --shadow-sm: 0 1px 2px rgba(20, 24, 32, 0.06);
+    --shadow-md: 0 4px 16px rgba(20, 24, 32, 0.08);
+    --sidebar-w: 220px;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  body { margin: 0; }
+
+  h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  p { margin: 0; }
+
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  input, select, textarea {
+    font-family: inherit;
+    font-size: 13.5px;
+  }
+
+  /* ---------- Layout ---------- */
+
+  .app-shell {
+    display: flex;
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    width: var(--sidebar-w);
+    flex: 0 0 var(--sidebar-w);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px;
+    gap: 4px;
+  }
+
+  .sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 10px 18px;
+  }
+
+  .brand-logo {
+    width: 34px;
+    height: 34px;
+    object-fit: contain;
+    flex: none;
+  }
+
+  .sidebar-brand .name {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .sidebar-brand .sub {
+    font-size: 11.5px;
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-weight: 500;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+
+  .nav-item:hover { background: var(--surface-alt); color: var(--text); }
+
+  .nav-item.active {
+    background: var(--primary-bg);
+    color: var(--primary);
+  }
+
+  .nav-item .ico {
+    width: 18px; height: 18px;
+    flex: none;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 10px 12px;
+    font-size: 11px;
+    color: var(--text-faint);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .conn-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--success);
+    flex: none;
+  }
+  .conn-dot.off { background: var(--text-faint); }
+  .conn-dot.error { background: var(--danger); }
+
+  .main {
+    flex: 1;
+    min-width: 0;
+    padding: 28px 32px 60px;
+    display: flex;
+    justify-content: center;
+  }
+
+  .view { display: none; width: 100%; max-width: 1160px; }
+  .view.active { display: block; }
+
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 22px;
+    flex-wrap: wrap;
+  }
+
+  .page-header h1 { font-size: 26px; letter-spacing: -0.015em; }
+  .page-header .desc { color: var(--text-muted); font-size: 13.5px; margin-top: 6px; }
+
+  .req { color: var(--danger); font-weight: 700; }
+
+  /* ---------- Cards / sections ---------- */
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px 22px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .card + .card { margin-top: 16px; }
+
+  /* Botón "Guardar cambios" de Gestionar cotización: a petición del usuario,
+     sin el cuadro (borde/fondo/sombra) de una .card normal — solo se ve el
+     botón, del ancho de su contenedor y centrado. Ver ViewGestion.html. */
+  .card-guardar {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 8px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .card-guardar .btn { width: 100%; }
+
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15.5px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 14px;
+    letter-spacing: -0.01em;
+  }
+
+  .section-title .badge-count {
+    font-size: 11px;
+    color: var(--text-faint);
+    font-weight: 500;
+  }
+
+  .section-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .section-title-row .section-title { margin-bottom: 0; }
+
+  /* ---------- Form ---------- */
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field.span-2 { grid-column: span 2; }
+  .field.full { grid-column: 1 / -1; }
+
+  .field label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .field .hint { font-size: 11px; color: var(--text-faint); }
+  .field .err { font-size: 11.5px; color: var(--danger); display: none; }
+  .field.invalid .err { display: block; }
+  .field.invalid input, .field.invalid select, .field.invalid textarea {
+    border-color: var(--danger);
+  }
+
+  input[type=text], input[type=number], input[type=date], input[type=email],
+  input[type=tel], select, textarea {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    color: var(--text);
+    width: 100%;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  }
+
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-bg);
+  }
+
+  input:disabled, select:disabled, textarea:disabled {
+    background: var(--surface-alt);
+    color: var(--text-faint);
+    cursor: not-allowed;
+  }
+
+  input[readonly], textarea[readonly] {
+    background: var(--surface-alt);
+    color: var(--text-muted);
+  }
+
+  textarea { resize: vertical; min-height: 64px; }
+
+  .codigo-preview {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  /* ---------- Buttons ---------- */
+
+  /* :not([hidden]) en el display: sin esto, cualquier <button>/<a class="btn">
+     con el atributo hidden (p. ej. ge-abrir-doc-btn, mostrado/ocultado por JS
+     con btn.hidden = true/false en JsGestion.js.html) se seguiría mostrando:
+     el display:inline-flex de esta clase de autor gana por cascada sobre el
+     [hidden]{display:none} del user-agent sin importar la especificidad.
+     Verde oliva en reposo, blanco al pasar el mouse en TODOS los botones de
+     acción (a petición explícita del usuario: antes era al revés — claro en
+     reposo, oliva/gris en hover). Excepción semántica deliberada:
+     .btn-icon-edit (amarillo) y .btn-icon-delete (rojo) — ver más abajo — se
+     quedan en su color de reposo habitual, no deben verse igual que un botón
+     de acción normal. */
+  .btn:not([hidden]) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px 16px;
+    border-radius: 10px;
+    border: 1px solid var(--primary);
+    background: var(--primary);
+    color: #fff;
+    font-weight: 600;
+    transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease, opacity 0.14s ease, transform 0.14s ease, box-shadow 0.14s ease;
+  }
+  .btn:hover { background: #fff; color: var(--primary-hover); border-color: var(--primary); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+  .btn:active { transform: translateY(0); box-shadow: none; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+  /* Además del verde/blanco heredado de .btn, el CTA principal lleva un realce extra (sombra de color). */
+  .btn-primary {
+    box-shadow: 0 2px 8px rgba(107, 124, 63, 0.28);
+  }
+  .btn-primary:hover { box-shadow: 0 4px 12px rgba(107, 124, 63, 0.2); }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--primary);
+    padding: 6px 8px;
+  }
+  .btn-ghost:hover { background: var(--primary-bg); color: var(--primary); }
+
+  .btn-ghost-primary {
+    white-space: nowrap;
+    font-weight: 700;
+  }
+  .btn-ghost-primary:disabled { opacity: 0.5; cursor: not-allowed; background: var(--surface-alt); color: var(--text-faint); border-color: var(--border); }
+
+  /* Decisión de garantía (Gestionar cotización): verde = aprobada, rojo =
+     rechazada. Mismo patrón que .btn: color sólido en reposo, blanco con
+     texto de color al pasar el mouse. Doble clase para ganarle en
+     especificidad a .btn:not([hidden]). */
+  .btn.btn-success { background: var(--success); border-color: var(--success); color: #fff; }
+  .btn.btn-success:hover { background: #fff; color: var(--success); border-color: var(--success); }
+  .btn.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn.btn-danger:hover { background: #fff; color: var(--danger); border-color: var(--danger); }
+
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+  /* Botones de acción de solo ícono: lápiz amarillo = editar, caneca roja =
+     eliminar/quitar, en todas las vistas (reemplazan los botones de texto
+     "✎ Editar"/"Eliminar"/"Quitar" que había antes — a petición explícita
+     del usuario). Doble clase para ganarle en especificidad a .btn-sm /
+     .btn:not([hidden]), mismo criterio que .btn.btn-success/.btn.btn-danger. */
+  .btn.btn-icon-edit, .btn.btn-icon-delete {
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    flex: none;
+    border-radius: 8px;
+  }
+  .btn.btn-icon-edit svg, .btn.btn-icon-delete svg { width: 16px; height: 16px; }
+  .btn.btn-icon-edit { background: var(--edit); border-color: var(--edit); color: #fff; }
+  .btn.btn-icon-edit:hover { background: #fff; color: var(--edit); border-color: var(--edit); }
+  .btn.btn-icon-delete { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn.btn-icon-delete:hover { background: #fff; color: var(--danger); border-color: var(--danger); }
+
+  .btn-block { width: 100%; justify-content: center; }
+
+  /* ---------- Badges / states ---------- */
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .badge-revision { background: var(--warning-bg); color: var(--warning); }
+  .badge-aprobado { background: var(--success-bg); color: var(--success); }
+  .badge-rechazado { background: var(--danger-bg); color: var(--danger); }
+  .badge-neutral { background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border); }
+
+  /* ---------- Dynamic lists (servicios / actividades) ---------- */
+
+  /* Cada servicio agregado se ve como un renglón resumen; el detalle
+     completo (tipo/UNSPSC/descripción/actividades) solo se edita dentro del
+     popup #servicio-modal-overlay (ver KGP.servicioModal, JsCore.js.html). */
+  .servicio-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    background: var(--surface-alt);
+    margin-bottom: 10px;
+  }
+
+  .servicio-row-info {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .servicio-row-info .num {
+    font-weight: 700;
+    font-size: 13px;
+    flex: none;
+  }
+
+  .servicio-summary {
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 12.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .servicio-row-actions {
+    display: flex;
+    gap: 8px;
+    flex: none;
+  }
+
+  .actividad-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .actividad-row .idx {
+    font-size: 11.5px;
+    color: var(--text-faint);
+    width: 28px;
+    flex: none;
+    font-family: ui-monospace, monospace;
+    padding-top: 9px;
+  }
+
+  .actividad-row textarea {
+    min-height: 40px;
+    resize: vertical;
+  }
+
+  .actividad-row [data-remove-actividad] {
+    margin-top: 2px;
+  }
+
+  .add-row-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #fff;
+    background: var(--primary);
+    border: 1px dashed var(--primary);
+    border-radius: var(--radius-sm);
+    padding: 7px 12px;
+    font-weight: 600;
+    font-size: 12.5px;
+  }
+  .add-row-btn:hover { background: #fff; color: var(--primary-hover); }
+  .add-row-btn:disabled {
+    opacity: 0.5;
+    border-style: solid;
+    cursor: not-allowed;
+    background: var(--surface-alt);
+    color: var(--text-faint);
+    border-color: var(--border);
+  }
+
+  .limit-note { font-size: 11px; color: var(--text-faint); margin-top: 6px; }
+
+  /* ---------- Dropdown + inline create panel ---------- */
+
+  .picker-row { display: flex; gap: 8px; align-items: center; }
+  .picker-row select { flex: 1; }
+
+  /* ---------- Modal (Cliente / Contacto / Establecimiento) ---------- */
+
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(26, 29, 35, 0.5);
+    z-index: 1200;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-overlay.open { display: flex; }
+
+  .modal-box {
+    background: var(--surface);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 20px 60px rgba(20, 24, 32, 0.28);
+    width: 100%;
+    max-width: 600px;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: modal-in 0.16s ease;
+  }
+  @keyframes modal-in {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .modal-header h2 {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-align: center;
+    flex: 1;
+  }
+  .modal-close {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px;
+    border: none;
+    border-radius: 8px;
+    background: var(--surface-alt);
+    color: var(--text-muted);
+    flex: none;
+    padding: 0;
+  }
+  .modal-close:hover { background: var(--danger-bg); color: var(--danger); }
+
+  .modal-body {
+    padding: 20px 22px;
+    overflow-y: auto;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 16px 22px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-alt);
+    flex: none;
+  }
+
+  @media (max-width: 600px) {
+    .modal-overlay { padding: 0; align-items: flex-end; }
+    .modal-box { max-width: 100%; max-height: 92vh; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  }
+
+  /* ---------- KPI grid ---------- */
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .kpi-card .label {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .kpi-card .value {
+    font-size: 24px;
+    font-weight: 700;
+    margin-top: 4px;
+  }
+
+  .kpi-card.alert .value { color: var(--danger); }
+  .kpi-card.warn .value { color: var(--warning); }
+  .kpi-card.good .value { color: var(--success); }
+
+  /* ---------- Resumen de la cotización (Gestionar cotización) ---------- */
+
+  .resumen-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .resumen-head .section-title { margin-bottom: 2px; }
+  .resumen-head .hint { font-size: 11.5px; color: var(--warning); }
+  .resumen-estado { font-size: 13px; padding: 5px 14px; }
+
+  /* Resumen de la OIS (Gestionar OIS): a diferencia del de la cotización
+     (código a la izquierda, estado a la derecha), aquí todo va apilado y
+     centrado — la insignia de estado arriba, el código de la OIS debajo en
+     grande, como título del bloque. */
+  .resumen-head-oi {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+  }
+  .resumen-head-oi .resumen-title { width: 100%; }
+  .resumen-codigo-oi {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
+  /* Los 3 montos (Subtotal/IVA/Total): tarjetas grandes y centradas, el
+     dato "titular" del resumen. Montos largos ($1.234.567.890,00) no deben
+     desbordar la tarjeta — overflow-wrap:break-word alcanza porque son
+     dígitos y puntos, nunca necesita partir a mitad de palabra. */
+  .resumen-money-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .resumen-money-row .kpi-card {
+    box-shadow: none;
+    background: var(--surface-alt);
+    text-align: center;
+    padding: 16px 14px;
+  }
+  .resumen-money-row .kpi-card .value {
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: break-word;
+  }
+
+  /* Metadatos (fecha, vencimiento, servicios, elaborado/aprobado por): fila
+     de etiqueta+valor en vez de tarjetas de KPI — el valor ya no se
+     comprime en una columna angosta, así que un nombre largo como
+     "Kelly Gaviria — Director" envuelve en un espacio en vez de partirse a
+     mitad de palabra (antes: overflow-wrap:anywhere sobre una tarjeta de
+     140px, se veía "cortado"). */
+  .resumen-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 16px 32px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .resumen-meta-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+    min-width: 130px;
+  }
+  .resumen-meta-item[hidden] { display: none; }
+  .resumen-meta-item .meta-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .resumen-meta-item .meta-value {
+    font-size: 14.5px;
+    font-weight: 600;
+    color: var(--text);
+    overflow-wrap: break-word;
+  }
+
+  .garantia-row {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .garantia-actions {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  /* Botón de decisión de garantía: más grande que el .btn normal — es la
+     acción más importante de toda la vista de Gestión, debe notarse. */
+  .btn-lg {
+    padding: 14px 30px;
+    font-size: 15px;
+    border-radius: 12px;
+  }
+  .garantia-actions[hidden], .garantia-confirm[hidden] { display: none; }
+  .garantia-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  /* ---------- Tarifas dentro del popup de servicio ---------- */
+
+  .tarifas-section {
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .obs-historial {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-alt);
+    max-height: 140px;
+    overflow-y: auto;
+  }
+  .obs-historial[hidden] { display: none; }
+  .obs-item {
+    padding: 7px 10px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .obs-item + .obs-item { border-top: 1px solid var(--border); }
+
+  /* ---------- Table ---------- */
+
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+
+  table.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 760px;
+  }
+
+  table.data-table th {
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-faint);
+    font-weight: 600;
+    padding: 10px 12px;
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  table.data-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+
+  table.data-table tr:last-child td { border-bottom: none; }
+  table.data-table tr:hover td { background: var(--surface-alt); }
+
+  .cell-muted { color: var(--text-muted); }
+  .cell-mono { font-family: ui-monospace, monospace; font-size: 12.5px; }
+
+  .days-left { font-weight: 600; }
+  .days-left.overdue { color: var(--danger); }
+  .days-left.soon { color: var(--warning); }
+
+  .filters-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .filters-row select, .filters-row input {
+    width: auto;
+    min-width: 130px;
+  }
+  .filters-row .search-input { min-width: 220px; flex: 1; }
+
+  .pagination-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-faint);
+  }
+
+  /* ---------- Toasts ---------- */
+
+  #toast-stack {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 1000;
+    max-width: 340px;
+  }
+
+  .toast {
+    background: var(--text);
+    color: #fff;
+    padding: 11px 14px;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-md);
+    font-size: 12.5px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    animation: toast-in 0.18s ease;
+  }
+  .toast.success { background: #14532d; }
+  .toast.error { background: #7f1d1d; }
+  .toast.warning { background: #78350f; }
+
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ---------- Misc ---------- */
+
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex: none;
+  }
+  .spinner.dark {
+    border-color: var(--border-strong);
+    border-top-color: var(--primary);
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- Loader de pantalla completa (carga inicial de una vista) ---------- */
+
+  .page-loader {
+    position: fixed;
+    inset: 0;
+    z-index: 5000;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+  }
+  .page-loader.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .page-loader-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .spinner-lg {
+    width: 40px; height: 40px;
+    border: 4px solid var(--primary-bg);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  .page-loader-text {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .progress-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    padding: 10px 12px;
+    background: var(--surface-alt);
+    border-radius: var(--radius-sm);
+    margin-top: 12px;
+  }
+
+  .divider { height: 1px; background: var(--border); margin: 18px 0; border: none; }
+
+  .link { color: var(--primary); text-decoration: none; font-weight: 600; }
+  .link:hover { text-decoration: underline; }
+
+  /* ---------- Resumen tras crear cotización ---------- */
+
+  .result-card {
+    text-align: center;
+    padding: 40px 28px;
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  .result-icon {
+    width: 56px; height: 56px;
+    margin: 0 auto 16px;
+    border-radius: 50%;
+    background: var(--success-bg);
+    color: var(--success);
+    font-size: 28px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .result-title { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
+  .result-codigo {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--primary-hover);
+    background: var(--primary-bg);
+    display: inline-block;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    margin-bottom: 10px;
+  }
+  .result-detail { color: var(--text-muted); font-size: 13px; margin-bottom: 16px; }
+  .result-doc { min-height: 24px; margin-bottom: 20px; }
+  .result-doc .progress-note { justify-content: center; margin-top: 0; }
+  .result-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  /* ---------- Gestionar cotización ---------- */
+
+  .gestion-row { cursor: pointer; }
+  .back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 0;
+  }
+  .back-link:hover { color: var(--primary); }
+
+  .detail-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .detail-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* ---------- OIS: popup de aprobación y tareas ---------- */
+
+  .modal-box.modal-box-sm { max-width: 460px; }
+  .aprobar-modal-text { margin: 0 0 14px; color: var(--text-muted); font-size: 13px; text-align: center; }
+  .aprobar-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .aprobar-option {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 16px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    cursor: pointer;
+    transition: border-color 0.12s ease, background 0.12s ease;
+  }
+  .aprobar-option:hover { border-color: var(--primary); background: var(--primary-bg); }
+  .aprobar-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .aprobar-option-title { font-size: 20px; font-weight: 800; color: var(--primary); letter-spacing: 0.02em; }
+  .aprobar-option-desc { font-size: 12px; color: var(--text-muted); }
+  #aprobar-oip-btn .aprobar-option-title { color: var(--text-faint); }
+  .aprobar-oip-note { margin-top: 10px; text-align: center; color: var(--warning); }
+
+  /* Botón de ícono "marcar como finalizada": contorno verde; relleno verde
+     cuando la tarea ya está finalizada (clic = volver a "En curso"). Doble
+     clase por especificidad, mismo criterio que .btn.btn-icon-edit. */
+  .btn.btn-icon-done {
+    padding: 0; width: 30px; height: 30px; flex: none; border-radius: 8px;
+    background: #fff; border-color: var(--success); color: var(--success);
+  }
+  .btn.btn-icon-done svg { width: 16px; height: 16px; }
+  .btn.btn-icon-done:hover, .btn.btn-icon-done.is-done { background: var(--success); color: #fff; border-color: var(--success); }
+  .btn.btn-icon-done.is-done:hover { background: #fff; color: var(--success); }
+
+  .tarea-row-info { align-items: center; }
+  .tarea-text { min-width: 0; flex: 1; }
+  .tarea-title { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+  .tarea-row.tarea-finalizada .tarea-title { text-decoration: line-through; color: var(--text-muted); }
+  .tareas-empty { padding: 14px; margin-bottom: 10px; }
+
+  /* Bloquea toda la vista hasta que el dato termina de cargar (nunca se
+     muestra un formulario a medio llenar, ni un dashboard con KPIs en cero
+     y gráficas vacías). Clase compartida: el detalle de "Gestionar
+     cotización" (#ge-detail-loading, setDetailBusy en JsGestion.js.html) y
+     el Dashboard (#dash-loading, View.busy en JsDashboard.js.html) la usan
+     igual — ninguna es dueña, no le agregues estilos específicos de una
+     sola vista aquí. :not([hidden]) es necesario: display:flex de una clase
+     de autor gana por cascada sobre el [hidden]{display:none} del
+     user-agent, así que sin este guard el spinner se quedaba visible para
+     siempre aunque JS le pusiera hidden=true tras terminar de cargar. */
+  .detail-loading:not([hidden]) {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 80px 20px;
+  }
+
+  .warn-banner {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-size: 12.5px;
+    margin-bottom: 16px;
+  }
+
+
+  /* ==================================================================
+     Dashboard de cotizaciones
+     ------------------------------------------------------------------
+     Paleta: solo los tokens ya definidos en :root (blanco + verde oliva,
+     ámbar = advertencia, rojo = alerta, verde = éxito). Las series
+     categóricas de las gráficas usan una rampa monocromática derivada de
+     --primary, para no introducir un acento nuevo.
+     ================================================================== */
+
+  :root {
+    /* Rampa categórica (Servicios por tipo): tintes del oliva de marca. */
+    --chart-1: #6b7c3f;
+    --chart-2: #86975a;
+    --chart-3: #a1b177;
+    --chart-4: #bcc997;
+    --chart-5: #d2dbb8;
+    --chart-6: #e4ead2;
+
+    /* Series por estado, alineadas con los badges de la tabla. */
+    --chart-revision: #b45309;
+    --chart-aprobada: #16a34a;
+    --chart-rechazada: #dc2626;
+  }
+
+  .dash-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .dash-updated {
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  /* ---------- KPIs como filtros rápidos ---------- */
+
+  .dash-kpis { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); }
+
+  /* <button> para que el filtro rápido sea accesible por teclado; se
+     neutraliza la apariencia nativa y se hereda la de .kpi-card. */
+  .kpi-card.kpi-action {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    transition: border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+  }
+
+  .kpi-card.kpi-action:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+  }
+
+  .kpi-card.kpi-action:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  .kpi-card.kpi-action .label {
+    line-height: 1.35;
+    min-height: 2.7em;
+  }
+
+  .kpi-card.kpi-action .value { margin-top: 0; }
+  .kpi-card .sub {
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+
+  /* Medidor: participación del KPI sobre el universo del año filtrado. */
+  .kpi-meter {
+    height: 3px;
+    border-radius: 999px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .kpi-meter > span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--primary);
+    transition: width 0.3s ease;
+  }
+  .kpi-card.warn .kpi-meter > span { background: var(--warning); }
+  .kpi-card.alert .kpi-meter > span { background: var(--danger); }
+  .kpi-card.good .kpi-meter > span { background: var(--success); }
+
+  .kpi-card.kpi-active {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px var(--primary), var(--shadow-md);
+  }
+  .kpi-card.kpi-active.warn { border-color: var(--warning); box-shadow: 0 0 0 1px var(--warning), var(--shadow-md); }
+  .kpi-card.kpi-active.alert { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger), var(--shadow-md); }
+  .kpi-card.kpi-active.good { border-color: var(--success); box-shadow: 0 0 0 1px var(--success), var(--shadow-md); }
+
+  /* ---------- Rejilla de gráficas ---------- */
+
+  .dash-charts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .dash-charts .card + .card { margin-top: 0; }
+
+  .chart-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+  }
+  .chart-card .section-title-row { margin-bottom: 0; }
+
+  .chart-meta {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  .chart-empty {
+    padding: 28px 10px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 12.5px;
+  }
+
+  /* ---------- Donut (distribución por estado) ---------- */
+
+  .donut-wrap {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+
+  /* El gradiente cónico lo escribe el JS en --donut (un solo style write). */
+  .donut {
+    position: relative;
+    width: 128px;
+    height: 128px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--donut, var(--border));
+  }
+
+  .donut-hole {
+    position: absolute;
+    inset: 25px;
+    border-radius: 50%;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .donut-value {
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .donut-caption {
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-top: 3px;
+  }
+
+  .chart-legend {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    flex: 1 1 130px;
+    min-width: 0;
+  }
+
+  .chart-legend li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    min-width: 0;
+  }
+
+  .chart-legend .legend-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chart-legend .legend-count {
+    font-family: ui-monospace, monospace;
+    font-weight: 600;
+    font-size: 12px;
+  }
+
+  .chart-legend .legend-pct {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    width: 38px;
+    text-align: right;
+  }
+
+  .chart-legend-inline {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 14px;
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+
+  .legend-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 3px;
+    flex: none;
+    background: var(--border-strong);
+  }
+  .legend-dot-revision { background: var(--chart-revision); }
+  .legend-dot-decidida { background: var(--chart-1); }
+
+  /* ---------- Barras verticales (cotizaciones creadas por día) ---------- */
+
+  .bars-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    height: 152px;
+  }
+
+  .bar-col {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .bar-value {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  /* Apilado: el tramo "en revisión" se dibuja dentro del total. */
+  .bar-stack {
+    width: 100%;
+    max-width: 76px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    border-radius: 7px 7px 3px 3px;
+    overflow: hidden;
+    background: var(--chart-1);
+    transition: height 0.3s ease;
+  }
+  .bar-stack > span {
+    display: block;
+    width: 100%;
+    background: var(--chart-revision);
+  }
+
+  .bar-label {
+    font-family: ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* ---------- Barras horizontales (vigencia / tipos) ---------- */
+
+  .hbar-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .hbar {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+  }
+
+  .hbar-key {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    flex: 0 0 86px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .hbar-track {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 9px;
+    border-radius: 999px;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .hbar-track > span {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease;
+  }
+
+  .hbar-val {
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    font-weight: 600;
+    flex: 0 0 auto;
+    min-width: 48px;
+    text-align: right;
+  }
+  .hbar-val.overdue { color: var(--danger); }
+  .hbar-val.soon { color: var(--warning); }
+
+  /* Variante con etiqueta arriba (Servicios por tipo: el nombre es largo). */
+  .hbar-list-labeled { gap: 12px; }
+  .hbar-labeled { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .hbar-labeled .hbar-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12.5px;
+    min-width: 0;
+  }
+  .hbar-labeled .hbar-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hbar-labeled .hbar-meta {
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    flex: none;
+  }
+  .hbar-labeled .hbar-track { height: 7px; }
+
+  /* ---------- Calidad de datos ---------- */
+
+  .calidad-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(262px, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+  }
+
+  .calidad-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-align: left;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    font: inherit;
+    color: inherit;
+  }
+
+  .calidad-card-action { cursor: pointer; transition: border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease; }
+  .calidad-card-action:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); border-color: var(--border-strong); }
+  .calidad-card-action:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+  .calidad-tag {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--text-faint);
+  }
+
+  .calidad-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--text-faint);
+  }
+  .calidad-dot.good { background: var(--success); }
+  .calidad-dot.warn { background: var(--warning); }
+  .calidad-dot.alert { background: var(--danger); }
+
+  .calidad-titulo { font-size: 12.5px; font-weight: 700; }
+  .calidad-cuerpo { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+
+  /* ---------- Chips de filtros activos ---------- */
+
+  .filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+    margin: -4px 0 14px;
+  }
+  .filter-chips[hidden] { display: none; }
+
+  .filter-chips .chips-label {
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--primary-soft);
+    background: var(--primary-bg);
+    color: var(--primary-hover);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+  }
+  .chip:hover { background: var(--primary-soft); border-color: var(--primary); }
+  .chip .chip-x { font-weight: 700; opacity: 0.65; }
+
+  /* ---------- Tabla expandible ---------- */
+
+  .data-table-expandable { min-width: 980px; }
+  .data-table .col-num { text-align: right; }
+  .data-table .col-expand { width: 44px; }
+
+  td.cell-num {
+    text-align: right;
+    font-family: ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  .cell-cliente { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .cell-cliente .cliente-nombre {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+  }
+  .cell-cliente .cliente-contacto {
+    font-size: 11px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 260px;
+  }
+
+  .row-toggle {
+    width: 27px;
+    height: 27px;
+    padding: 0;
+    flex: none;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface-alt);
+    color: var(--text-muted);
+    font-family: ui-monospace, monospace;
+    font-size: 14px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  }
+  .row-toggle:hover { background: var(--primary-bg); color: var(--primary); border-color: var(--primary-soft); }
+
+  tr.is-expanded > td { background: var(--surface-alt); }
+  tr.row-detail > td { background: var(--surface-alt); padding: 0 12px 16px; }
+  tr.row-detail:hover > td { background: var(--surface-alt); }
+
+  .detail-panel { display: flex; flex-direction: column; gap: 12px; }
+
+  .detail-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 18px;
+    padding-top: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .detail-meta .meta-item strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .detail-meta .detail-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .detail-servicios {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  .detail-servicios th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 600;
+    padding: 0 8px 6px;
+    white-space: nowrap;
+  }
+  .detail-servicios td {
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .detail-servicios .num-col { width: 30px; color: var(--text-faint); font-family: ui-monospace, monospace; }
+  .detail-servicios .money { text-align: right; font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .detail-servicios .srv-unspsc { font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--text-faint); display: block; margin-top: 2px; }
+
+  .detail-totales {
+    display: flex;
+    justify-content: flex-end;
+    gap: 22px;
+    flex-wrap: wrap;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    font-family: ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+  .detail-totales .total-final { color: var(--text); font-weight: 700; }
+
+  /* Loader/error en línea del detalle expandible de una fila del Dashboard.
+     Va con nombre propio (row-detail-*) y NO .detail-loading: esa clase es la
+     del bloqueo de pantalla completa compartido por "Gestionar cotización" y
+     el propio Dashboard (ver arriba), y como este bloque viene después en la
+     hoja, su display:flex sin guard le ganaba a .detail-loading:not([hidden])
+     y dejaba ese spinner visible para siempre (además de pintarlo con este
+     layout compacto en vez del centrado). */
+  .row-detail-loading, .row-detail-error {
+    padding: 18px 8px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .row-detail-error { color: var(--danger); }
+
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* ---------- Topbar móvil + menú lateral (hamburguesa) ---------- */
+
+  .mobile-topbar {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 900;
+  }
+
+  .hamburger-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px; height: 34px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    flex: none;
+    padding: 0;
+  }
+  .hamburger-btn:hover { background: var(--surface-alt); }
+
+  .mobile-topbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .brand-logo-sm {
+    width: 26px;
+    height: 26px;
+    object-fit: contain;
+    flex: none;
+  }
+
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 24, 32, 0.45);
+    z-index: 999;
+  }
+  .sidebar-overlay.open { display: block; }
+
+  @media (max-width: 760px) {
+    .app-shell { flex-direction: column; }
+
+    .mobile-topbar { display: flex; }
+
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      height: 100vh;
+      width: 260px;
+      max-width: 82vw;
+      flex: none;
+      flex-direction: column;
+      align-items: stretch;
+      padding: 20px 14px;
+      border-right: 1px solid var(--border);
+      border-bottom: none;
+      overflow-y: auto;
+      overflow-x: hidden;
+      z-index: 1000;
+      transform: translateX(-100%);
+      transition: transform 0.22s ease;
+      box-shadow: var(--shadow-md);
+    }
+    .sidebar.open { transform: translateX(0); }
+
+    .sidebar-brand { padding: 4px 10px 18px; }
+    .sidebar-footer { display: flex; }
+
+    .main { padding: 18px 16px 40px; }
+    .field.span-2 { grid-column: auto; }
+
+    /* Centrar todos los textos en móvil (a petición explícita del usuario). */
+    body { text-align: center; }
+    input, select, textarea, button { text-align: center; }
+
+    .page-header { flex-direction: column; align-items: center; text-align: center; }
+    .page-header h1, .page-header .desc { text-align: center; }
+
+    .section-title, .section-title-row {
+      justify-content: center;
+      text-align: center;
+    }
+    .section-title-row .section-title { width: 100%; justify-content: center; }
+
+    .picker-row { justify-content: center; }
+    .field { align-items: center; }
+    .field label { width: 100%; }
+
+    .modal-header { flex-direction: column; gap: 8px; }
+    .modal-close { position: absolute; top: 14px; right: 14px; }
+    .modal-header h2 { width: 100%; }
+    .modal-footer { justify-content: center; flex-wrap: wrap; }
+
+    .filters-row { justify-content: center; }
+    .pagination-row { flex-direction: column; gap: 10px; text-align: center; }
+
+    .servicio-row { flex-direction: column; text-align: center; }
+    .servicio-row-info { flex-direction: column; width: 100%; }
+    .servicio-summary { white-space: normal; }
+    .servicio-row-actions { width: 100%; justify-content: center; }
+    .detail-header-row { flex-direction: column; justify-content: center; }
+    .detail-header-actions { justify-content: center; }
+    .tarea-row-info { flex-direction: column; align-items: center; }
+    .aprobar-options { grid-template-columns: 1fr; }
+
+    .kpi-card { text-align: center; }
+
+    /* Dashboard: en móvil todo centrado (regla general de la app). */
+    .dash-header-actions { width: 100%; justify-content: center; }
+    .kpi-card.kpi-action { text-align: center; align-items: center; }
+    .kpi-card.kpi-action .label { min-height: 0; }
+    .dash-charts { grid-template-columns: 1fr; }
+    .chart-card .section-title-row { justify-content: center; }
+    .donut-wrap { flex-direction: column; justify-content: center; }
+    .chart-legend { width: 100%; }
+    .chart-legend-inline { justify-content: center; }
+    .hbar-key { flex-basis: 70px; text-align: left; }
+    .hbar-labeled .hbar-head { text-align: left; }
+    .calidad-grid { grid-template-columns: 1fr; }
+    .calidad-card { text-align: center; align-items: center; }
+    .filter-chips { justify-content: center; }
+    .detail-meta { justify-content: center; }
+    .detail-meta .detail-actions { margin-left: 0; width: 100%; justify-content: center; }
+    .detail-totales { justify-content: center; }
+    .cell-cliente { align-items: center; }
+
+    .resumen-head { flex-direction: column; align-items: center; text-align: center; }
+    .resumen-title { width: 100%; }
+    .garantia-actions { justify-content: center; }
+    .garantia-actions .btn { flex: 1 1 100%; }
+    .garantia-confirm { text-align: center; }
+
+    .warn-banner { flex-direction: column; align-items: center; text-align: center; }
+    .progress-note { flex-direction: column; text-align: center; }
+  }
+</style>

@@ -1,0 +1,1234 @@
+<script>
+/**
+ * Lógica de la vista "Gestionar cotización": listado buscable/filtrable
+ * (reutiliza api_getDashboard, sin polling — esta vista se recarga a
+ * demanda, no en vivo) con filas clickeables, y un detalle de edición que
+ * reutiliza el modal genérico (KGP.entityModal) y las plantillas de
+ * servicio/actividad de ViewCotizacion.html.
+ *
+ * El listado usa KGP.localCache (JsCore.js.html) para pintarse de inmediato
+ * con el último dato visto y refrescarse en segundo plano (nunca sustituye
+ * la llamada real, solo evita la espera visible) — botón "Actualizar" para
+ * forzarlo a demanda. El detalle NO participa de esa caché: siempre trae el
+ * dato fresco y bloquea toda la vista (ge-detail-loading/ge-detail-content)
+ * hasta terminar, para no dejar ver un formulario a medio llenar.
+ *
+ * "Guardar cambios" es también un flujo de 2 fases (igual que crear):
+ * primero api_updateQuotation (BD), luego api_regenerateDocument (plantilla),
+ * para que la sección crítica del lock nunca incluya la generación del
+ * Excel.
+ *
+ * ESTADO no es un campo del formulario: la cotización nace "En revisión" y
+ * los botones "Garantía aprobada/rechazada" del resumen lo cambian una sola
+ * vez, reutilizando ese mismo "Guardar cambios" con payload.estado (no hay
+ * endpoint aparte, ver CLAUDE.md §2.1). En cualquier otro guardado,
+ * payload.estado va vacío y el servidor conserva el estado actual.
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  var listState = {
+    page: 1,
+    pageSize: 20,
+    total: 0,
+    filters: { anio: '', estado: '', q: '' },
+    sortBy: 'codigo',
+    sortDir: 'asc',
+    loaded: false,
+    everLoaded: false
+  };
+
+  var detail = {
+    idCotizacion: null,
+    clienteDetalle: null, // {cliente, contactos:[], establecimientos:[]}
+    servicios: [],        // [{localId, idServicio|null, tipo, codigoUnspsc, descripcion, actividades:[], tarifa, cantidad, total, observaciones}], editados vía KGP.servicioModal
+    tiposServicio: [],
+    unspscMap: {},
+    estado: '',
+    fechaElaboracion: '',
+    totalesGuardados: null, // {subtotal, iva, total} tal como están en la BD, para avisar de cambios sin guardar
+    elaboradoPorNombre: '',
+    cargoElaborador: '',
+    revisadoAprobadoPorNombre: '',
+    ois: null // {idOis, codigo} si la cotización ya se aprobó con "Crear OIS" (botón "Ver OIS")
+  };
+
+  var IVA_TASA = 0.19; // = CFG().IVA_TASA; el servidor recalcula y es la fuente de verdad al guardar
+  var ESTADO_INICIAL = 'En revisión';
+  var ESTADO_APROBADA = 'Aprobada';
+  var ESTADO_RECHAZADA = 'Rechazada';
+
+  var pendingOpenId = null;
+  var servicioSeq = 0;
+  var eventsWired = false;
+  var yearsPopulated = false;
+
+  // Identifica la carga de detalle en curso: cada openDetail() toma un token
+  // nuevo y showList() lo invalida. Una respuesta que llega tarde (se abrió
+  // otra cotización, o el usuario ya volvió al listado) se descarta en vez de
+  // pisar el formulario visible o tocar el loader de una carga más reciente.
+  var detailLoadToken = 0;
+
+  // El detalle no espera los 90s por defecto de KGP.apiCall: si google.script.run
+  // no contesta (sesión del iframe caída, request perdido), el usuario se queda
+  // mirando el spinner todo ese tiempo. Con 25s falla rápido, avisa y devuelve
+  // al listado, que es recuperable con un clic.
+  var DETAIL_CALL_OPTS = { timeoutMs: 25000 };
+
+  // ---------------- Entrada de la vista ----------------
+
+  KGP.gestion.onEnter = function () {
+    wireEvents();
+    if (!yearsPopulated) { populateYearsFilter(); yearsPopulated = true; }
+
+    if (pendingOpenId) {
+      var id = pendingOpenId;
+      pendingOpenId = null;
+      openDetail(id);
+      return;
+    }
+    if (listState.loaded) return; // ya se cargó en esta sesión: no repetir la consulta cada vez que se vuelve a esta vista
+
+    if (!listState.everLoaded) {
+      listState.everLoaded = true;
+      // Pinta de inmediato el último listado conocido (si existe) para no
+      // mostrar "Cargando…" en cada apertura de la vista; de todos modos se
+      // pide el dato real de la BD justo debajo, en segundo plano.
+      var cached = KGP.localCache.get('gestion:list');
+      if (cached && isDefaultListQuery()) {
+        listState.total = cached.total;
+        renderTable(cached.rows);
+        renderPaginationInfo();
+        fetchList({ silent: true });
+        return;
+      }
+    }
+    fetchList();
+  };
+
+  /** Solo la consulta "por defecto" (sin filtros, página 1, orden y tamaño de página por defecto) se cachea localmente — es la que se ve al abrir la vista. */
+  function isDefaultListQuery() {
+    return !listState.filters.anio && !listState.filters.estado && !listState.filters.q && listState.page === 1 &&
+      listState.sortBy === 'codigo' && listState.sortDir === 'asc' && listState.pageSize === 20;
+  }
+
+  /** Punto de entrada externo (p. ej. botón "Gestionar cotización" del resumen de creación). */
+  KGP.gestion.openDetail = function (idCotizacion) {
+    if (KGP.state.view === 'gestion') {
+      openDetail(idCotizacion);
+    } else {
+      pendingOpenId = idCotizacion;
+      KGP.nav('gestion');
+    }
+  };
+
+  // ---------------- Listado ----------------
+
+  /**
+   * Invalida cualquier carga de detalle en vuelo y deja el detalle en un
+   * estado limpio (sin spinner armado): si no, una respuesta tardía podía
+   * volver a mostrar el formulario de otra cotización sobre el listado, y el
+   * loader quedaba en "cargando" esperando a la próxima apertura.
+   * Si el listado nunca se llegó a consultar en esta sesión (p. ej. se entró
+   * directo al detalle desde el resumen de creación), se pide aquí — si no, la
+   * tabla se quedaba con el "Cargando…" inicial del HTML para siempre.
+   */
+  function showList() {
+    detailLoadToken++;
+    setDetailBusy(false);
+    document.getElementById('ge-detail-wrap').hidden = true;
+    document.getElementById('ge-list-wrap').hidden = false;
+    if (!listState.loaded) fetchList();
+  }
+
+  /** opts.silent: no pisa la tabla ya visible con "Cargando…" (refresco en segundo plano, p. ej. tras hidratar desde caché local o el botón "Actualizar"). */
+  function fetchList(opts) {
+    opts = opts || {};
+    var tbody = document.getElementById('ge-tbody');
+    if (!opts.silent) tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Cargando…</td></tr>';
+    setListRefreshSpinner(true);
+
+    var params = {
+      sinceVersion: null, // esta vista no hace polling: siempre pide el dato fresco al abrirse/filtrar
+      anio: listState.filters.anio || null,
+      estado: listState.filters.estado || null,
+      q: listState.filters.q || '',
+      page: listState.page,
+      pageSize: listState.pageSize,
+      sortBy: listState.sortBy,
+      sortDir: listState.sortDir
+    };
+
+    return KGP.apiCall('api_getDashboard', [params]).then(function (res) {
+      listState.loaded = true;
+      listState.total = res.total;
+      renderTable(res.rows);
+      renderPaginationInfo();
+      if (isDefaultListQuery()) {
+        KGP.localCache.set('gestion:list', { total: res.total, rows: res.rows });
+      }
+    }).catch(function (err) {
+      if (!opts.silent) tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No se pudo cargar el listado.</td></tr>';
+      KGP.toast('No se pudo cargar el listado: ' + KGP.friendlyError(err), 'error');
+    }).finally(function () {
+      setListRefreshSpinner(false);
+    });
+  }
+
+  function setListRefreshSpinner(show) {
+    var el = document.getElementById('ge-refresh-spinner');
+    if (el) el.style.display = show ? 'inline-block' : 'none';
+  }
+
+  function estadoBadgeClass(estado) {
+    if (estado === 'Aprobada' || estado === 'Aprobado') return 'badge-aprobado';
+    if (estado === 'Rechazada' || estado === 'Rechazado') return 'badge-rechazado';
+    return 'badge-revision';
+  }
+
+  function renderTable(rows) {
+    var tbody = document.getElementById('ge-tbody');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No hay cotizaciones que coincidan con los filtros.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(function (r) {
+      return '<tr class="gestion-row" data-id="' + KGP.escapeHtml(r.idCotizacion) + '">' +
+        '<td class="cell-mono">' + KGP.escapeHtml(r.codigo) + '</td>' +
+        '<td>' + KGP.escapeHtml(r.clienteNombre || '—') + '</td>' +
+        '<td class="cell-muted">' + KGP.escapeHtml(r.fechaElaboracion || '—') + '</td>' +
+        '<td class="cell-muted">' + KGP.escapeHtml(r.fechaVencimiento || '—') + '</td>' +
+        '<td>' + r.numServicios + '</td>' +
+        '<td><span class="badge ' + estadoBadgeClass(r.estado) + '">' + KGP.escapeHtml(r.estado) + '</span></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function renderPaginationInfo() {
+    var el = document.getElementById('ge-page-info');
+    var total = listState.total;
+    var start = total ? (listState.page - 1) * listState.pageSize + 1 : 0;
+    var end = Math.min(listState.page * listState.pageSize, total);
+    el.textContent = total ? ('Mostrando ' + start + '–' + end + ' de ' + total) : 'Sin resultados';
+    document.getElementById('ge-prev').disabled = listState.page <= 1;
+    document.getElementById('ge-next').disabled = end >= total;
+  }
+
+  function populateYearsFilter() {
+    var sel = document.getElementById('ge-filter-anio');
+    var current = new Date().getFullYear();
+    for (var y = current; y >= current - 4; y--) {
+      var opt = document.createElement('option');
+      opt.value = String(y);
+      opt.textContent = String(y);
+      sel.appendChild(opt);
+    }
+  }
+
+  function debounce(fn, ms) {
+    var t;
+    return function () {
+      var args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(null, args); }, ms);
+    };
+  }
+
+  function onFilterChange() {
+    listState.page = 1;
+    fetchList();
+  }
+
+  // ---------------- Detalle / edición ----------------
+
+  function currentClienteId() { return document.getElementById('ge-cliente-select').value; }
+
+  /**
+   * No se muestra nada del formulario hasta que la cotización termina de
+   * cargar por completo (ver setDetailBusy): ni el botón "Gestionar
+   * cotización" del resumen de creación ni un clic en una fila del listado
+   * deben dejar ver un formulario vacío o a medio llenar mientras llega el
+   * dato. Si algo falla, se vuelve al listado en vez de dejar la vista de
+   * detalle en un estado inconsistente.
+   */
+  function openDetail(idCotizacion) {
+    var token = ++detailLoadToken;
+    document.getElementById('ge-list-wrap').hidden = true;
+    document.getElementById('ge-detail-wrap').hidden = false;
+    detail.idCotizacion = idCotizacion;
+    setDetailBusy(true);
+
+    // Todo lo que pueda lanzar va DENTRO de la cadena (incluido resetDetailForm
+    // y el armado de las llamadas): el estado "cargando" es el que trae el HTML
+    // por defecto, así que una excepción síncrona aquí dejaba el spinner puesto
+    // para siempre, sin toast y sin volver al listado. Como promesa, cualquier
+    // fallo cae en el .catch y el .finally siempre quita el loader.
+    Promise.resolve().then(function () {
+      resetDetailForm();
+      return Promise.all([
+        KGP.apiCall('api_getCotizacion', [idCotizacion], DETAIL_CALL_OPTS),
+        KGP.catalog.load()
+      ]);
+    }).then(function (results) {
+      if (token !== detailLoadToken) return; // llegó tarde: ya se abrió otra cotización o se volvió al listado
+      var cot = results[0];
+      var cat = results[1];
+
+      detail.tiposServicio = cat.tiposServicio || [];
+      detail.unspscMap = KGP.ui.buildUnspscMap(cat.catalogoPares || []);
+
+      var asesorSel = document.getElementById('ge-asesor-select');
+      KGP.ui.rebuildSelect(asesorSel, cat.empleados || [], function (emp) { return emp.idEmpleado; }, function (emp) { return emp.nombre + (emp.cargo ? ' — ' + emp.cargo : ''); }, '— Sin asignar —');
+      asesorSel.value = cot.cotizacion.asesorComercial || '';
+
+      fillGeneral(cot.cotizacion);
+      detail.estado = cot.cotizacion.estado || ESTADO_INICIAL;
+      detail.fechaElaboracion = cot.cotizacion.fechaElaboracion || '';
+      detail.elaboradoPorNombre = cot.cotizacion.elaboradoPorNombre || '';
+      detail.cargoElaborador = cot.cotizacion.cargoElaborador || '';
+      detail.revisadoAprobadoPorNombre = cot.cotizacion.revisadoAprobadoPorNombre || '';
+      detail.ois = cot.cotizacion.ois || null;
+      setOisButton();
+      detail.totalesGuardados = {
+        subtotal: cot.cotizacion.subtotal,
+        iva: cot.cotizacion.iva,
+        total: cot.cotizacion.total
+      };
+
+      detail.servicios = [];
+      (cot.servicios || []).forEach(function (s) { addServicioToDetail(s); });
+      renderServiciosList(); // también pinta el resumen
+
+      return KGP.apiCall('api_getClienteDetalle', [cot.cotizacion.idCliente], DETAIL_CALL_OPTS).then(function (det) {
+        if (token !== detailLoadToken) return;
+        detail.clienteDetalle = det;
+        populateClienteSelects(det, cot.cotizacion);
+        applyLockState(); // por si la cotización ya fue Aprobada/Rechazada: bloquea todo el formulario
+      });
+    }).catch(function (err) {
+      if (token !== detailLoadToken) return;
+      KGP.toast('No se pudo cargar la cotización: ' + KGP.friendlyError(err), 'error', 7000);
+      showList();
+    }).finally(function () {
+      // Pase lo que pase (éxito, error del servidor, o un error de render en
+      // los .then de arriba) el loader se quita: nunca se deja la vista en
+      // "Cargando cotización…". Si ya hay otra carga en curso, es ella quien
+      // manda sobre el loader.
+      if (token === detailLoadToken) setDetailBusy(false);
+    });
+  }
+
+  function resetDetailForm() {
+    document.getElementById('ge-servicios-list').innerHTML = '';
+    detail.servicios = [];
+    detail.clienteDetalle = null;
+    document.getElementById('ge-doc-status').innerHTML = '';
+    setDocButton(null, null);
+    clearInvalid();
+    detail.estado = '';
+    detail.fechaElaboracion = '';
+    detail.totalesGuardados = null;
+    detail.elaboradoPorNombre = '';
+    detail.cargoElaborador = '';
+    detail.revisadoAprobadoPorNombre = '';
+    detail.ois = null;
+    setOisButton();
+    closeAprobarModal();
+    document.getElementById('ge-asesor-select').innerHTML = '<option value="">— Sin asignar —</option>';
+    showGarantiaConfirm(null);
+  }
+
+  /**
+   * Bloquea toda la vista de detalle (nada de formulario visible) mientras
+   * carga o mientras se guardan cambios — se reutiliza para ambos casos
+   * (texto configurable) para que "Guardar cambios" tampoco deje ver nada
+   * más que el loader mientras la BD y el documento se actualizan.
+   */
+  function setDetailBusy(busy, text) {
+    document.getElementById('ge-detail-loading').hidden = !busy;
+    document.getElementById('ge-detail-content').hidden = busy;
+    if (busy) document.getElementById('ge-detail-loading-text').textContent = text || 'Cargando cotización…';
+  }
+
+  function fillGeneral(c) {
+    document.getElementById('ge-codigo').value = c.codigo;
+    document.getElementById('ge-fecha').value = c.fechaElaboracion;
+    document.getElementById('ge-plazo').value = c.plazo;
+    document.getElementById('ge-fecha-venc').value = c.fechaVencimiento;
+    document.getElementById('ge-descripcion').value = c.descripcion;
+    document.getElementById('ge-tiempo-entrega').value = c.tiempoEntrega || '';
+    setDocButton(c.urlDocumento, c.docEstado);
+  }
+
+  /** Botón "Abrir documento": solo visible cuando ya existe un .xlsx generado con éxito. */
+  function setDocButton(url, docEstado) {
+    var btn = document.getElementById('ge-abrir-doc-btn');
+    if (url && docEstado === 'OK') {
+      btn.href = url;
+      btn.hidden = false;
+    } else {
+      btn.hidden = true;
+      btn.removeAttribute('href');
+    }
+  }
+
+  function recomputeVencimiento() {
+    var fecha = document.getElementById('ge-fecha').value;
+    var plazo = Number(document.getElementById('ge-plazo').value);
+    var out = document.getElementById('ge-fecha-venc');
+    if (!fecha || !plazo || plazo < 1) { out.value = '—'; renderResumen(); return; }
+    var d = new Date(fecha + 'T12:00:00');
+    d.setDate(d.getDate() + Math.trunc(plazo));
+    var iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    out.value = iso;
+    renderResumen();
+  }
+
+  function populateClienteSelects(det, cotizacion) {
+    var clienteSel = document.getElementById('ge-cliente-select');
+    KGP.ui.rebuildSelect(clienteSel, (KGP.catalog.current() || {}).clientes || [], function (c) { return c.idCliente; }, KGP.ui.clientLabel, '— Selecciona —');
+    clienteSel.value = cotizacion.idCliente;
+
+    var solSel = document.getElementById('ge-solicitante-select');
+    KGP.ui.rebuildSelect(solSel, det.contactos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+      det.contactos.length ? '— Selecciona —' : '— Sin contactos registrados —');
+    solSel.value = cotizacion.idSolicitante;
+    solSel.disabled = false;
+
+    var estSel = document.getElementById('ge-establecimiento-select');
+    KGP.ui.rebuildSelect(estSel, det.establecimientos, function (e) { return e.idEstablecimiento; }, KGP.ui.establecimientoLabel,
+      det.establecimientos.length ? '— Selecciona —' : '— Sin establecimientos registrados —');
+    estSel.value = cotizacion.idEstablecimiento;
+    estSel.disabled = false;
+
+    refreshEncargadoOptions();
+
+    syncEditButtons();
+  }
+
+  function resetDependentsEmpty() {
+    ['ge-solicitante-select', 'ge-establecimiento-select', 'ge-encargado-select'].forEach(function (id) {
+      var sel = document.getElementById(id);
+      sel.innerHTML = '<option value="">— Ninguno registrado aún —</option>';
+      sel.disabled = false;
+    });
+    syncEditButtons();
+  }
+
+  function handleClienteChange() {
+    var val = currentClienteId();
+    if (!val) {
+      detail.clienteDetalle = null;
+      ['ge-solicitante-select', 'ge-establecimiento-select', 'ge-encargado-select'].forEach(function (id) {
+        var sel = document.getElementById(id);
+        sel.innerHTML = '<option value="">— Primero selecciona un cliente —</option>';
+        sel.disabled = true;
+      });
+      syncEditButtons();
+      return;
+    }
+
+    // "Editar cliente" no debe esperar a que carguen sus contactos/
+    // establecimientos: se trae el cliente aparte, en paralelo.
+    cargarClienteBasico(val);
+
+    var solSel = document.getElementById('ge-solicitante-select');
+    var estSel = document.getElementById('ge-establecimiento-select');
+    var encSel = document.getElementById('ge-encargado-select');
+    solSel.disabled = true; estSel.disabled = true; encSel.disabled = true;
+    solSel.innerHTML = '<option value="">Cargando…</option>';
+    estSel.innerHTML = '<option value="">Cargando…</option>';
+
+    KGP.apiCall('api_getClienteDetalle', [val]).then(function (det) {
+      detail.clienteDetalle = det;
+      KGP.ui.rebuildSelect(solSel, det.contactos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+        det.contactos.length ? '— Selecciona —' : '— Sin contactos registrados —');
+      solSel.disabled = false;
+      KGP.ui.rebuildSelect(estSel, det.establecimientos, function (e) { return e.idEstablecimiento; }, KGP.ui.establecimientoLabel,
+        det.establecimientos.length ? '— Selecciona —' : '— Sin establecimientos registrados —');
+      estSel.disabled = false;
+      refreshEncargadoOptions();
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo cargar el cliente: ' + KGP.friendlyError(err), 'error');
+      ['ge-solicitante-select', 'ge-establecimiento-select'].forEach(function (id) {
+        document.getElementById(id).innerHTML = '<option value="">— Error al cargar, intenta de nuevo —</option>';
+      });
+    });
+  }
+
+  function cargarClienteBasico(idCliente) {
+    return KGP.apiCall('api_getCliente', [idCliente]).then(function (cliente) {
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.cliente = cliente;
+      } else {
+        detail.clienteDetalle = { cliente: cliente, contactos: [], establecimientos: [] };
+      }
+    }).catch(function () { /* "Editar cliente" sigue deshabilitado hasta que llegue el detalle completo */ });
+  }
+
+  /**
+   * Al elegir un establecimiento, el <select> de encargado se limita a los
+   * contactos del cliente que tienen ESE establecimiento asignado
+   * (CONTACTOS_CLIENTES.ID ESTABLECIMIENTO) — ya no se listan todos los
+   * contactos del cliente. Si hay un solo candidato, se autoselecciona.
+   */
+  function refreshEncargadoOptions() {
+    var idEstablecimiento = document.getElementById('ge-establecimiento-select').value;
+    var encSel = document.getElementById('ge-encargado-select');
+    if (!idEstablecimiento || !detail.clienteDetalle) {
+      encSel.innerHTML = '<option value="">— Selecciona un establecimiento primero —</option>';
+      encSel.disabled = true;
+      syncEditButtons();
+      return;
+    }
+    var candidatos = detail.clienteDetalle.contactos.filter(function (c) { return c.idEstablecimiento === idEstablecimiento; });
+    KGP.ui.rebuildSelect(encSel, candidatos, function (c) { return c.idContacto; }, KGP.ui.contactoLabel,
+      candidatos.length ? '— Selecciona —' : '— Sin contactos asignados a este establecimiento —');
+    encSel.disabled = false;
+    if (candidatos.length === 1) encSel.value = candidatos[0].idContacto;
+    syncEditButtons();
+  }
+
+  var EDIT_BTN_PAIRS = [
+    ['ge-cliente-select', 'ge-cliente-editar-btn'],
+    ['ge-solicitante-select', 'ge-solicitante-editar-btn'],
+    ['ge-establecimiento-select', 'ge-establecimiento-editar-btn'],
+    ['ge-encargado-select', 'ge-encargado-editar-btn']
+  ];
+
+  function syncEditButtons() {
+    EDIT_BTN_PAIRS.forEach(function (pair) {
+      var sel = document.getElementById(pair[0]);
+      var btn = document.getElementById(pair[1]);
+      if (sel && btn) btn.disabled = !sel.value;
+    });
+  }
+
+  function findContacto(idContacto) {
+    if (!detail.clienteDetalle) return null;
+    return detail.clienteDetalle.contactos.filter(function (c) { return c.idContacto === idContacto; })[0] || null;
+  }
+  function findEstablecimiento(idEstablecimiento) {
+    if (!detail.clienteDetalle) return null;
+    return detail.clienteDetalle.establecimientos.filter(function (e) { return e.idEstablecimiento === idEstablecimiento; })[0] || null;
+  }
+
+  // ---------------- Modal genérico (KGP.entityModal): Cliente / Contacto / Establecimiento ----------------
+
+  function crearClienteModal(datos) {
+    return KGP.apiCall('api_createCliente', [datos]).then(function (creado) {
+      KGP.toast('Cliente "' + creado.razonSocial + '" guardado.', 'success');
+      KGP.catalog.load(true);
+      KGP.ui.addOptionAndSelect(document.getElementById('ge-cliente-select'), creado.idCliente, KGP.ui.clientLabel(creado));
+      detail.clienteDetalle = { cliente: Object.assign({ idCliente: creado.idCliente, activo: 1 }, datos), contactos: [], establecimientos: [] };
+      resetDependentsEmpty();
+    }).catch(function (err) {
+      if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+        KGP.toast('Ya existe un cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+      } else {
+        KGP.toast('No se pudo guardar el cliente: ' + KGP.friendlyError(err), 'error');
+      }
+      throw err;
+    });
+  }
+
+  function editarClienteModal(idCliente, datos) {
+    return KGP.apiCall('api_updateCliente', [idCliente, datos]).then(function () {
+      KGP.toast('Cliente actualizado.', 'success');
+      KGP.catalog.load(true);
+      if (detail.clienteDetalle && detail.clienteDetalle.cliente) {
+        detail.clienteDetalle.cliente = Object.assign({}, detail.clienteDetalle.cliente, datos);
+      }
+      KGP.ui.updateOptionLabel(document.getElementById('ge-cliente-select'), idCliente, KGP.ui.clientLabel(datos));
+    }).catch(function (err) {
+      if (err.code === 'CONFLICT' && err.details && err.details.idClienteExistente) {
+        KGP.toast('Ya existe otro cliente con ese número de identificación (' + err.details.razonSocial + ').', 'error', 7000);
+      } else {
+        KGP.toast('No se pudo actualizar el cliente: ' + KGP.friendlyError(err), 'error');
+      }
+      throw err;
+    });
+  }
+
+  function crearContactoModal(target, datos) {
+    var idCliente = currentClienteId();
+    if (!idCliente) { KGP.toast('Primero selecciona o crea un cliente.', 'error'); return Promise.reject({ code: 'VALIDATION' }); }
+
+    // Un contacto creado como encargado queda asociado de una vez al
+    // establecimiento actualmente seleccionado (columna ID ESTABLECIMIENTO
+    // en CONTACTOS_CLIENTES), para que refreshEncargadoOptions lo proponga
+    // solo la próxima vez que se elija ese mismo establecimiento.
+    if (target === 'encargado') {
+      datos = Object.assign({}, datos, { idEstablecimiento: document.getElementById('ge-establecimiento-select').value });
+    }
+
+    return KGP.apiCall('api_createContacto', [idCliente, datos]).then(function (creado) {
+      KGP.toast('Contacto "' + creado.nombre + '" guardado.', 'success');
+      var full = Object.assign({ idContacto: creado.idContacto, idCliente: idCliente }, datos);
+      if (detail.clienteDetalle) detail.clienteDetalle.contactos.push(full);
+
+      // El solicitante siempre lista todos los contactos del cliente.
+      KGP.ui.addOption(document.getElementById('ge-solicitante-select'), full.idContacto, KGP.ui.contactoLabel(full));
+
+      if (target === 'encargado') {
+        // Ya quedó asociado al establecimiento seleccionado: refresca la
+        // lista filtrada de encargado y selecciónalo.
+        refreshEncargadoOptions();
+        document.getElementById('ge-encargado-select').value = full.idContacto;
+      } else {
+        document.getElementById('ge-solicitante-select').value = full.idContacto;
+      }
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el contacto: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function editarContactoModal(idContacto, datos) {
+    return KGP.apiCall('api_updateContacto', [idContacto, datos]).then(function () {
+      KGP.toast('Contacto actualizado.', 'success');
+      var full = Object.assign({ idContacto: idContacto }, datos);
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.contactos = detail.clienteDetalle.contactos.map(function (c) {
+          return c.idContacto === idContacto ? Object.assign({}, c, full) : c;
+        });
+      }
+      ['ge-solicitante-select', 'ge-encargado-select'].forEach(function (id) {
+        KGP.ui.updateOptionLabel(document.getElementById(id), idContacto, KGP.ui.contactoLabel(full));
+      });
+    }).catch(function (err) {
+      KGP.toast('No se pudo actualizar el contacto: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function crearEstablecimientoModal(datos) {
+    var idCliente = currentClienteId();
+    if (!idCliente) { KGP.toast('Primero selecciona o crea un cliente.', 'error'); return Promise.reject({ code: 'VALIDATION' }); }
+    var idContacto = document.getElementById('ge-encargado-select').value;
+
+    return KGP.apiCall('api_createEstablecimiento', [idCliente, datos, idContacto]).then(function (creado) {
+      KGP.toast('Establecimiento "' + creado.nombre + '" guardado.', 'success');
+      var full = Object.assign({ idEstablecimiento: creado.idEstablecimiento, idCliente: idCliente }, datos);
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.establecimientos.push(full);
+        // El servidor asoció el encargado del lado del contacto
+        // (con_setEstablecimiento_): refleja lo mismo localmente para que
+        // refreshEncargadoOptions lo filtre bien sin recargar el cliente.
+        if (idContacto) {
+          detail.clienteDetalle.contactos = detail.clienteDetalle.contactos.map(function (c) {
+            return c.idContacto === idContacto ? Object.assign({}, c, { idEstablecimiento: full.idEstablecimiento }) : c;
+          });
+        }
+      }
+      KGP.ui.addOptionAndSelect(document.getElementById('ge-establecimiento-select'), full.idEstablecimiento, KGP.ui.establecimientoLabel(full));
+      refreshEncargadoOptions();
+      syncEditButtons();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el establecimiento: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  function editarEstablecimientoModal(idEstablecimiento, datos) {
+    return KGP.apiCall('api_updateEstablecimiento', [idEstablecimiento, datos]).then(function () {
+      KGP.toast('Establecimiento actualizado.', 'success');
+      if (detail.clienteDetalle) {
+        detail.clienteDetalle.establecimientos = detail.clienteDetalle.establecimientos.map(function (e) {
+          return e.idEstablecimiento === idEstablecimiento ? Object.assign({}, e, datos) : e;
+        });
+      }
+      KGP.ui.updateOptionLabel(document.getElementById('ge-establecimiento-select'), idEstablecimiento, KGP.ui.establecimientoLabel(datos));
+    }).catch(function (err) {
+      KGP.toast('No se pudo actualizar el establecimiento: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
+  // ---------------- Servicios: popup de agregar/editar (KGP.servicioModal) ----------------
+
+  function stripActPrefix(texto) {
+    return String(texto || '').replace(/^\d+\.\d+\s+/, '');
+  }
+
+  /**
+   * detail.servicios guarda el detalle completo de cada servicio en memoria
+   * ({localId, idServicio|null, tipo, codigoUnspsc, descripcion,
+   * actividades[]}) — el popup (KGP.servicioModal) es el único lugar donde
+   * se editan esos campos; la lista en pantalla solo muestra un renglón
+   * resumen por servicio. idServicio se preserva al editar (identifica el
+   * servicio ya existente para qs_updateQuotation) y se completa para los
+   * nuevos recién creados tras "Guardar cambios" (ver syncServicioIds).
+   * Nada de esto llega al servidor hasta enviar el formulario completo.
+   * showTarifas: esta es la única vista que edita tarifas/observaciones.
+   */
+  function openServicioModal(servicio) {
+    KGP.servicioModal.open({
+      tiposServicio: detail.tiposServicio,
+      unspscMap: detail.unspscMap,
+      showTarifas: true,
+      initial: servicio || null,
+      onSave: function (servicioData) {
+        if (servicio) {
+          Object.assign(servicio, servicioData);
+        } else {
+          detail.servicios.push(Object.assign({ localId: 'gsrv' + (++servicioSeq), idServicio: null }, servicioData));
+        }
+        renderServiciosList();
+      }
+    });
+  }
+
+  /** Agrega al arreglo en memoria un servicio ya guardado (al cargar el detalle de una cotización existente), sin abrir el popup. */
+  function addServicioToDetail(s) {
+    detail.servicios.push({
+      localId: 'gsrv' + (++servicioSeq),
+      idServicio: s.idServicio,
+      tipo: s.tipo || '',
+      codigoUnspsc: s.codigoUnspsc || '',
+      descripcion: s.descripcion || '',
+      actividades: (s.actividades || []).map(stripActPrefix),
+      tarifa: s.tarifa === '' || s.tarifa == null ? '' : Number(s.tarifa),
+      cantidad: s.cantidad === '' || s.cantidad == null ? '' : Number(s.cantidad),
+      total: s.total === '' || s.total == null ? '' : Number(s.total),
+      observaciones: s.observaciones || ''
+    });
+  }
+
+  function addServicioBlock() {
+    if (detail.servicios.length >= 10) {
+      KGP.toast('Ya alcanzaste el máximo de 10 servicios.', 'warning');
+      return;
+    }
+    openServicioModal(null);
+  }
+
+  function removeServicioBlock(localId) {
+    detail.servicios = detail.servicios.filter(function (s) { return s.localId !== localId; });
+    renderServiciosList();
+  }
+
+  function servicioSummary(s) {
+    var numActividades = (s.actividades || []).length;
+    var txt = (s.tipo || 'Sin tipo elegido') + ' — ' + numActividades + ' actividad' + (numActividades === 1 ? '' : 'es');
+    if (s.tarifa !== '' && s.tarifa != null) {
+      txt += ' — ' + KGP.ui.formatMoney(s.tarifa) + ' × ' + (s.cantidad || 1) + ' = ' + KGP.ui.formatMoney(s.total);
+    } else {
+      txt += ' — sin tarifa';
+    }
+    return txt;
+  }
+
+  function renderServiciosList() {
+    var list = document.getElementById('ge-servicios-list');
+    list.innerHTML = '';
+    var locked = isLocked();
+    detail.servicios.forEach(function (s, idx) {
+      var tpl = document.getElementById('tpl-servicio');
+      var frag = tpl.content.cloneNode(true);
+      var row = frag.querySelector('[data-servicio]');
+      row.dataset.localId = s.localId;
+      row.querySelector('[data-numero]').textContent = String(idx + 1);
+      row.querySelector('[data-servicio-summary]').textContent = servicioSummary(s);
+      if (locked) {
+        // Cotización ya decidida: ni editar ni quitar servicios, la fila
+        // queda solo como resumen de lectura.
+        row.querySelector('.servicio-row-actions').hidden = true;
+      } else {
+        row.querySelector('[data-edit-servicio]').addEventListener('click', function () { openServicioModal(s); });
+        row.querySelector('[data-remove-servicio]').addEventListener('click', function () { removeServicioBlock(s.localId); });
+      }
+      list.appendChild(frag);
+    });
+    document.getElementById('ge-servicios-count').textContent = '(' + detail.servicios.length + '/10)';
+    document.getElementById('ge-add-servicio').disabled = detail.servicios.length >= 10;
+    document.getElementById('ge-add-servicio').hidden = locked;
+    renderResumen();
+  }
+
+  function collectServicios() {
+    return detail.servicios.map(function (s) {
+      return {
+        idServicio: s.idServicio,
+        tipo: s.tipo,
+        codigoUnspsc: s.codigoUnspsc,
+        descripcion: s.descripcion,
+        actividades: (s.actividades || []).slice(),
+        tarifa: s.tarifa === undefined ? '' : s.tarifa,
+        cantidad: s.cantidad === undefined ? '' : s.cantidad,
+        observaciones: s.observaciones || ''
+      };
+    });
+  }
+
+  // ---------------- Resumen (subtotal / IVA / total / fechas / estado) ----------------
+
+  /** Misma fórmula que qs_updateQuotation: SUBTOTAL = suma de tarifa × cantidad de cada servicio. */
+  function computeTotales() {
+    var subtotal = 0;
+    detail.servicios.forEach(function (s) {
+      if (s.total !== '' && s.total != null) subtotal += Number(s.total) || 0;
+    });
+    var iva = Math.round(subtotal * IVA_TASA * 100) / 100;
+    return { subtotal: subtotal, iva: iva, total: Math.round((subtotal + iva) * 100) / 100 };
+  }
+
+  function sameMoney(a, b) {
+    return Math.round((Number(a) || 0) * 100) === Math.round((Number(b) || 0) * 100);
+  }
+
+  function renderResumen() {
+    var t = computeTotales();
+    document.getElementById('ge-res-subtotal').textContent = KGP.ui.formatMoney(t.subtotal);
+    document.getElementById('ge-res-iva').textContent = KGP.ui.formatMoney(t.iva);
+    document.getElementById('ge-res-total').textContent = KGP.ui.formatMoney(t.total);
+    document.getElementById('ge-res-fecha').textContent = detail.fechaElaboracion || '—';
+    document.getElementById('ge-res-venc').textContent = document.getElementById('ge-fecha-venc').value || '—';
+    document.getElementById('ge-res-servicios').textContent = String(detail.servicios.length);
+    document.getElementById('ge-res-elaborado').textContent = detail.elaboradoPorNombre
+      ? (detail.elaboradoPorNombre + (detail.cargoElaborador ? ' — ' + detail.cargoElaborador : ''))
+      : '—';
+
+    var g = detail.totalesGuardados;
+    var pendiente = !!g && !(sameMoney(g.subtotal, t.subtotal) && sameMoney(g.iva, t.iva) && sameMoney(g.total, t.total));
+    document.getElementById('ge-res-pendiente').hidden = !pendiente;
+
+    var estado = detail.estado || ESTADO_INICIAL;
+    var badge = document.getElementById('ge-res-estado');
+    badge.className = 'badge resumen-estado ' + estadoBadgeClass(estado);
+    badge.textContent = estado;
+    document.getElementById('ge-garantia-row').hidden = estado !== ESTADO_INICIAL;
+
+    // "Aprobado por" / "Rechazado por": visible siempre que la garantía ya
+    // se decidió (fuera de ESTADO_INICIAL), aunque no se haya podido resolver
+    // el empleado (correo del usuario activo sin match en PERSONAL_KGP) —
+    // mismo criterio que "Elaborado por": mostrar "—" en vez de ocultar la
+    // tarjeta entera, para que quede claro que el dato existe pero falta.
+    var revisadoCard = document.getElementById('ge-res-revisado-card');
+    if (estado !== ESTADO_INICIAL) {
+      document.getElementById('ge-res-revisado-label').textContent = estado === ESTADO_APROBADA ? 'Aprobado por' : 'Rechazado por';
+      document.getElementById('ge-res-revisado').textContent = detail.revisadoAprobadoPorNombre || '—';
+      revisadoCard.hidden = false;
+    } else {
+      revisadoCard.hidden = true;
+    }
+  }
+
+  // ---------------- Bloqueo de edición (garantía ya decidida) ----------------
+
+  /** true una vez la garantía se decidió (Aprobada/Rechazada): la cotización pasa a ser de solo lectura. */
+  function isLocked() {
+    var estado = detail.estado || ESTADO_INICIAL;
+    return estado !== ESTADO_INICIAL;
+  }
+
+  /**
+   * Bloquea TODO el formulario de detalle cuando la cotización ya no está en
+   * ESTADO_INICIAL: a partir de ahí es de solo lectura, ni siquiera el
+   * asesor comercial o el tiempo de entrega se pueden tocar. Se llama al
+   * terminar de cargar el detalle y otra vez justo después de guardar una
+   * decisión de garantía (para que el formulario se bloquee al instante,
+   * sin esperar a recargar). El servidor tiene la misma restricción
+   * (qs_updateQuotation responde CONFLICT), esto es solo la experiencia de
+   * usuario — nunca la única barrera. Los servicios se bloquean aparte, en
+   * renderServiciosList (oculta las acciones de cada fila + "Agregar
+   * servicio"), porque esa función ya se llama en todos los puntos donde la
+   * lista cambia.
+   */
+  function applyLockState() {
+    var locked = isLocked();
+
+    ['ge-plazo', 'ge-descripcion', 'ge-tiempo-entrega'].forEach(function (id) {
+      document.getElementById(id).readOnly = locked;
+    });
+    ['ge-cliente-select', 'ge-solicitante-select', 'ge-establecimiento-select', 'ge-encargado-select', 'ge-asesor-select'].forEach(function (id) {
+      document.getElementById(id).disabled = locked;
+    });
+    ['ge-cliente-nuevo-btn', 'ge-solicitante-nuevo-btn', 'ge-establecimiento-nuevo-btn', 'ge-encargado-nuevo-btn'].forEach(function (id) {
+      document.getElementById(id).hidden = locked;
+    });
+    EDIT_BTN_PAIRS.forEach(function (pair) {
+      document.getElementById(pair[1]).hidden = locked;
+    });
+    // Solo el botón, no toda la tarjeta: #ge-doc-status vive en la misma
+    // tarjeta (ge-guardar-card) y debe seguir visible — es donde se muestra
+    // el resultado de la regeneración del documento que dispara la propia
+    // decisión de garantía (ver handleGuardar).
+    document.getElementById('ge-guardar-btn').hidden = locked;
+  }
+
+  // ---------------- Decisión de garantía ----------------
+
+  var garantiaPendiente = null; // estado elegido que espera confirmación
+
+  /** estado: ESTADO_APROBADA / ESTADO_RECHAZADA para pedir confirmación, null para volver a los dos botones. */
+  function showGarantiaConfirm(estado) {
+    garantiaPendiente = estado;
+    document.getElementById('ge-garantia-actions').hidden = !!estado;
+    document.getElementById('ge-garantia-confirm').hidden = !estado;
+    if (estado) {
+      document.getElementById('ge-garantia-confirm-text').textContent =
+        (estado === ESTADO_APROBADA ? '¿Marcar la garantía como APROBADA?' : '¿Marcar la garantía como RECHAZADA?') +
+        ' Esta decisión no se puede cambiar después. También se guardarán los demás cambios del formulario.';
+    }
+  }
+
+  function syncServicioIds(serverServicios) {
+    detail.servicios.forEach(function (s, idx) {
+      if (serverServicios[idx]) s.idServicio = serverServicios[idx].idServicio;
+    });
+  }
+
+  // ---------------- Validación visual ----------------
+
+  function fieldEl(key) { return document.querySelector('#ge-detail-wrap .field[data-field="' + key + '"]'); }
+  function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+  function clearInvalid() { document.querySelectorAll('#ge-detail-wrap .field.invalid').forEach(function (f) { f.classList.remove('invalid'); }); }
+
+  function validateGeneral() {
+    clearInvalid();
+    var hasError = false;
+    var plazo = Number(document.getElementById('ge-plazo').value);
+    if (!plazo || plazo < 1) { markInvalid('plazo'); hasError = true; }
+    if (!document.getElementById('ge-descripcion').value.trim()) { markInvalid('descripcion'); hasError = true; }
+    if (!currentClienteId()) { markInvalid('cliente'); hasError = true; }
+    if (!document.getElementById('ge-solicitante-select').value) { markInvalid('solicitante'); hasError = true; }
+    if (!document.getElementById('ge-establecimiento-select').value) { markInvalid('establecimiento'); hasError = true; }
+    return !hasError;
+  }
+
+  // ---------------- Guardar cambios (2 fases) ----------------
+
+  function showDocStatus(text, kind, url, retryFn) {
+    var el = document.getElementById('ge-doc-status');
+    var html = '<div class="progress-note">';
+    if (kind === 'busy') html += '<span class="spinner dark"></span>';
+    html += '<span>' + KGP.escapeHtml(text) + '</span></div>';
+    el.innerHTML = html;
+
+    if (url) {
+      var link = document.createElement('div');
+      link.style.marginTop = '8px';
+      link.style.textAlign = 'center';
+      link.innerHTML = '<a class="link" href="' + url + '" target="_blank" rel="noopener">Abrir documento actualizado ↗</a>';
+      el.appendChild(link);
+    }
+    if (retryFn) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm';
+      btn.style.marginTop = '8px';
+      btn.textContent = 'Reintentar';
+      btn.addEventListener('click', retryFn);
+      el.appendChild(btn);
+    }
+  }
+
+  /**
+   * "Guardar cambios" bloquea toda la vista de detalle (mismo loader de
+   * pantalla completa que usa la carga inicial, ver setDetailBusy) mientras
+   * dura TODO el proceso — la escritura en la base de datos y luego la
+   * actualización del documento en el spreadsheet — para que no se vea nada
+   * más hasta que ambas fases terminen. Solo al final se vuelve a mostrar el
+   * formulario, ya con el resultado (éxito o error con reintento) listo.
+   */
+  /**
+   * Valida el formulario y arma el payload de api_updateQuotation (también lo
+   * usa api_aprobarConOis). null si hay errores (ya avisados con toast).
+   * estado: '' = el servidor conserva el estado actual.
+   */
+  function buildPayload(estado) {
+    if (!validateGeneral()) {
+      KGP.toast('Revisa los campos marcados en rojo.', 'error');
+      return null;
+    }
+    var servicios = collectServicios();
+    if (!servicios.length) {
+      KGP.toast('Agrega al menos 1 servicio.', 'error');
+      return null;
+    }
+    return {
+      plazo: Number(document.getElementById('ge-plazo').value),
+      descripcion: document.getElementById('ge-descripcion').value,
+      estado: estado || '',
+      cliente: { idCliente: currentClienteId() },
+      solicitante: { idContacto: document.getElementById('ge-solicitante-select').value },
+      establecimiento: { idEstablecimiento: document.getElementById('ge-establecimiento-select').value },
+      asesorComercial: document.getElementById('ge-asesor-select').value,
+      tiempoEntrega: document.getElementById('ge-tiempo-entrega').value,
+      servicios: servicios
+    };
+  }
+
+  function handleGuardar(opts) {
+    opts = opts || {};
+    var payload = buildPayload(opts.estado);
+    if (!payload) return;
+
+    var idCotizacion = detail.idCotizacion;
+    setDetailBusy(true, 'Guardando cambios en la base de datos…');
+
+    KGP.apiCall('api_updateQuotation', [idCotizacion, payload]).then(function (res) {
+      if (opts.estado) {
+        KGP.toast('Cotización ' + res.codigo + ': garantía ' + (res.estado === ESTADO_APROBADA ? 'aprobada' : 'rechazada') + '.', 'success');
+      } else {
+        KGP.toast('Cotización ' + res.codigo + ' actualizada.', 'success');
+      }
+      detail.estado = res.estado;
+      detail.totalesGuardados = { subtotal: res.subtotal, iva: res.iva, total: res.total };
+      detail.revisadoAprobadoPorNombre = res.revisadoAprobadoPorNombre || detail.revisadoAprobadoPorNombre;
+      showGarantiaConfirm(null);
+      recomputeVencimiento(); // también repinta el resumen
+      // Si esto fue una decisión de garantía, detail.estado acaba de pasar a
+      // Aprobada/Rechazada: bloquear el formulario al instante, sin esperar
+      // a que el usuario recargue. renderServiciosList oculta las acciones
+      // de cada fila de servicio y el botón "Agregar servicio".
+      applyLockState();
+      renderServiciosList();
+
+      return KGP.apiCall('api_getCotizacion', [idCotizacion]).then(function (cot) {
+        syncServicioIds(cot.servicios || []);
+      }).catch(function () { /* no crítico */ }).then(function () {
+        setDetailBusy(true, 'Actualizando el documento en el spreadsheet…');
+        return regenerarDoc(idCotizacion);
+      });
+    }).catch(function (err) {
+      if (err.code === 'VALIDATION' && Array.isArray(err.details) && err.details.length) {
+        KGP.toast(err.details.slice(0, 3).join(' · '), 'error', 8000);
+      } else {
+        KGP.toast('No se pudo guardar: ' + KGP.friendlyError(err), 'error', 6000);
+      }
+      showGarantiaConfirm(null);
+    }).finally(function () {
+      setDetailBusy(false);
+    });
+  }
+
+  // ---------------- Aprobar garantía -> crear OIS (popup) ----------------
+
+  /**
+   * "Garantía aprobada" ya no confirma en línea: abre el popup
+   * #aprobar-modal-overlay (OIS / OIP / Cancelar aprobación). Se valida el
+   * formulario ANTES de abrirlo, para no preguntar por la orden si igual no
+   * se va a poder guardar.
+   */
+  function openAprobarModal() {
+    if (!buildPayload(ESTADO_APROBADA)) return;
+    document.getElementById('aprobar-oip-note').hidden = true;
+    document.getElementById('aprobar-modal-overlay').classList.add('open');
+  }
+
+  function closeAprobarModal() {
+    var el = document.getElementById('aprobar-modal-overlay');
+    if (el) el.classList.remove('open');
+  }
+
+  /**
+   * Aprobar + crear la OIS en una sola llamada (api_aprobarConOis: una sola
+   * sección crítica en el servidor, nunca una cotización Aprobada sin OIS).
+   * requestId fijo por intento: los reintentos automáticos de KGP.apiCall
+   * (BUSY/TRANSPORT/TIMEOUT) no pueden crear dos OIS. Después, fuera del
+   * lock: se regenera el documento de la cotización y se genera el de la OIS.
+   */
+  function handleAprobarConOis() {
+    var payload = buildPayload(ESTADO_APROBADA);
+    closeAprobarModal();
+    if (!payload) return;
+
+    var idCotizacion = detail.idCotizacion;
+    var requestId = KGP.uuid();
+    setDetailBusy(true, 'Aprobando la garantía y creando la OIS…');
+
+    KGP.apiCall('api_aprobarConOis', [idCotizacion, payload, requestId], { retryOn: ['BUSY', 'TRANSPORT', 'TIMEOUT'] }).then(function (res) {
+      KGP.toast('Garantía aprobada. OIS ' + res.codigoOis + ' creada.', 'success', 6000);
+      detail.estado = ESTADO_APROBADA;
+      detail.ois = { idOis: res.idOis, codigo: res.codigoOis };
+      if (res.cotizacion) {
+        detail.totalesGuardados = { subtotal: res.cotizacion.subtotal, iva: res.cotizacion.iva, total: res.cotizacion.total };
+        detail.revisadoAprobadoPorNombre = res.cotizacion.revisadoAprobadoPorNombre || detail.revisadoAprobadoPorNombre;
+      }
+      setOisButton();
+      recomputeVencimiento();
+      applyLockState();
+      renderServiciosList();
+
+      return KGP.apiCall('api_getCotizacion', [idCotizacion]).then(function (cot) {
+        syncServicioIds(cot.servicios || []);
+      }).catch(function () { /* no crítico */ }).then(function () {
+        setDetailBusy(true, 'Actualizando el documento de la cotización…');
+        return regenerarDoc(idCotizacion);
+      }).then(function () {
+        setDetailBusy(true, 'Generando el documento de la OIS…');
+        return KGP.apiCall('api_generateOisDocument', [res.idOis, requestId]).then(function () {
+          KGP.toast('Documento de la OIS ' + res.codigoOis + ' generado.', 'success');
+        }).catch(function (err) {
+          // No bloquea: la OIS ya existe y "Gestionar OIS" permite reintentar.
+          KGP.toast('La OIS se creó, pero su documento falló: ' + KGP.friendlyError(err) + ' Puedes reintentarlo desde Gestionar OIS.', 'error', 9000);
+        });
+      });
+    }).catch(function (err) {
+      if (err.code === 'VALIDATION' && Array.isArray(err.details) && err.details.length) {
+        KGP.toast(err.details.slice(0, 3).join(' · '), 'error', 8000);
+      } else {
+        KGP.toast('No se pudo aprobar la garantía: ' + KGP.friendlyError(err), 'error', 7000);
+      }
+    }).finally(function () {
+      setDetailBusy(false);
+    });
+  }
+
+  /** Botón "Ver OIS" del encabezado del detalle: visible solo si esta cotización ya tiene OIS. */
+  function setOisButton() {
+    var btn = document.getElementById('ge-ver-ois-btn');
+    if (!btn) return;
+    btn.hidden = !detail.ois;
+    btn.textContent = detail.ois ? ('Ver OIS ' + detail.ois.codigo) : 'Ver OIS';
+  }
+
+  function regenerarDoc(idCotizacion) {
+    return KGP.apiCall('api_regenerateDocument', [idCotizacion]).then(function (doc) {
+      showDocStatus('Documento actualizado.', 'success', doc.docUrl);
+      setDocButton(doc.docUrl, 'OK');
+    }).catch(function (err) {
+      showDocStatus('La cotización se guardó, pero el documento falló: ' + KGP.friendlyError(err), 'error', null, function () {
+        setDetailBusy(true, 'Actualizando el documento en el spreadsheet…');
+        regenerarDoc(idCotizacion).finally(function () { setDetailBusy(false); });
+      });
+    });
+  }
+
+  // ---------------- Wiring ----------------
+
+  function wireEvents() {
+    if (eventsWired) return;
+    eventsWired = true;
+
+    document.getElementById('ge-search').addEventListener('input', debounce(function (e) {
+      listState.filters.q = e.target.value;
+      onFilterChange();
+    }, 350));
+    document.getElementById('ge-filter-anio').addEventListener('change', function (e) {
+      listState.filters.anio = e.target.value;
+      onFilterChange();
+    });
+    document.getElementById('ge-filter-estado').addEventListener('change', function (e) {
+      listState.filters.estado = e.target.value;
+      onFilterChange();
+    });
+    document.getElementById('ge-sort-by').addEventListener('change', function (e) {
+      listState.sortBy = e.target.value;
+      onFilterChange();
+    });
+    document.getElementById('ge-sort-dir').addEventListener('click', function () {
+      listState.sortDir = listState.sortDir === 'asc' ? 'desc' : 'asc';
+      document.getElementById('ge-sort-dir').textContent = listState.sortDir === 'asc' ? '↑ Ascendente' : '↓ Descendente';
+      onFilterChange();
+    });
+    document.getElementById('ge-page-size').addEventListener('change', function (e) {
+      listState.pageSize = Number(e.target.value);
+      onFilterChange();
+    });
+    document.getElementById('ge-refresh-btn').addEventListener('click', function () {
+      fetchList({ silent: true });
+    });
+    document.getElementById('ge-prev').addEventListener('click', function () {
+      if (listState.page <= 1) return;
+      listState.page--;
+      fetchList();
+    });
+    document.getElementById('ge-next').addEventListener('click', function () {
+      if (listState.page * listState.pageSize >= listState.total) return;
+      listState.page++;
+      fetchList();
+    });
+    document.getElementById('ge-tbody').addEventListener('click', function (e) {
+      var row = e.target.closest('.gestion-row');
+      if (row) openDetail(row.getAttribute('data-id'));
+    });
+
+    document.getElementById('ge-back-btn').addEventListener('click', function () {
+      showList();
+      // El listado ya visible (de antes de entrar al detalle) sigue siendo útil
+      // mientras llega el refresco: evita el parpadeo de "Cargando…" al volver.
+      fetchList({ silent: true });
+    });
+
+    document.getElementById('ge-plazo').addEventListener('input', recomputeVencimiento);
+    document.getElementById('ge-cliente-select').addEventListener('change', function () { handleClienteChange(); syncEditButtons(); });
+    document.getElementById('ge-solicitante-select').addEventListener('change', syncEditButtons);
+    document.getElementById('ge-establecimiento-select').addEventListener('change', refreshEncargadoOptions);
+    document.getElementById('ge-encargado-select').addEventListener('change', syncEditButtons);
+
+    document.getElementById('ge-cliente-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'cliente', mode: 'create', onSave: crearClienteModal });
+    });
+    document.getElementById('ge-cliente-editar-btn').addEventListener('click', function () {
+      if (!detail.clienteDetalle || !detail.clienteDetalle.cliente) return;
+      var id = currentClienteId();
+      KGP.entityModal.open({ type: 'cliente', mode: 'edit', editId: id, initial: detail.clienteDetalle.cliente, onSave: function (datos) { return editarClienteModal(id, datos); } });
+    });
+
+    document.getElementById('ge-solicitante-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'contacto', mode: 'create', target: 'solicitante', onSave: function (datos) { return crearContactoModal('solicitante', datos); } });
+    });
+    document.getElementById('ge-solicitante-editar-btn').addEventListener('click', function () {
+      var id = document.getElementById('ge-solicitante-select').value;
+      var c = findContacto(id);
+      if (!c) return;
+      KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'solicitante', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+
+    document.getElementById('ge-encargado-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'contacto', mode: 'create', target: 'encargado', onSave: function (datos) { return crearContactoModal('encargado', datos); } });
+    });
+    document.getElementById('ge-encargado-editar-btn').addEventListener('click', function () {
+      var id = document.getElementById('ge-encargado-select').value;
+      var c = findContacto(id);
+      if (!c) return;
+      KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'encargado', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+
+    document.getElementById('ge-establecimiento-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'establecimiento', mode: 'create', onSave: crearEstablecimientoModal });
+    });
+    document.getElementById('ge-establecimiento-editar-btn').addEventListener('click', function () {
+      var id = document.getElementById('ge-establecimiento-select').value;
+      var est = findEstablecimiento(id);
+      if (!est) return;
+      KGP.entityModal.open({ type: 'establecimiento', mode: 'edit', editId: id, initial: est, onSave: function (datos) { return editarEstablecimientoModal(id, datos); } });
+    });
+
+    document.getElementById('ge-add-servicio').addEventListener('click', addServicioBlock);
+    document.getElementById('ge-guardar-btn').addEventListener('click', function () { handleGuardar(); });
+
+    // Aprobar abre el popup de tipo de orden (OIS / OIP / Cancelar); rechazar
+    // mantiene la confirmación en línea de siempre.
+    document.getElementById('ge-garantia-aprobar').addEventListener('click', openAprobarModal);
+    document.getElementById('aprobar-ois-btn').addEventListener('click', handleAprobarConOis);
+    document.getElementById('aprobar-oip-btn').addEventListener('click', function () {
+      document.getElementById('aprobar-oip-note').hidden = false;
+    });
+    document.getElementById('aprobar-modal-cancel').addEventListener('click', closeAprobarModal);
+    document.getElementById('aprobar-modal-close').addEventListener('click', closeAprobarModal);
+    document.getElementById('aprobar-modal-overlay').addEventListener('click', function (e) {
+      if (e.target.id === 'aprobar-modal-overlay') closeAprobarModal();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeAprobarModal();
+    });
+    document.getElementById('ge-ver-ois-btn').addEventListener('click', function () {
+      if (detail.ois && KGP.ois && KGP.ois.openDetail) KGP.ois.openDetail(detail.ois.idOis);
+    });
+    document.getElementById('ge-garantia-rechazar').addEventListener('click', function () { showGarantiaConfirm(ESTADO_RECHAZADA); });
+    document.getElementById('ge-garantia-no').addEventListener('click', function () { showGarantiaConfirm(null); });
+    document.getElementById('ge-garantia-si').addEventListener('click', function () {
+      if (garantiaPendiente) handleGuardar({ estado: garantiaPendiente });
+    });
+  }
+
+}(window.KGP));
+</script>

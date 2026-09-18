@@ -1,0 +1,1365 @@
+<script>
+/**
+ * Vista "Dashboard" — reactiva sobre un snapshot único.
+ *
+ * ARQUITECTURA (y por qué)
+ * ------------------------
+ * El servidor entrega UN snapshot completo por versión de datos
+ * (api_getDashboardSnapshot → ds_getSnapshot_, 32_DashboardService.js).
+ * A partir de ahí TODO se deriva en el cliente: KPIs, gráficas, filtros,
+ * orden, paginación y chips. Consecuencia directa: escribir en el buscador,
+ * cambiar de año, pulsar un KPI, ordenar o pasar de página NO cuesta ningún
+ * `google.script.run` — son microsegundos de CPU sobre datos ya en memoria.
+ * Solo se vuelve al servidor cuando cambia la versión de datos (polling
+ * barato con protocolo de versión) o cuando el usuario pulsa "Actualizar".
+ *
+ * El detalle por servicio de una cotización NO viaja en el snapshot: se
+ * pide bajo demanda al expandir la fila (api_getCotizacion) y queda
+ * memoizado, así abrir/cerrar la misma fila no repite la consulta.
+ *
+ * Módulos internos (una responsabilidad cada uno; se componen, no se
+ * conocen entre sí más de lo necesario):
+ *
+ *   Fmt      → formateo puro (dinero, fechas, porcentajes). Sin DOM.
+ *   Rules    → reglas de negocio puras (estado, vigencia, comparadores).
+ *   Vistas   → catálogo declarativo de KPIs/filtros rápidos. Agregar un KPI
+ *              nuevo es agregar una entrada aquí: ni Select ni View cambian
+ *              (abierto a extensión, cerrado a modificación).
+ *   Store    → único dueño del estado + notificación a suscriptores.
+ *   Select   → derivaciones puras y memoizadas (snapshot + UI → view-model).
+ *   Detail   → carga perezosa y caché del detalle de una cotización.
+ *   View     → pintado por regiones, con dirty-check por firma: una tecla en
+ *              el buscador no repinta las gráficas si su entrada no cambió.
+ *   Ctrl     → ciclo de vida, eventos (delegados) y polling.
+ *
+ * NOTA DE ALCANCE: el ESTADO y las TARIFAS son de solo lectura aquí. Se
+ * editan únicamente desde "Gestionar cotización" (ver CLAUDE.md §2.1 y §7);
+ * el detalle expandido ofrece el atajo "Gestionar" para ir allá.
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  // ===================================================================
+  // Constantes
+  // ===================================================================
+
+  var POLL_BASE_MS = 30000;
+  var POLL_BACKOFF_MS = [30000, 60000, 120000, 300000];
+  var SEARCH_DEBOUNCE_MS = 220;
+  var MAX_BARRAS_FECHA = 12;   // columnas de "Cotizaciones creadas"
+  var MAX_VIGENCIA = 6;        // filas de "Ventana de vigencia"
+  var MAX_TIPOS = 7;           // filas de "Servicios por tipo"
+  var LOCAL_CACHE_KEY = 'dashboard:snapshot';
+
+  var ESTADO = { REVISION: 'En revisión', APROBADA: 'Aprobada', RECHAZADA: 'Rechazada' };
+
+  /** Estado inicial de la UI; también es el destino de "Limpiar". */
+  function defaultUi() {
+    return {
+      q: '',
+      anio: '',
+      cliente: '',
+      estado: '',
+      vista: 'all',
+      sortBy: 'codigo',
+      sortDir: 'asc',
+      pageSize: 20,
+      page: 1,
+      expandidas: {}
+    };
+  }
+
+  // ===================================================================
+  // Fmt — formateo puro (sin DOM, sin estado)
+  // ===================================================================
+
+  var Fmt = {
+    /** 143000 → "$143k"; 1250000 → "$1,3M"; 0/'' → "—". Para celdas estrechas. */
+    compactMoney: function (n) {
+      var v = Number(n);
+      if (!isFinite(v) || !v) return '—';
+      if (Math.abs(v) >= 1000000) return '$' + (v / 1000000).toFixed(1).replace('.', ',') + 'M';
+      if (Math.abs(v) >= 1000) return '$' + Math.round(v / 1000) + 'k';
+      return '$' + Math.round(v);
+    },
+
+    money: function (n) { return KGP.ui.formatMoney(n); },
+
+    pct: function (parte, total) {
+      if (!total) return '0%';
+      return Math.round((parte / total) * 100) + '%';
+    },
+
+    /** Proporción 0..1 como ancho CSS, con mínimo visible cuando no es cero. */
+    width: function (parte, total, minPct) {
+      if (!total || !parte) return '0%';
+      var p = (parte / total) * 100;
+      return Math.max(minPct == null ? 2 : minPct, Math.round(p)) + '%';
+    },
+
+    /** "2026-09-16" → "09-16" (eje de la gráfica de barras). */
+    diaMes: function (iso) { return iso ? String(iso).slice(5) : '—'; },
+
+    dias: function (n) { return n == null ? '—' : n + ' d'; },
+
+    /** ISO 8601 → "16 sep 2026, 10:28" en la zona del navegador. */
+    marcaTiempo: function (iso) {
+      var d = iso ? new Date(iso) : null;
+      if (!d || isNaN(d.getTime())) return '';
+      var meses = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+      return d.getDate() + ' ' + meses[d.getMonth()] + ' ' + d.getFullYear() + ', ' +
+        String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    },
+
+    /** Texto sin acentos ni mayúsculas, para comparar en el buscador. */
+    norm: function (s) {
+      var txt = String(s == null ? '' : s);
+      if (txt.normalize) txt = txt.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      return txt.toLowerCase().trim();
+    }
+  };
+
+  // ===================================================================
+  // Rules — reglas de negocio puras
+  // ===================================================================
+
+  var Rules = {
+    /** Clase del badge de estado. Duplicada a propósito con JsGestion (~4 líneas, ver CLAUDE.md §2.1). */
+    estadoBadgeClass: function (estado) {
+      if (estado === 'Aprobada' || estado === 'Aprobado') return 'badge-aprobado';
+      if (estado === 'Rechazada' || estado === 'Rechazado') return 'badge-rechazado';
+      return 'badge-revision';
+    },
+
+    /** Clase del contador de días según urgencia. */
+    vigenciaClass: function (dias) {
+      if (dias == null) return '';
+      if (dias < 0) return 'overdue';
+      if (dias <= 7) return 'soon';
+      return '';
+    },
+
+    /** Color CSS de la barra de vigencia (misma semántica que vigenciaClass). */
+    vigenciaColor: function (dias) {
+      if (dias == null) return 'var(--border-strong)';
+      if (dias < 0) return 'var(--danger)';
+      if (dias <= 7) return 'var(--warning)';
+      return 'var(--primary)';
+    },
+
+    /**
+     * Documento que hay que (re)generar: falló, o no quedó enlazado y
+     * tampoco está en proceso. Única definición, compartida por el KPI, la
+     * tarjeta de calidad y el botón "Regenerar" de la tabla, para que los
+     * tres cuenten exactamente las mismas cotizaciones.
+     */
+    documentoInvalido: function (c) {
+      return c.docEstado === 'ERROR' || (c.docEstado !== 'PENDIENTE' && !c.urlDocumento);
+    },
+
+    esDecidida: function (c) { return c.estado === ESTADO.APROBADA || c.estado === ESTADO.RECHAZADA; },
+
+    /** Días transcurridos desde la elaboración hasta `hoy` (ambos ISO). */
+    antiguedadDias: function (c, hoy) {
+      if (!c.fechaElaboracion || !hoy) return null;
+      var a = Date.parse(c.fechaElaboracion + 'T00:00:00Z');
+      var b = Date.parse(hoy + 'T00:00:00Z');
+      if (isNaN(a) || isNaN(b)) return null;
+      return Math.round((b - a) / 86400000);
+    },
+
+    /** Comparadores por columna. Añadir una columna ordenable = añadir una clave. */
+    comparadores: {
+      codigo: function (a, b) { return String(a.codigo || '').localeCompare(String(b.codigo || '')); },
+      cliente: function (a, b) { return String(a.clienteNombre || '').localeCompare(String(b.clienteNombre || '')); },
+      fechaElaboracion: function (a, b) { return String(a.fechaElaboracion || '').localeCompare(String(b.fechaElaboracion || '')); },
+      fechaVencimiento: function (a, b) { return String(a.fechaVencimiento || '').localeCompare(String(b.fechaVencimiento || '')); },
+      estado: function (a, b) { return String(a.estado || '').localeCompare(String(b.estado || '')); },
+      numServicios: function (a, b) { return (a.numServicios || 0) - (b.numServicios || 0); },
+      // null (sin fecha de vencimiento) al final, no confundido con "ya vencida".
+      diasRestantes: function (a, b) {
+        var x = a.diasRestantes == null ? Infinity : a.diasRestantes;
+        var y = b.diasRestantes == null ? Infinity : b.diasRestantes;
+        return x - y;
+      },
+      total: function (a, b) { return (Number(a.total) || 0) - (Number(b.total) || 0); }
+    }
+  };
+
+  // ===================================================================
+  // Vistas — catálogo declarativo de KPIs / filtros rápidos
+  // ===================================================================
+
+  /**
+   * Cada entrada describe una tarjeta KPI y, a la vez, el filtro que aplica
+   * al pulsarla. `match` null = "todas" (la tarjeta total).
+   *
+   * ctx = {anio, universo[], hoy, servicios, aprobadas, decididas}
+   * n   = cantidad de cotizaciones del universo que cumplen `match`
+   */
+  var Vistas = [
+    {
+      id: 'all', tone: '', match: null,
+      label: function (ctx) { return 'Cotizaciones ' + (ctx.anio || 'totales'); },
+      sub: function (ctx) { return ctx.servicios + (ctx.servicios === 1 ? ' servicio' : ' servicios'); },
+      meter: function () { return 1; }
+    },
+    {
+      id: 'rev', tone: 'warn',
+      match: function (c) { return c.estado === ESTADO.REVISION; },
+      label: function () { return 'En revisión'; }
+    },
+    {
+      id: 'apr', tone: 'good',
+      match: function (c) { return c.estado === ESTADO.APROBADA; },
+      label: function () { return 'Aprobadas'; }
+    },
+    {
+      id: 'rec', tone: 'alert',
+      match: function (c) { return c.estado === ESTADO.RECHAZADA; },
+      label: function () { return 'Rechazadas'; }
+    },
+    {
+      id: 'tasa', tone: 'good',
+      match: Rules.esDecidida,
+      label: function () { return 'Tasa de aprobación'; },
+      value: function (ctx) { return ctx.decididas ? Math.round((ctx.aprobadas / ctx.decididas) * 100) + '%' : '—'; },
+      sub: function (ctx) { return ctx.decididas + (ctx.decididas === 1 ? ' con decisión' : ' con decisión tomada'); },
+      meter: function (ctx) { return ctx.decididas ? ctx.aprobadas / ctx.decididas : 0; }
+    },
+    {
+      id: 'ven', tone: 'alert',
+      match: function (c) { return !!c.vencidaSinDecision; },
+      label: function () { return 'Vencidas sin decisión'; },
+      sub: function (ctx, n) { return n ? 'requieren cierre' : 'ninguna vencida'; }
+    },
+    {
+      id: 'pv', tone: 'warn',
+      match: function (c) { return !!c.porVencer; },
+      label: function () { return 'Por vencer (≤7 días)'; },
+      sub: function (ctx, n) { return n ? 'requieren seguimiento' : 'sin urgencias'; }
+    },
+    {
+      id: 'new', tone: '',
+      match: function (c, ctx) {
+        var d = Rules.antiguedadDias(c, ctx.hoy);
+        return d != null && d >= 0 && d <= 7;
+      },
+      label: function () { return 'Recién creadas (≤7 días)'; },
+      sub: function () { return 'elaboradas esta semana'; }
+    },
+    {
+      id: 'docerr', tone: 'alert',
+      match: function (c) { return Rules.documentoInvalido(c); },
+      label: function () { return 'Sin documento válido'; },
+      sub: function (ctx, n) { return n ? 'se pueden regenerar' : 'todos generados'; }
+    }
+  ];
+
+  // ===================================================================
+  // Calidad — comprobaciones sobre el propio snapshot
+  // ===================================================================
+
+  /**
+   * Cada comprobación revisa el mismo universo que los KPIs (el año
+   * filtrado) y, si encuentra algo, ofrece el atajo al subconjunto
+   * afectado. Agregar una comprobación = agregar una entrada aquí.
+   *
+   * `vista` enlaza con el id de una tarjeta KPI: pulsar la tarjeta de
+   * calidad aplica exactamente ese filtro.
+   */
+  var Comprobaciones = [
+    {
+      id: 'tarifas', tag: 'Completitud', vista: null,
+      match: function (c) { return !Number(c.total); },
+      titulo: function (n, total) { return n + ' de ' + total + ' cotizaciones sin tarifa'; },
+      cuerpo: function () {
+        return 'Sus servicios no tienen TARIFA ni CANTIDAD en la hoja SERVICIOS, ' +
+          'así que no suman al valor cotizado ni a las gráficas de importe.';
+      },
+      ok: function () { return 'Todas las cotizaciones del periodo tienen tarifa registrada.'; }
+    },
+    {
+      id: 'vencidas', tag: 'Vigencia', vista: 'ven',
+      match: function (c) { return !!c.vencidaSinDecision; },
+      titulo: function (n) { return n + (n === 1 ? ' cotización vencida sin decisión' : ' cotizaciones vencidas sin decisión'); },
+      cuerpo: function () {
+        return 'Pasaron su fecha de vencimiento y siguen en revisión: la garantía ' +
+          'debe aprobarse o rechazarse desde "Gestionar cotización".';
+      },
+      ok: function () { return 'Ninguna cotización pasó su vencimiento sin decisión.'; }
+    },
+    {
+      id: 'documentos', tag: 'Integridad', vista: 'docerr',
+      match: function (c) { return Rules.documentoInvalido(c); },
+      titulo: function (n) { return n + (n === 1 ? ' cotización sin documento válido' : ' cotizaciones sin documento válido'); },
+      cuerpo: function () {
+        return 'La generación falló o el archivo no quedó enlazado. Se puede ' +
+          'reintentar con "Regenerar" en la columna Documento.';
+      },
+      ok: function () { return 'Todas las cotizaciones del periodo tienen su documento generado.'; }
+    }
+  ];
+
+  /** Índice id → vista, para no recorrer el array en cada filtrado. */
+  var VistaPorId = (function () {
+    var map = {};
+    Vistas.forEach(function (v) { map[v.id] = v; });
+    return map;
+  }());
+
+  // ===================================================================
+  // Store — único dueño del estado
+  // ===================================================================
+
+  var Store = (function () {
+    var state = {
+      snapshot: null,     // payload de ds_getSnapshot_
+      ui: defaultUi(),
+      version: 0,
+      actualizadoEn: '',
+      cargando: false,
+      error: ''
+    };
+    var listeners = [];
+
+    return {
+      get: function () { return state; },
+      ui: function () { return state.ui; },
+
+      subscribe: function (fn) { listeners.push(fn); },
+
+      /** Aplica un parche sobre `ui` y notifica. `resetPage` vuelve a la página 1. */
+      patchUi: function (patch, opts) {
+        opts = opts || {};
+        var ui = state.ui;
+        var cambio = false;
+        Object.keys(patch).forEach(function (k) {
+          if (ui[k] !== patch[k]) { ui[k] = patch[k]; cambio = true; }
+        });
+        if (opts.resetPage !== false && cambio) ui.page = 1;
+        if (cambio || opts.force) this.emit();
+      },
+
+      setSnapshot: function (snapshot) {
+        state.snapshot = snapshot;
+        state.version = snapshot.version;
+        state.actualizadoEn = snapshot.generadoEn;
+        state.error = '';
+        // Un snapshot nuevo puede tener menos filas: si la página actual se
+        // quedó fuera de rango, Select la reajusta al pintar.
+        this.emit();
+      },
+
+      setCargando: function (v) { state.cargando = v; this.emit(); },
+      setError: function (msg) { state.error = msg; this.emit(); },
+
+      toggleExpandida: function (id) {
+        var exp = state.ui.expandidas;
+        if (exp[id]) delete exp[id]; else exp[id] = true;
+        this.emit();
+      },
+
+      reset: function () {
+        var expandidas = state.ui.expandidas; // no cerrar lo que el usuario abrió
+        state.ui = defaultUi();
+        state.ui.expandidas = expandidas;
+        this.emit();
+      },
+
+      emit: function () { listeners.forEach(function (fn) { fn(state); }); }
+    };
+  }());
+
+  // ===================================================================
+  // Select — derivaciones puras y memoizadas
+  // ===================================================================
+
+  var Select = (function () {
+    // Memo de una sola entrada por etapa: las derivaciones se encadenan y el
+    // usuario solo cambia una cosa a la vez, así que un slot basta para que
+    // teclear en el buscador no vuelva a ordenar ni a recalcular las gráficas
+    // cuando su entrada no cambió.
+    function memo1(fn) {
+      var lastKey = null, lastVal = null;
+      return function (key, arg1, arg2) {
+        if (key !== lastKey) { lastKey = key; lastVal = fn(arg1, arg2); }
+        return lastVal;
+      };
+    }
+
+    /** Universo de los KPIs: solo el filtro de año (los demás no mueven el marco). */
+    var universoDelAnio = memo1(function (snapshot, anio) {
+      if (!anio) return snapshot.cotizaciones;
+      var n = Number(anio);
+      return snapshot.cotizaciones.filter(function (c) { return c.anio === n; });
+    });
+
+    var contextoKpis = memo1(function (universo, hoy) {
+      var servicios = 0, aprobadas = 0, decididas = 0;
+      universo.forEach(function (c) {
+        servicios += c.numServicios || 0;
+        if (c.estado === ESTADO.APROBADA) { aprobadas++; decididas++; }
+        else if (c.estado === ESTADO.RECHAZADA) decididas++;
+      });
+      return { universo: universo, hoy: hoy, servicios: servicios, aprobadas: aprobadas, decididas: decididas };
+    });
+
+    /** Una pasada sobre el universo cuenta las 9 tarjetas a la vez. */
+    var kpis = memo1(function (ctx, args) {
+      var counts = Vistas.map(function () { return 0; });
+      ctx.universo.forEach(function (c) {
+        for (var i = 0; i < Vistas.length; i++) {
+          if (!Vistas[i].match || Vistas[i].match(c, ctx)) counts[i]++;
+        }
+      });
+      var total = ctx.universo.length;
+      return Vistas.map(function (v, i) {
+        var n = counts[i];
+        return {
+          id: v.id,
+          tone: v.tone,
+          label: v.label(args.ctxLabel),
+          value: v.value ? v.value(ctx, n) : String(n),
+          sub: v.sub ? v.sub(ctx, n) : Fmt.pct(n, total) + ' del total',
+          meter: Math.round((v.meter ? v.meter(ctx, n) : (total ? n / total : 0)) * 100),
+          activa: v.id === args.vista
+        };
+      });
+    });
+
+    var filtradas = memo1(function (universo, ui) {
+      var vista = VistaPorId[ui.vista];
+      var match = vista && vista.match;
+      var q = Fmt.norm(ui.q);
+      var ctx = { hoy: ui.__hoy };
+
+      return universo.filter(function (c) {
+        if (ui.cliente && c.idCliente !== ui.cliente) return false;
+        if (ui.estado && c.estado !== ui.estado) return false;
+        if (match && !match(c, ctx)) return false;
+        if (q) {
+          // Concatenación perezosa: solo se arma el "heno" si hay búsqueda.
+          var heno = Fmt.norm([c.codigo, c.clienteNombre, c.contactoNombre, c.establecimientoNombre].join(' '));
+          if (heno.indexOf(q) === -1) return false;
+        }
+        return true;
+      });
+    });
+
+    var ordenadas = memo1(function (rows, ui) {
+      var cmp = Rules.comparadores[ui.sortBy] || Rules.comparadores.codigo;
+      var dir = ui.sortDir === 'desc' ? -1 : 1;
+      return rows.slice().sort(function (a, b) { return dir * cmp(a, b); });
+    });
+
+    /** Series de las 4 gráficas, en una sola pasada por el conjunto filtrado. */
+    var series = memo1(function (rows) {
+      var porEstado = {};
+      var porFecha = {};
+      var porTipo = {};
+      var totalServicios = 0;
+
+      rows.forEach(function (c) {
+        porEstado[c.estado] = (porEstado[c.estado] || 0) + 1;
+
+        if (c.fechaElaboracion) {
+          var g = porFecha[c.fechaElaboracion] || (porFecha[c.fechaElaboracion] = { n: 0, revision: 0 });
+          g.n++;
+          if (c.estado === ESTADO.REVISION) g.revision++;
+        }
+
+        (c.tipos || []).forEach(function (t) {
+          var acc = porTipo[t[0]] || (porTipo[t[0]] = { nombre: t[0], n: 0, valor: 0 });
+          acc.n += t[1];
+          acc.valor += t[2];
+          totalServicios += t[1];
+        });
+      });
+
+      return {
+        estado: serieEstado(porEstado, rows.length),
+        fechas: serieFechas(porFecha),
+        vigencia: serieVigencia(rows),
+        tipos: serieTipos(porTipo),
+        totalServicios: totalServicios,
+        total: rows.length
+      };
+    });
+
+    function serieEstado(porEstado, total) {
+      var orden = [
+        { nombre: ESTADO.REVISION, color: 'var(--chart-revision)' },
+        { nombre: ESTADO.APROBADA, color: 'var(--chart-aprobada)' },
+        { nombre: ESTADO.RECHAZADA, color: 'var(--chart-rechazada)' }
+      ];
+      // Estados fuera del flujo canónico (datos viejos) se muestran igual.
+      Object.keys(porEstado).forEach(function (k) {
+        if (!orden.some(function (o) { return o.nombre === k; })) orden.push({ nombre: k, color: 'var(--border-strong)' });
+      });
+
+      var acumulado = 0;
+      var tramos = [];
+      var items = orden.filter(function (o) { return porEstado[o.nombre]; }).map(function (o) {
+        var n = porEstado[o.nombre];
+        var pct = total ? (n / total) * 100 : 0;
+        tramos.push(o.color + ' ' + acumulado.toFixed(2) + '% ' + (acumulado + pct).toFixed(2) + '%');
+        acumulado += pct;
+        return { nombre: o.nombre, n: n, color: o.color, pct: Math.round(pct) + '%' };
+      });
+
+      return {
+        items: items,
+        total: total,
+        gradient: tramos.length ? 'conic-gradient(' + tramos.join(', ') + ')' : 'var(--border)'
+      };
+    }
+
+    function serieFechas(porFecha) {
+      var claves = Object.keys(porFecha).sort();
+      if (claves.length > MAX_BARRAS_FECHA) claves = claves.slice(claves.length - MAX_BARRAS_FECHA);
+      var max = 1;
+      claves.forEach(function (k) { if (porFecha[k].n > max) max = porFecha[k].n; });
+      return claves.map(function (k) {
+        var g = porFecha[k];
+        return {
+          label: Fmt.diaMes(k),
+          n: g.n,
+          alto: Math.max(6, Math.round((g.n / max) * 100)) + '%',
+          altoRevision: Math.round((g.revision / g.n) * 100) + '%'
+        };
+      });
+    }
+
+    function serieVigencia(rows) {
+      var conFecha = rows.filter(function (c) { return c.diasRestantes != null; });
+      conFecha.sort(function (a, b) { return a.diasRestantes - b.diasRestantes; });
+      var top = conFecha.slice(0, MAX_VIGENCIA);
+      var max = 1;
+      top.forEach(function (c) { max = Math.max(max, Math.abs(c.diasRestantes)); });
+      return top.map(function (c) {
+        return {
+          codigo: String(c.codigo || '').replace(/^CTZ-KGP-/, '#'),
+          dias: Fmt.dias(c.diasRestantes),
+          clase: Rules.vigenciaClass(c.diasRestantes),
+          color: Rules.vigenciaColor(c.diasRestantes),
+          ancho: Fmt.width(Math.abs(c.diasRestantes), max, 4)
+        };
+      });
+    }
+
+    function serieTipos(porTipo) {
+      var lista = Object.keys(porTipo).map(function (k) { return porTipo[k]; });
+      lista.sort(function (a, b) { return b.n - a.n || b.valor - a.valor; });
+      lista = lista.slice(0, MAX_TIPOS);
+      var max = 1;
+      lista.forEach(function (t) { max = Math.max(max, t.n); });
+      return lista.map(function (t, i) {
+        return {
+          nombre: t.nombre,
+          meta: t.n + ' · ' + Fmt.compactMoney(t.valor),
+          ancho: Fmt.width(t.n, max, 4),
+          color: 'var(--chart-' + ((i % 6) + 1) + ')'
+        };
+      });
+    }
+
+    /** Una pasada sobre el universo evalúa las 3 comprobaciones a la vez. */
+    var calidad = memo1(function (universo) {
+      var conteos = Comprobaciones.map(function () { return 0; });
+      universo.forEach(function (c) {
+        for (var i = 0; i < Comprobaciones.length; i++) {
+          if (Comprobaciones[i].match(c)) conteos[i]++;
+        }
+      });
+      return Comprobaciones.map(function (chk, i) {
+        var n = conteos[i];
+        return {
+          id: chk.id,
+          tag: chk.tag,
+          tono: n ? (chk.id === 'tarifas' ? 'warn' : 'alert') : 'good',
+          titulo: n ? chk.titulo(n, universo.length) : 'Sin hallazgos',
+          cuerpo: n ? chk.cuerpo(n) : chk.ok(),
+          // Solo se ofrece el atajo si hay algo que mirar y existe la vista.
+          vista: n && chk.vista ? chk.vista : ''
+        };
+      });
+    });
+
+    /** Chips de filtros activos (en el orden en que el usuario los suele poner). */
+    function chips(ui, snapshot) {
+      var out = [];
+      if (ui.anio) out.push({ tipo: 'anio', label: 'Año ' + ui.anio });
+      if (ui.cliente) {
+        var cli = snapshot.clientes.filter(function (c) { return c.idCliente === ui.cliente; })[0];
+        out.push({ tipo: 'cliente', label: cli ? cli.nombre : ui.cliente });
+      }
+      if (ui.estado) out.push({ tipo: 'estado', label: ui.estado });
+      if (ui.vista && ui.vista !== 'all') {
+        var v = VistaPorId[ui.vista];
+        if (v) out.push({ tipo: 'vista', label: v.label({}) });
+      }
+      if (ui.q.trim()) out.push({ tipo: 'q', label: '“' + ui.q.trim() + '”' });
+      return out;
+    }
+
+    return {
+      /** snapshot + ui → view-model completo del dashboard. */
+      viewModel: function (state) {
+        var snapshot = state.snapshot;
+        var ui = state.ui;
+        ui.__hoy = snapshot.hoy;
+
+        var keyBase = state.version + '|' + ui.anio;
+        var universo = universoDelAnio(keyBase, snapshot, ui.anio);
+        var ctx = contextoKpis(keyBase, universo, snapshot.hoy);
+
+        var keyKpis = keyBase + '|' + ui.vista;
+        var tarjetas = kpis(keyKpis, ctx, {
+          vista: ui.vista,
+          ctxLabel: { anio: ui.anio, servicios: ctx.servicios }
+        });
+
+        var keyFiltro = keyKpis + '|' + ui.cliente + '|' + ui.estado + '|' + ui.q;
+        var rowsFiltradas = filtradas(keyFiltro, universo, ui);
+
+        var keyOrden = keyFiltro + '|' + ui.sortBy + '|' + ui.sortDir;
+        var rowsOrdenadas = ordenadas(keyOrden, rowsFiltradas, ui);
+
+        var graficas = series(keyFiltro, rowsFiltradas);
+
+        var totalPaginas = Math.max(1, Math.ceil(rowsOrdenadas.length / ui.pageSize));
+        var page = Math.min(Math.max(1, ui.page), totalPaginas);
+        if (page !== ui.page) ui.page = page; // reencuadre silencioso tras filtrar
+        var desde = (page - 1) * ui.pageSize;
+        var pagina = rowsOrdenadas.slice(desde, desde + ui.pageSize);
+
+        return {
+          version: state.version,
+          hoy: snapshot.hoy,
+          ivaTasa: snapshot.ivaTasa,
+          kpis: tarjetas,
+          calidad: calidad(keyBase, universo),
+          graficas: graficas,
+          chips: chips(ui, snapshot),
+          filas: pagina,
+          expandidas: ui.expandidas,
+          paginacion: {
+            total: rowsOrdenadas.length,
+            page: page,
+            totalPaginas: totalPaginas,
+            desde: rowsOrdenadas.length ? desde + 1 : 0,
+            hasta: Math.min(desde + ui.pageSize, rowsOrdenadas.length)
+          },
+          resumen: {
+            universo: universo.length,
+            valor: ctx.universo.reduce(function (a, c) { return a + (Number(c.total) || 0); }, 0),
+            tasa: ctx.decididas ? Math.round((ctx.aprobadas / ctx.decididas) * 100) : null
+          },
+          catalogos: { clientes: snapshot.clientes, anios: snapshot.anios, estados: snapshot.estados },
+          truncado: snapshot.truncado,
+          totalReal: snapshot.totalReal,
+          actualizadoEn: state.actualizadoEn,
+          ui: ui
+        };
+      }
+    };
+  }());
+
+  // ===================================================================
+  // Detail — carga perezosa del detalle de una cotización
+  // ===================================================================
+
+  var Detail = (function () {
+    var cache = {};     // idCotizacion → {servicios, cotizacion, ...}
+    var inFlight = {};  // idCotizacion → Promise (deduplica clics repetidos)
+
+    return {
+      /**
+       * Estado crudo de la caché, que la tabla distingue en tres casos:
+       * `undefined` = nunca pedido, `false` = falló, objeto = listo.
+       */
+      get: function (id) { return cache[id]; },
+
+      /** Resuelve con el detalle ya cacheado o lo pide una sola vez. */
+      load: function (id, onDone) {
+        if (cache[id]) { onDone(); return; }
+        if (inFlight[id]) return;
+        inFlight[id] = KGP.apiCall('api_getCotizacion', [id]).then(function (res) {
+          cache[id] = res;
+        }).catch(function () {
+          cache[id] = false; // marca de error: la fila muestra el reintento
+        }).finally(function () {
+          delete inFlight[id];
+          onDone();
+        });
+      },
+
+      /** Olvida una sola cotización (reintento tras un fallo puntual). */
+      forget: function (id) { delete cache[id]; },
+
+      /** Invalida todo (tras "Actualizar" o un cambio de versión de datos). */
+      clear: function () { cache = {}; }
+    };
+  }());
+
+  // ===================================================================
+  // View — pintado por regiones con dirty-check
+  // ===================================================================
+
+  var View = (function () {
+    var el = {};          // caché de nodos: getElementById una sola vez
+    var firmas = {};      // región → firma de su última entrada
+
+    function $(id) { return el[id] || (el[id] = document.getElementById(id)); }
+    function h(s) { return KGP.escapeHtml(s); }
+
+    /** Repinta `region` solo si su firma cambió. */
+    function siCambia(region, firma, pintar) {
+      if (firmas[region] === firma) return;
+      firmas[region] = firma;
+      pintar();
+    }
+
+    // ---------------- Cabecera ----------------
+
+    function pintarCabecera(vm) {
+      siCambia('cabecera', [vm.resumen.universo, vm.resumen.valor, vm.resumen.tasa, vm.actualizadoEn].join('|'), function () {
+        var partes = [
+          vm.resumen.universo + (vm.resumen.universo === 1 ? ' cotización' : ' cotizaciones'),
+          Fmt.compactMoney(vm.resumen.valor) + ' cotizados'
+        ];
+        if (vm.resumen.tasa != null) partes.push('tasa de aprobación ' + vm.resumen.tasa + '%');
+        $('dash-summary').textContent = 'Seguimiento en tiempo real · ' + partes.join(' · ');
+
+        var marca = Fmt.marcaTiempo(vm.actualizadoEn);
+        $('dash-updated').textContent = marca ? 'Actualizado ' + marca : '';
+      });
+
+      siCambia('banner', vm.truncado ? 'si:' + vm.totalReal : 'no', function () {
+        var banner = $('dash-banner');
+        banner.hidden = !vm.truncado;
+        if (vm.truncado) {
+          banner.textContent = 'Hay ' + vm.totalReal + ' cotizaciones en la base. El panel trabaja con las ' +
+            'más recientes; el historial más antiguo queda fuera de los KPIs y las gráficas.';
+        }
+      });
+    }
+
+    // ---------------- KPIs ----------------
+
+    function pintarKpis(vm) {
+      var firma = vm.kpis.map(function (k) { return k.id + k.value + k.activa + k.meter; }).join('|');
+      siCambia('kpis', firma, function () {
+        $('dash-kpis').innerHTML = vm.kpis.map(function (k) {
+          var clases = ['kpi-card', 'kpi-action'];
+          if (k.tone) clases.push(k.tone);
+          if (k.activa) clases.push('kpi-active');
+          return [
+            '<button type="button" class="', clases.join(' '), '" data-vista="', h(k.id), '"',
+            ' aria-pressed="', k.activa ? 'true' : 'false', '">',
+            '<span class="label">', h(k.label), '</span>',
+            '<span class="value">', h(k.value), '</span>',
+            '<span class="sub">', h(k.sub), '</span>',
+            '<span class="kpi-meter"><span style="width:', k.meter, '%"></span></span>',
+            '</button>'
+          ].join('');
+        }).join('');
+      });
+    }
+
+    // ---------------- Gráficas ----------------
+
+    function pintarGraficas(vm) {
+      var g = vm.graficas;
+
+      // El año entra en la firma porque rotula la gráfica, aunque la
+      // distribución por estado del año nuevo sea idéntica a la anterior.
+      siCambia('donut', JSON.stringify(g.estado) + '|' + vm.ui.anio, function () {
+        $('dash-donut').style.setProperty('--donut', g.estado.gradient);
+        $('dash-donut-total').textContent = g.estado.total;
+        $('dash-donut-meta').textContent = vm.ui.anio || 'todos los años';
+        $('dash-donut-legend').innerHTML = g.estado.items.length
+          ? g.estado.items.map(function (i) {
+            return [
+              '<li><span class="legend-dot" style="background:', i.color, '"></span>',
+              '<span class="legend-name">', h(i.nombre), '</span>',
+              '<span class="legend-count">', i.n, '</span>',
+              '<span class="legend-pct">', i.pct, '</span></li>'
+            ].join('');
+          }).join('')
+          : '<li class="chart-empty">Sin datos</li>';
+      });
+
+      siCambia('barras', JSON.stringify(g.fechas) + '|' + vm.ivaTasa, function () {
+        $('dash-bars-meta').textContent = 'por día · IVA ' + Math.round(vm.ivaTasa * 100) + '%';
+        $('dash-bars').innerHTML = g.fechas.length
+          ? g.fechas.map(function (f) {
+            return [
+              '<div class="bar-col">',
+              '<span class="bar-value">', f.n, '</span>',
+              '<div class="bar-stack" style="height:', f.alto, '"><span style="height:', f.altoRevision, '"></span></div>',
+              '<span class="bar-label">', h(f.label), '</span>',
+              '</div>'
+            ].join('');
+          }).join('')
+          : '<div class="chart-empty">Sin cotizaciones en el periodo filtrado</div>';
+      });
+
+      siCambia('vigencia', JSON.stringify(g.vigencia), function () {
+        $('dash-vigencia').innerHTML = g.vigencia.length
+          ? g.vigencia.map(function (v) {
+            return [
+              '<div class="hbar">',
+              '<span class="hbar-key">', h(v.codigo), '</span>',
+              '<span class="hbar-track"><span style="width:', v.ancho, ';background:', v.color, '"></span></span>',
+              '<span class="hbar-val ', v.clase, '">', h(v.dias), '</span>',
+              '</div>'
+            ].join('');
+          }).join('')
+          : '<div class="chart-empty">Sin fechas de vencimiento</div>';
+      });
+
+      siCambia('tipos', JSON.stringify(g.tipos) + '|' + g.totalServicios, function () {
+        $('dash-tipos-meta').textContent = g.totalServicios + (g.totalServicios === 1 ? ' servicio' : ' servicios');
+        $('dash-tipos').innerHTML = g.tipos.length
+          ? g.tipos.map(function (t) {
+            return [
+              '<div class="hbar-labeled">',
+              '<div class="hbar-head"><span class="hbar-name">', h(t.nombre), '</span>',
+              '<span class="hbar-meta">', h(t.meta), '</span></div>',
+              '<span class="hbar-track"><span style="width:', t.ancho, ';background:', t.color, '"></span></span>',
+              '</div>'
+            ].join('');
+          }).join('')
+          : '<div class="chart-empty">Sin servicios</div>';
+      });
+    }
+
+    // ---------------- Filtros + chips ----------------
+
+    function pintarCatalogos(vm) {
+      siCambia('catalogos', 'v' + vm.version, function () {
+        llenarSelect($('dash-filter-anio'), vm.catalogos.anios.map(function (a) {
+          return { value: String(a), text: String(a) };
+        }), 'Todos los años', vm.ui.anio);
+
+        llenarSelect($('dash-filter-cliente'), vm.catalogos.clientes.map(function (c) {
+          return { value: c.idCliente, text: c.nombre };
+        }), 'Todos los clientes', vm.ui.cliente);
+
+        llenarSelect($('dash-filter-estado'), vm.catalogos.estados.map(function (e) {
+          return { value: e, text: e };
+        }), 'Todos los estados', vm.ui.estado);
+      });
+    }
+
+    function llenarSelect(sel, items, placeholder, seleccionado) {
+      var frag = document.createDocumentFragment();
+      var ph = new Option(placeholder, '');
+      frag.appendChild(ph);
+      items.forEach(function (i) { frag.appendChild(new Option(i.text, i.value)); });
+      sel.innerHTML = '';
+      sel.appendChild(frag);
+      sel.value = seleccionado || '';
+    }
+
+    function pintarControles(vm) {
+      var ui = vm.ui;
+      siCambia('controles', [ui.anio, ui.cliente, ui.estado, ui.sortBy, ui.sortDir, ui.pageSize].join('|'), function () {
+        $('dash-filter-anio').value = ui.anio;
+        $('dash-filter-cliente').value = ui.cliente;
+        $('dash-filter-estado').value = ui.estado;
+        $('dash-sort-by').value = ui.sortBy;
+        $('dash-page-size').value = String(ui.pageSize);
+        $('dash-sort-dir').textContent = ui.sortDir === 'asc' ? '↑ Ascendente' : '↓ Descendente';
+      });
+    }
+
+    function pintarChips(vm) {
+      siCambia('chips', JSON.stringify(vm.chips), function () {
+        var cont = $('dash-chips');
+        cont.hidden = !vm.chips.length;
+        if (!vm.chips.length) { cont.innerHTML = ''; return; }
+        cont.innerHTML = '<span class="chips-label">Filtros</span>' + vm.chips.map(function (c) {
+          return '<button type="button" class="chip" data-chip="' + h(c.tipo) + '">' +
+            h(c.label) + '<span class="chip-x" aria-hidden="true">✕</span>' +
+            '<span class="sr-only">Quitar filtro</span></button>';
+        }).join('');
+      });
+    }
+
+    // ---------------- Tabla ----------------
+
+    function filaHtml(c, expandida) {
+      var dias = c.diasRestantes;
+      return [
+        '<tr', expandida ? ' class="is-expanded"' : '', '>',
+        '<td class="cell-mono">', h(c.codigo), '</td>',
+        '<td><span class="cell-cliente">',
+        '<span class="cliente-nombre">', h(c.clienteNombre || '—'), '</span>',
+        '<span class="cliente-contacto">', h(c.contactoNombre || '—'), '</span>',
+        '</span></td>',
+        '<td class="cell-muted cell-mono">', h(c.fechaElaboracion || '—'), '</td>',
+        '<td class="cell-muted cell-mono">', h(c.fechaVencimiento || '—'), '</td>',
+        '<td class="days-left ', Rules.vigenciaClass(dias), '">', h(Fmt.dias(dias)), '</td>',
+        '<td>', c.numServicios, '</td>',
+        '<td><span class="badge ', Rules.estadoBadgeClass(c.estado), '">', h(c.estado), '</span></td>',
+        '<td class="cell-num">', h(Fmt.compactMoney(c.total)), '</td>',
+        '<td>', documentoHtml(c), '</td>',
+        '<td><button type="button" class="row-toggle" data-toggle="', h(c.idCotizacion), '"',
+        ' aria-expanded="', expandida ? 'true' : 'false', '" title="Ver detalle">',
+        expandida ? '−' : '+', '</button></td>',
+        '</tr>'
+      ].join('');
+    }
+
+    function documentoHtml(c) {
+      if (Rules.documentoInvalido(c)) {
+        return '<button type="button" class="btn btn-sm" data-regen="' + h(c.idCotizacion) + '">Regenerar</button>';
+      }
+      if (c.docEstado === 'PENDIENTE') return '<span class="cell-muted">Pendiente…</span>';
+      return '<a class="link" href="' + h(c.urlDocumento) + '" target="_blank" rel="noopener">Abrir ↗</a>';
+    }
+
+    function detalleHtml(c, ivaTasa) {
+      var detalle = Detail.get(c.idCotizacion);
+      var cuerpo;
+
+      if (detalle === false) {
+        cuerpo = '<div class="row-detail-error">No se pudo cargar el detalle. ' +
+          '<button type="button" class="btn btn-sm" data-reintentar="' + h(c.idCotizacion) + '">Reintentar</button></div>';
+      } else if (!detalle) {
+        cuerpo = '<div class="row-detail-loading"><span class="spinner dark"></span>Cargando detalle…</div>';
+      } else {
+        cuerpo = detallePanelHtml(c, detalle, ivaTasa);
+      }
+
+      return '<tr class="row-detail" data-detail-of="' + h(c.idCotizacion) + '"><td colspan="10">' + cuerpo + '</td></tr>';
+    }
+
+    function detallePanelHtml(c, detalle, ivaTasa) {
+      var servicios = detalle.servicios || [];
+      var subtotal = servicios.reduce(function (a, s) { return a + (Number(s.total) || 0); }, 0);
+      // Los totales guardados son la fuente de verdad; si la hoja todavía no
+      // tiene esas columnas se derivan del subtotal con la tasa vigente.
+      var guardados = detalle.cotizacion || {};
+      var iva = numeroOSustituto(guardados.iva, subtotal * ivaTasa);
+      var total = numeroOSustituto(guardados.total, subtotal + iva);
+
+      var meta = [
+        '<div class="detail-meta">',
+        '<span class="meta-item">Plazo <strong>', h(String(c.plazo || '—')), ' días</strong></span>',
+        '<span class="meta-item">Establecimiento <strong>', h(c.establecimientoNombre || '—'), '</strong></span>',
+        '<span class="meta-item">Descripción <strong>', h(detalle.cotizacion && detalle.cotizacion.descripcion ? detalle.cotizacion.descripcion : '—'), '</strong></span>',
+        '<span class="detail-actions">',
+        c.urlDocumento ? '<a class="btn btn-sm" href="' + h(c.urlDocumento) + '" target="_blank" rel="noopener">Abrir documento ↗</a>' : '',
+        '<button type="button" class="btn btn-sm" data-gestionar="', h(c.idCotizacion), '">Gestionar cotización →</button>',
+        '</span></div>'
+      ].join('');
+
+      if (!servicios.length) {
+        return '<div class="detail-panel">' + meta + '<div class="chart-empty">Esta cotización no tiene servicios registrados.</div></div>';
+      }
+
+      var tabla = [
+        '<table class="detail-servicios"><thead><tr>',
+        '<th class="num-col">#</th><th>Servicio</th><th>Tipo</th>',
+        '<th class="money">Tarifa</th><th class="money">Cant.</th><th class="money">Subtotal</th>',
+        '</tr></thead><tbody>',
+        servicios.map(function (s, i) {
+          return [
+            '<tr><td class="num-col">', (i + 1), '</td>',
+            '<td>', h(s.descripcion || '—'),
+            s.codigoUnspsc ? '<span class="srv-unspsc">UNSPSC ' + h(s.codigoUnspsc) + '</span>' : '',
+            '</td>',
+            '<td class="cell-muted">', h(s.tipo || '—'), '</td>',
+            '<td class="money">', h(Fmt.money(s.tarifa)), '</td>',
+            '<td class="money">', h(s.cantidad === '' || s.cantidad == null ? '—' : String(s.cantidad)), '</td>',
+            '<td class="money">', h(Fmt.money(s.total)), '</td></tr>'
+          ].join('');
+        }).join(''),
+        '</tbody></table>'
+      ].join('');
+
+      var totales = [
+        '<div class="detail-totales">',
+        '<span>Subtotal ', h(Fmt.money(subtotal)), '</span>',
+        '<span>IVA ', h(Fmt.money(iva)), '</span>',
+        '<span class="total-final">Total ', h(Fmt.money(total)), '</span>',
+        '</div>'
+      ].join('');
+
+      return '<div class="detail-panel">' + meta + tabla + totales + '</div>';
+    }
+
+    /** Número guardado en la hoja, o el sustituto calculado si viene vacío. */
+    function numeroOSustituto(valor, sustituto) {
+      var n = Number(valor);
+      return (valor === '' || valor == null || !isFinite(n)) ? sustituto : n;
+    }
+
+    function pintarTabla(vm) {
+      var firma = vm.filas.map(function (c) {
+        var detalle = vm.expandidas[c.idCotizacion] ? Detail.get(c.idCotizacion) : null;
+        var faseDetalle = !vm.expandidas[c.idCotizacion] ? ''
+          : (detalle === undefined ? 'cargando' : (detalle === false ? 'error' : 'listo'));
+        return [c.idCotizacion, c.estado, c.docEstado, c.total, faseDetalle].join(':');
+      }).join('|');
+
+      siCambia('tabla', firma, function () {
+        var tbody = $('dash-tbody');
+        if (!vm.filas.length) {
+          tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No hay cotizaciones que coincidan con los filtros.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = vm.filas.map(function (c) {
+          var expandida = !!vm.expandidas[c.idCotizacion];
+          return filaHtml(c, expandida) + (expandida ? detalleHtml(c, vm.ivaTasa) : '');
+        }).join('');
+      });
+    }
+
+    function pintarCalidad(vm) {
+      var firma = vm.calidad.map(function (c) { return c.id + c.titulo + c.vista; }).join('|');
+      siCambia('calidad', firma, function () {
+        $('dash-calidad').innerHTML = vm.calidad.map(function (c) {
+          var etiqueta = c.vista ? 'button' : 'div';
+          var accion = c.vista
+            ? ' type="button" data-calidad="' + h(c.vista) + '" title="Filtrar por estas cotizaciones"'
+            : '';
+          return [
+            '<', etiqueta, ' class="calidad-card', c.vista ? ' calidad-card-action' : '', '"', accion, '>',
+            '<span class="calidad-tag"><span class="calidad-dot ', h(c.tono), '"></span>', h(c.tag), '</span>',
+            '<span class="calidad-titulo">', h(c.titulo), '</span>',
+            '<span class="calidad-cuerpo">', h(c.cuerpo), '</span>',
+            '</', etiqueta, '>'
+          ].join('');
+        }).join('');
+      });
+    }
+
+    function pintarPaginacion(vm) {
+      var p = vm.paginacion;
+      siCambia('paginacion', [p.total, p.page, p.totalPaginas].join('|'), function () {
+        $('dash-page-info').textContent = p.total
+          ? 'Mostrando ' + p.desde + '–' + p.hasta + ' de ' + p.total + ' · página ' + p.page + ' de ' + p.totalPaginas
+          : 'Sin resultados';
+        $('dash-prev').disabled = p.page <= 1;
+        $('dash-next').disabled = p.page >= p.totalPaginas;
+      });
+    }
+
+    return {
+      paint: function (vm) {
+        pintarCabecera(vm);
+        pintarKpis(vm);
+        pintarGraficas(vm);
+        pintarCatalogos(vm);
+        pintarControles(vm);
+        pintarChips(vm);
+        pintarCalidad(vm);
+        pintarTabla(vm);
+        pintarPaginacion(vm);
+      },
+
+      /** Fuerza el repintado de la tabla (p. ej. cuando llega un detalle perezoso). */
+      invalidarTabla: function () { delete firmas.tabla; },
+
+      spinner: function (visible) {
+        var s = $('dash-refresh-spinner');
+        if (s) s.style.display = visible ? 'inline-block' : 'none';
+      },
+
+      /**
+       * Bloquea (o revela) todo el dashboard con el mismo patrón que
+       * setDetailBusy en JsGestion.js.html: mientras no hay ningún snapshot
+       * pintado, no tiene sentido mostrar KPIs en cero y gráficas vacías —
+       * mejor un solo spinner centrado hasta que llegue el primer dato real.
+       * Solo se llama en el arranque sin caché (ver Ctrl.onEnter/fetchSnapshot);
+       * una vez el dashboard se reveló una vez en la sesión, se queda visible
+       * (los refrescos posteriores usan el spinner pequeño de "Actualizar").
+       */
+      busy: function (visible, text) {
+        var loading = $('dash-loading');
+        var content = $('dash-content');
+        if (!loading || !content) return; // vista aún no montada (no debería pasar)
+        loading.hidden = !visible;
+        content.hidden = visible;
+        if (visible) $('dash-loading-text').textContent = text || 'Cargando dashboard…';
+      },
+
+      /** Estado de carga inicial, cuando todavía no hay ningún snapshot. */
+      cargandoInicial: function () {
+        this.busy(true);
+      },
+
+      errorInicial: function (msg) {
+        $('dash-tbody').innerHTML = '<tr><td colspan="10" class="empty-state">' + KGP.escapeHtml(msg) + '</td></tr>';
+        this.busy(false); // revela el dashboard (vacío) para que se vea el error en la tabla en vez de dejar el spinner pegado
+      },
+
+      elemento: $
+    };
+  }());
+
+  // ===================================================================
+  // Ctrl — ciclo de vida, eventos y polling
+  // ===================================================================
+
+  var Ctrl = (function () {
+    var activo = false;
+    var eventosListos = false;
+    var enVuelo = false;
+    var rachaErrores = 0;
+    var pollTimer = null;
+    var renderPendiente = false;
+    var primeraCarga = true;
+
+    // -------- Render coalescido en un frame --------
+
+    function programarRender() {
+      if (renderPendiente) return;
+      renderPendiente = true;
+      requestAnimationFrame(function () {
+        renderPendiente = false;
+        render();
+      });
+    }
+
+    function render() {
+      var state = Store.get();
+      if (!state.snapshot) return;
+      View.paint(Select.viewModel(state));
+    }
+
+    // -------- Datos --------
+
+    /**
+     * `forzar` ignora el protocolo de versión (botón "Actualizar"); sin él,
+     * el servidor responde `unchanged` con una lectura de ScriptProperties
+     * y no se toca ninguna hoja.
+     */
+    function fetchSnapshot(forzar) {
+      if (enVuelo) return;
+      enVuelo = true;
+      View.spinner(true);
+
+      var state = Store.get();
+      var params = { sinceVersion: forzar ? null : (state.version || null) };
+
+      KGP.apiCall('api_getDashboardSnapshot', [params]).then(function (res) {
+        rachaErrores = 0;
+        if (res.unchanged) return;
+        Detail.clear();          // versión nueva: el detalle cacheado quedó viejo
+        View.invalidarTabla();
+        Store.setSnapshot(res);
+        View.busy(false); // primer snapshot real de la sesión (sin caché previa): revela el dashboard
+        // Caché local (stale-while-revalidate, CLAUDE.md §2.2): nunca es la
+        // fuente de verdad — onEnter siempre dispara igual la llamada real.
+        // Si el snapshot no cupiera en localStorage, KGP.localCache.set
+        // absorbe el fallo de cuota y la vista sigue funcionando sin caché.
+        KGP.localCache.set(LOCAL_CACHE_KEY, res);
+      }).catch(function (err) {
+        rachaErrores++;
+        var msg = KGP.friendlyError(err);
+        if (!Store.get().snapshot) View.errorInicial('No se pudo cargar el dashboard: ' + msg);
+        KGP.toast('Dashboard: ' + msg, 'error', 5000);
+      }).finally(function () {
+        enVuelo = false;
+        View.spinner(false);
+        programarSiguientePoll();
+        KGP.hideLoader();
+      });
+    }
+
+    function programarSiguientePoll() {
+      detenerPoll();
+      if (!activo || document.hidden) return; // visibilitychange retoma al volver
+      var base = rachaErrores
+        ? POLL_BACKOFF_MS[Math.min(rachaErrores - 1, POLL_BACKOFF_MS.length - 1)]
+        : POLL_BASE_MS;
+      var jitter = Math.floor(Math.random() * 10000) - 5000; // evita que N pestañas peguen a la vez
+      pollTimer = setTimeout(function () { fetchSnapshot(false); }, Math.max(5000, base + jitter));
+    }
+
+    function detenerPoll() {
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    }
+
+    // -------- Eventos --------
+
+    function debounce(fn, ms) {
+      var t;
+      return function () {
+        var args = arguments;
+        clearTimeout(t);
+        t = setTimeout(function () { fn.apply(null, args); }, ms);
+      };
+    }
+
+    function on(id, evento, handler) {
+      var nodo = document.getElementById(id);
+      if (nodo) nodo.addEventListener(evento, handler);
+    }
+
+    function wire() {
+      if (eventosListos) return;
+      eventosListos = true;
+      Store.subscribe(programarRender);
+
+      on('dash-refresh', 'click', function () { fetchSnapshot(true); });
+
+      on('dash-search', 'input', debounce(function (e) {
+        Store.patchUi({ q: e.target.value });
+      }, SEARCH_DEBOUNCE_MS));
+
+      on('dash-filter-anio', 'change', function (e) { Store.patchUi({ anio: e.target.value }); });
+      on('dash-filter-cliente', 'change', function (e) { Store.patchUi({ cliente: e.target.value }); });
+      on('dash-filter-estado', 'change', function (e) { Store.patchUi({ estado: e.target.value, vista: 'all' }); });
+      on('dash-sort-by', 'change', function (e) { Store.patchUi({ sortBy: e.target.value }); });
+      on('dash-page-size', 'change', function (e) { Store.patchUi({ pageSize: Number(e.target.value) }); });
+
+      on('dash-sort-dir', 'click', function () {
+        Store.patchUi({ sortDir: Store.ui().sortDir === 'asc' ? 'desc' : 'asc' });
+      });
+
+      on('dash-reset', 'click', function () {
+        View.elemento('dash-search').value = '';
+        Store.reset();
+      });
+
+      on('dash-prev', 'click', function () {
+        var ui = Store.ui();
+        if (ui.page > 1) Store.patchUi({ page: ui.page - 1 }, { resetPage: false });
+      });
+      on('dash-next', 'click', function () {
+        var ui = Store.ui();
+        Store.patchUi({ page: ui.page + 1 }, { resetPage: false });
+      });
+
+      // Delegación: un solo listener para las 9 tarjetas KPI.
+      on('dash-kpis', 'click', function (e) {
+        var btn = e.target.closest('[data-vista]');
+        if (!btn) return;
+        var id = btn.getAttribute('data-vista');
+        var actual = Store.ui().vista;
+        Store.patchUi({ vista: actual === id ? 'all' : id, estado: '' });
+      });
+
+      on('dash-chips', 'click', function (e) {
+        var chip = e.target.closest('[data-chip]');
+        if (!chip) return;
+        var patch = {};
+        var tipo = chip.getAttribute('data-chip');
+        if (tipo === 'q') { View.elemento('dash-search').value = ''; patch.q = ''; }
+        else if (tipo === 'vista') patch.vista = 'all';
+        else patch[tipo] = '';
+        Store.patchUi(patch);
+      });
+
+      on('dash-calidad', 'click', function (e) {
+        var card = e.target.closest('[data-calidad]');
+        if (!card) return;
+        Store.patchUi({ vista: card.getAttribute('data-calidad'), estado: '' });
+      });
+
+      // Delegación: un solo listener para toda la tabla (filas + detalle).
+      on('dash-tbody', 'click', onTablaClick);
+
+      document.addEventListener('visibilitychange', function () {
+        if (!activo) return;
+        if (document.hidden) detenerPoll();
+        else fetchSnapshot(false);
+      });
+    }
+
+    function onTablaClick(e) {
+      var toggle = e.target.closest('[data-toggle]');
+      if (toggle) return expandirFila(toggle.getAttribute('data-toggle'));
+
+      var regen = e.target.closest('[data-regen]');
+      if (regen) return regenerarDocumento(regen);
+
+      var reintentar = e.target.closest('[data-reintentar]');
+      if (reintentar) return cargarDetalle(reintentar.getAttribute('data-reintentar'), true);
+
+      var gestionar = e.target.closest('[data-gestionar]');
+      if (gestionar) return KGP.gestion.openDetail(gestionar.getAttribute('data-gestionar'));
+    }
+
+    function expandirFila(id) {
+      var abierta = !!Store.ui().expandidas[id];
+      View.invalidarTabla();
+      Store.toggleExpandida(id);
+      if (!abierta) cargarDetalle(id, false);
+    }
+
+    function cargarDetalle(id, forzar) {
+      if (forzar) Detail.forget(id);
+      View.invalidarTabla();
+      programarRender();
+      Detail.load(id, function () {
+        View.invalidarTabla();
+        programarRender();
+      });
+    }
+
+    function regenerarDocumento(btn) {
+      var id = btn.getAttribute('data-regen');
+      btn.disabled = true;
+      btn.textContent = 'Generando…';
+      KGP.apiCall('api_regenerateDocument', [id]).then(function () {
+        KGP.toast('Documento regenerado.', 'success');
+      }).catch(function (err) {
+        KGP.toast('Error al regenerar: ' + KGP.friendlyError(err), 'error');
+      }).finally(function () {
+        fetchSnapshot(true);
+      });
+    }
+
+    // -------- Ciclo de vida --------
+
+    return {
+      onEnter: function () {
+        activo = true;
+        wire();
+
+        if (primeraCarga) {
+          primeraCarga = false;
+          // Pinta de inmediato el último snapshot conocido para no dejar al
+          // usuario mirando el loader; el dato real se pide igual, sin
+          // excepción, justo debajo.
+          var cacheado = KGP.localCache.get(LOCAL_CACHE_KEY);
+          if (cacheado && cacheado.cotizaciones) {
+            Store.setSnapshot(cacheado);
+            render();
+            View.busy(false); // hay caché: se pinta directo, el spinner de dash-loading nunca llega a verse
+            KGP.hideLoader();
+          } else {
+            View.cargandoInicial(); // sin caché: bloquea el dashboard con el spinner hasta que fetchSnapshot resuelva
+          }
+          fetchSnapshot(true);
+          return;
+        }
+
+        // Regreso a la vista dentro de la misma sesión: se repinta con lo que
+        // ya hay en memoria y se retoma el polling barato (sin forzar).
+        programarRender();
+        fetchSnapshot(false);
+      },
+
+      onLeave: function () {
+        activo = false;
+        detenerPoll();
+      }
+    };
+  }());
+
+  KGP.dashboard.onEnter = Ctrl.onEnter;
+  KGP.dashboard.onLeave = Ctrl.onLeave;
+
+}(window.KGP));
+</script>

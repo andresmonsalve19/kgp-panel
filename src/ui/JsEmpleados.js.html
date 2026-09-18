@@ -1,0 +1,259 @@
+<script>
+/**
+ * Lógica de la vista "Gestión de empleados": listado completo de
+ * PERSONAL_KGP (api_listEmpleados), filtrado Y paginado en el cliente (la
+ * tabla crece un empleado a la vez, no una fila por transacción como
+ * COTIZACIONES, así que no hace falta paginación server-side ni un
+ * protocolo de versión — ver CLAUDE.md §2; el tamaño de página, en cambio,
+ * sí lo elige el usuario, 10/20/50, para no tener que scrollear una lista
+ * larga). Alta/edición reutilizan KGP.entityModal (tipo "empleado",
+ * ui/JsCore.js.html); la baja usa un confirm en 2 pasos por fila, mismo
+ * criterio que la decisión de garantía de "Gestionar cotización" (ninguna
+ * acción irreversible se dispara con un solo clic).
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  var state = {
+    all: [],
+    q: '',
+    page: 1,
+    pageSize: 10,
+    loaded: false,
+    confirmDeleteId: null
+  };
+
+  var eventsWired = false;
+
+  KGP.empleados.onEnter = function () {
+    wireEvents();
+    if (state.loaded) return; // ya se cargó en esta sesión: no repetir la consulta al volver a la vista
+    fetchList();
+  };
+
+  function fetchList(opts) {
+    opts = opts || {};
+    var tbody = document.getElementById('emp-tbody');
+    if (!opts.silent) tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Cargando…</td></tr>';
+    setRefreshSpinner(true);
+
+    return KGP.apiCall('api_listEmpleados', []).then(function (list) {
+      state.loaded = true;
+      state.all = list;
+      state.confirmDeleteId = null;
+      render();
+    }).catch(function (err) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No se pudo cargar el listado.</td></tr>';
+      KGP.toast('No se pudo cargar el listado de empleados: ' + KGP.friendlyError(err), 'error');
+    }).finally(function () {
+      setRefreshSpinner(false);
+    });
+  }
+
+  function setRefreshSpinner(show) {
+    var el = document.getElementById('emp-refresh-spinner');
+    if (el) el.style.display = show ? 'inline-block' : 'none';
+  }
+
+  function normalize(s) {
+    return String(s || '').toLowerCase();
+  }
+
+  function filtered() {
+    var q = normalize(state.q).trim();
+    if (!q) return state.all;
+    return state.all.filter(function (e) {
+      return normalize(e.nombre).indexOf(q) !== -1 ||
+        normalize(e.correo).indexOf(q) !== -1 ||
+        normalize(e.cargo).indexOf(q) !== -1 ||
+        normalize(e.telefono).indexOf(q) !== -1;
+    });
+  }
+
+  var EDIT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+  var TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+
+  /** Página actual de filtered(), recortada a state.pageSize. Recorta state.page si la lista encogió (filtro/baja) y quedó fuera de rango. */
+  function pageRows() {
+    var rows = filtered();
+    var totalPages = Math.max(1, Math.ceil(rows.length / state.pageSize));
+    if (state.page > totalPages) state.page = totalPages;
+    var start = (state.page - 1) * state.pageSize;
+    return { rows: rows.slice(start, start + state.pageSize), total: rows.length };
+  }
+
+  function render() {
+    var tbody = document.getElementById('emp-tbody');
+    var page = pageRows();
+    if (!page.total) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">' +
+        (state.all.length ? 'No hay empleados que coincidan con la búsqueda.' : 'No hay empleados registrados todavía.') +
+        '</td></tr>';
+    } else {
+      tbody.innerHTML = page.rows.map(rowHtml).join('');
+    }
+    renderPaginationInfo(page.total);
+  }
+
+  function renderPaginationInfo(total) {
+    var el = document.getElementById('emp-page-info');
+    var start = total ? (state.page - 1) * state.pageSize + 1 : 0;
+    var end = Math.min(state.page * state.pageSize, total);
+    el.textContent = total ? ('Mostrando ' + start + '–' + end + ' de ' + total) : 'Sin resultados';
+    document.getElementById('emp-prev').disabled = state.page <= 1;
+    document.getElementById('emp-next').disabled = end >= total;
+  }
+
+  function rowHtml(e) {
+    var id = KGP.escapeHtml(e.idEmpleado);
+    var actions = state.confirmDeleteId === e.idEmpleado
+      ? '<div class="picker-row">' +
+        '<span class="cell-muted">¿Eliminar?</span>' +
+        '<button type="button" class="btn btn-sm btn-danger" data-action="confirm-yes" data-id="' + id + '">Sí</button>' +
+        '<button type="button" class="btn btn-sm btn-ghost" data-action="confirm-no" data-id="' + id + '">Cancelar</button>' +
+        '</div>'
+      : '<div class="picker-row">' +
+        '<button type="button" class="btn btn-sm btn-icon-edit" data-action="edit" data-id="' + id + '" title="Editar empleado">' + EDIT_SVG + '</button>' +
+        '<button type="button" class="btn btn-sm btn-icon-delete" data-action="delete" data-id="' + id + '" title="Eliminar empleado">' + TRASH_SVG + '</button>' +
+        '</div>';
+
+    return '<tr>' +
+      '<td class="cell-mono">' + id + '</td>' +
+      '<td>' + KGP.escapeHtml(e.nombre || '—') + '</td>' +
+      '<td class="cell-muted">' + KGP.escapeHtml(e.correo || '—') + '</td>' +
+      '<td class="cell-muted">' + KGP.escapeHtml(e.telefono || '—') + '</td>' +
+      '<td>' + KGP.escapeHtml(e.cargo || '—') + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function findEmpleado(idEmpleado) {
+    return state.all.filter(function (e) { return e.idEmpleado === idEmpleado; })[0] || null;
+  }
+
+  // ---------------- Alta / edición (KGP.entityModal) ----------------
+
+  function openCreateModal() {
+    KGP.entityModal.open({
+      type: 'empleado',
+      mode: 'create',
+      onSave: function (datos) {
+        return KGP.apiCall('api_createEmpleado', [datos]).then(function (creado) {
+          KGP.toast('Empleado "' + creado.nombre + '" guardado.', 'success');
+          state.all.push(creado);
+          render();
+        }).catch(function (err) {
+          KGP.toast('No se pudo guardar el empleado: ' + KGP.friendlyError(err), 'error');
+          throw err;
+        });
+      }
+    });
+  }
+
+  function openEditModal(idEmpleado) {
+    var e = findEmpleado(idEmpleado);
+    if (!e) return;
+    KGP.entityModal.open({
+      type: 'empleado',
+      mode: 'edit',
+      editId: idEmpleado,
+      initial: e,
+      onSave: function (datos) {
+        return KGP.apiCall('api_updateEmpleado', [idEmpleado, datos]).then(function (actualizado) {
+          KGP.toast('Empleado actualizado.', 'success');
+          state.all = state.all.map(function (x) {
+            return x.idEmpleado === idEmpleado ? Object.assign({}, x, actualizado) : x;
+          });
+          render();
+        }).catch(function (err) {
+          KGP.toast('No se pudo actualizar el empleado: ' + KGP.friendlyError(err), 'error');
+          throw err;
+        });
+      }
+    });
+  }
+
+  // ---------------- Baja (confirm en 2 pasos por fila) ----------------
+
+  function askDelete(idEmpleado) {
+    state.confirmDeleteId = idEmpleado;
+    render();
+  }
+
+  function cancelDelete() {
+    state.confirmDeleteId = null;
+    render();
+  }
+
+  function confirmDelete(idEmpleado) {
+    KGP.apiCall('api_deleteEmpleado', [idEmpleado]).then(function () {
+      KGP.toast('Empleado eliminado.', 'success');
+      state.all = state.all.filter(function (e) { return e.idEmpleado !== idEmpleado; });
+      state.confirmDeleteId = null;
+      render();
+    }).catch(function (err) {
+      KGP.toast('No se pudo eliminar el empleado: ' + KGP.friendlyError(err), 'error');
+      state.confirmDeleteId = null;
+      render();
+    });
+  }
+
+  function debounce(fn, ms) {
+    var t;
+    return function () {
+      var args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(null, args); }, ms);
+    };
+  }
+
+  // ---------------- Wiring ----------------
+
+  function wireEvents() {
+    if (eventsWired) return;
+    eventsWired = true;
+
+    document.getElementById('emp-search').addEventListener('input', debounce(function (e) {
+      state.q = e.target.value;
+      state.page = 1;
+      render();
+    }, 250));
+
+    document.getElementById('emp-page-size').addEventListener('change', function (e) {
+      state.pageSize = Number(e.target.value);
+      state.page = 1;
+      render();
+    });
+    document.getElementById('emp-prev').addEventListener('click', function () {
+      if (state.page <= 1) return;
+      state.page--;
+      render();
+    });
+    document.getElementById('emp-next').addEventListener('click', function () {
+      if (state.page * state.pageSize >= filtered().length) return;
+      state.page++;
+      render();
+    });
+
+    document.getElementById('emp-refresh-btn').addEventListener('click', function () {
+      fetchList({ silent: true });
+    });
+
+    document.getElementById('emp-nuevo-btn').addEventListener('click', openCreateModal);
+
+    document.getElementById('emp-tbody').addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      var id = btn.getAttribute('data-id');
+      var action = btn.getAttribute('data-action');
+      if (action === 'edit') openEditModal(id);
+      else if (action === 'delete') askDelete(id);
+      else if (action === 'confirm-yes') confirmDelete(id);
+      else if (action === 'confirm-no') cancelDelete();
+    });
+  }
+
+}(window.KGP));
+</script>

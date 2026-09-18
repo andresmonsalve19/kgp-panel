@@ -1,0 +1,708 @@
+<script>
+/**
+ * Núcleo de la UI: namespace global KGP con el wrapper de google.script.run
+ * (KGP.apiCall), el router en memoria (KGP.nav — no location.hash, el hash
+ * del navegador no es accesible dentro del iframe sandbox de Apps Script),
+ * el sistema de toasts y el indicador de conexión.
+ *
+ * JsCotizacion.js.html y JsDashboard.js.html registran KGP.cotizacion y
+ * KGP.dashboard con {bootstrap, onEnter, onLeave} antes de que corra
+ * KGP.init() (ver Index.html: los <script> se incluyen en orden y init()
+ * se llama al final).
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  KGP.state = { view: null };
+  KGP.cotizacion = KGP.cotizacion || {};
+  KGP.dashboard = KGP.dashboard || {};
+  KGP.gestion = KGP.gestion || {};
+  KGP.ois = KGP.ois || {};
+  KGP.empleados = KGP.empleados || {};
+
+  // ---------------- apiCall: wrapper sobre google.script.run ----------------
+
+  /**
+   * fn: nombre de la función api_* (string). args: array de argumentos.
+   * opts: { retryOn: [codigos], retryDelays: [ms,...], timeoutMs }.
+   * Devuelve una Promise que resuelve con `data` o rechaza con {code,message}.
+   *
+   * google.script.run no tiene timeout propio: se corre una carrera contra
+   * un timeout local (90s por defecto). Si gana el timeout, la llamada al
+   * servidor sigue en curso igualmente (no se puede cancelar); el llamador
+   * decide si reintenta (createQuotation reintenta con el MISMO requestId,
+   * nunca a ciegas, gracias a la idempotencia del servidor).
+   */
+  KGP.apiCall = function (fn, args, opts) {
+    opts = opts || {};
+    var retryOn = opts.retryOn || ['BUSY', 'TRANSPORT'];
+    var retryDelays = opts.retryDelays || [2000, 5000];
+    var timeoutMs = opts.timeoutMs || 90000;
+
+    function attempt(n) {
+      var callPromise = new Promise(function (resolve, reject) {
+        google.script.run
+          .withSuccessHandler(function (r) {
+            KGP.setConn('ok');
+            if (r && r.ok) {
+              resolve(r.data);
+            } else {
+              reject((r && r.error) || { code: 'INTERNAL', message: 'Respuesta inválida del servidor.' });
+            }
+          })
+          .withFailureHandler(function (e) {
+            KGP.setConn('error');
+            reject({ code: 'TRANSPORT', message: (e && e.message) || String(e) });
+          })
+          [fn].apply(null, args || []);
+      });
+
+      var timeoutPromise = new Promise(function (_, reject) {
+        setTimeout(function () { reject({ code: 'TIMEOUT', message: 'La operación tardó demasiado (90s).' }); }, timeoutMs);
+      });
+
+      return Promise.race([callPromise, timeoutPromise]).catch(function (err) {
+        if (err && retryOn.indexOf(err.code) !== -1 && n < retryDelays.length) {
+          return new Promise(function (resolve) { setTimeout(resolve, retryDelays[n]); })
+            .then(function () { return attempt(n + 1); });
+        }
+        throw err;
+      });
+    }
+
+    return attempt(0);
+  };
+
+  // ---------------- Indicador de conexión ----------------
+
+  KGP.setConn = function (status) {
+    var dot = document.getElementById('conn-dot');
+    var label = document.getElementById('conn-label');
+    if (!dot || !label) return;
+    dot.className = 'conn-dot' + (status === 'error' ? ' error' : status === 'connecting' ? ' off' : '');
+    label.textContent = status === 'error' ? 'Sin conexión' : status === 'connecting' ? 'Conectando…' : 'Conectado';
+  };
+
+  // ---------------- Toasts ----------------
+
+  KGP.toast = function (message, type, durationMs) {
+    var stack = document.getElementById('toast-stack');
+    if (!stack) return;
+    var el = document.createElement('div');
+    el.className = 'toast' + (type ? ' ' + type : '');
+    el.textContent = message;
+    stack.appendChild(el);
+    setTimeout(function () {
+      el.style.transition = 'opacity 0.2s ease';
+      el.style.opacity = '0';
+      setTimeout(function () { el.remove(); }, 220);
+    }, durationMs || 4200);
+  };
+
+  /** Mensaje legible a partir de un error {code,message} devuelto por apiCall. */
+  KGP.friendlyError = function (err) {
+    if (!err) return 'Ocurrió un error inesperado.';
+    var byCode = {
+      BUSY: 'El sistema está ocupado procesando otra cotización. Intenta de nuevo en unos segundos.',
+      TIMEOUT: 'La operación está tardando más de lo normal. Puedes reintentar; no se duplicará nada.',
+      TRANSPORT: 'Problema de conexión. Verifica tu red e intenta de nuevo.',
+      SCHEMA: 'Hay un problema con la estructura de la base de datos: ' + err.message,
+      SEQ_OVERFLOW: err.message
+    };
+    return byCode[err.code] || (err.message || 'Ocurrió un error inesperado.');
+  };
+
+  // ---------------- Router en memoria ----------------
+
+  KGP.nav = function (view) {
+    if (KGP.state.view === view) return;
+    var prev = KGP.state.view;
+    KGP.state.view = view;
+
+    document.querySelectorAll('.view').forEach(function (el) {
+      el.classList.toggle('active', el.id === 'view-' + view);
+    });
+    document.querySelectorAll('.nav-item').forEach(function (el) {
+      el.classList.toggle('active', el.getAttribute('data-nav') === view);
+    });
+
+    if (prev === 'dashboard' && KGP.dashboard.onLeave) KGP.dashboard.onLeave();
+    if (view === 'cotizacion' && KGP.cotizacion.onEnter) KGP.cotizacion.onEnter();
+    if (view === 'dashboard' && KGP.dashboard.onEnter) KGP.dashboard.onEnter();
+    if (view === 'gestion' && KGP.gestion.onEnter) KGP.gestion.onEnter();
+    if (view === 'ois' && KGP.ois.onEnter) KGP.ois.onEnter();
+    if (view === 'empleados' && KGP.empleados.onEnter) KGP.empleados.onEnter();
+  };
+
+  // ---------------- Utilidades compartidas ----------------
+
+  /** UUID v4 simple, suficiente como requestId de idempotencia (no criptográfico). */
+  KGP.uuid = function () {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+      var r = Math.random() * 16 | 0;
+      var v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  };
+
+  KGP.escapeHtml = function (s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  };
+
+  // ---------------- Loader de pantalla completa ----------------
+
+  /**
+   * Oculta el loader inicial (#page-loader, visible por defecto desde el
+   * HTML). Debe llamarse una vez que la vista activa terminó de cargar TODOS
+   * sus datos (éxito o error, nunca debe quedar pegado). Idempotente: llamar
+   * varias veces (p. ej. desde cada poll del dashboard) no tiene efecto tras
+   * la primera vez, porque el elemento se elimina del DOM.
+   */
+  KGP.hideLoader = function () {
+    var el = document.getElementById('page-loader');
+    if (!el) return;
+    el.classList.add('hidden');
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 300);
+  };
+
+  // ---------------- Caché local (stale-while-revalidate) ----------------
+
+  /**
+   * Persistencia en localStorage para que Dashboard y "Gestionar cotización"
+   * puedan pintar de inmediato el último dato visto (sin el loader
+   * bloqueando la vista) mientras se pide en segundo plano el dato real de
+   * la base de datos. Nunca es la fuente de verdad: cada vista, al entrar
+   * por primera vez en la sesión, siempre dispara igual una llamada real al
+   * servidor que termina reemplazando y reescribiendo esta caché — así una
+   * recarga de página (o volver a abrir la pestaña) jamás se queda con un
+   * dato viejo para siempre, solo evita la espera visible mientras llega.
+   */
+  KGP.localCache = (function () {
+    var PREFIX = 'kgp:cache:';
+    return {
+      get: function (key) {
+        try {
+          var raw = localStorage.getItem(PREFIX + key);
+          return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+          return null; // localStorage no disponible (modo privado, cuota, etc.) — no crítico
+        }
+      },
+      set: function (key, value) {
+        try {
+          localStorage.setItem(PREFIX + key, JSON.stringify(value));
+        } catch (e) { /* no crítico */ }
+      }
+    };
+  }());
+
+  // ---------------- Catálogo compartido (api_bootstrap) ----------------
+
+  /**
+   * api_bootstrap trae tipos de servicio + catálogo UNSPSC + clientes +
+   * estados, y lo necesitan tanto "Crear cotización" como "Gestionar
+   * cotización". En vez de que cada vista lo pida por su cuenta (dos
+   * round-trips cuando el usuario simplemente navega entre las dos vistas),
+   * se cachea en memoria aquí y se comparte. KGP.catalog.load(true) fuerza
+   * un refresco (usar tras crear una cotización o al entrar a "Gestionar",
+   * donde interesa ver clientes/catálogo recién agregados).
+   */
+  KGP.catalog = (function () {
+    var pending = null;
+    var last = null;
+    return {
+      load: function (force) {
+        if (!force && pending) return pending;
+        var p = KGP.apiCall('api_bootstrap', []).then(function (res) {
+          last = res;
+          return res;
+        }).catch(function (err) {
+          // Un bootstrap fallido NO se cachea: si se dejara la promesa
+          // rechazada en `pending`, cada vista que llamara load() después
+          // (p. ej. abrir una cotización en "Gestionar") fallaría para siempre
+          // en esa sesión sin volver a intentarlo.
+          if (pending === p) pending = null;
+          throw err;
+        });
+        pending = p;
+        return pending;
+      },
+      current: function () { return last; }
+    };
+  }());
+
+  // ---------------- Utilidades de <select> compartidas ----------------
+
+  KGP.ui = {
+    rebuildSelect: function (sel, items, valueFn, labelFn, placeholderText) {
+      sel.innerHTML = '';
+      var ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = placeholderText;
+      sel.appendChild(ph);
+      items.forEach(function (it) {
+        var opt = document.createElement('option');
+        opt.value = valueFn(it);
+        opt.textContent = labelFn(it);
+        sel.appendChild(opt);
+      });
+    },
+
+    /** Inserta (o reemplaza si ya existe) una <option> sin tocar la selección actual. */
+    addOption: function (sel, value, label) {
+      var existing = sel.querySelector('option[value="' + value + '"]');
+      if (existing) { existing.textContent = label; return existing; }
+      var opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+      return opt;
+    },
+
+    /** addOption + deja esa opción seleccionada de inmediato (sin recargar nada del servidor). */
+    addOptionAndSelect: function (sel, value, label) {
+      KGP.ui.addOption(sel, value, label);
+      sel.value = value;
+    },
+
+    updateOptionLabel: function (sel, value, label) {
+      var opt = sel.querySelector('option[value="' + value + '"]');
+      if (opt) opt.textContent = label;
+    },
+
+    clientLabel: function (c) { return c.razonSocial + (c.numeroIdentificacion ? ' — ' + c.numeroIdentificacion : ''); },
+    contactoLabel: function (c) { return c.nombre + (c.cargo ? ' — ' + c.cargo : ''); },
+    establecimientoLabel: function (e) { return e.nombre; },
+
+    /** {tipo: codigoUnspsc} a partir de catalogoPares (misma fila = correspondencia real, ver 11_CatalogRepo.js). */
+    buildUnspscMap: function (pares) {
+      var map = {};
+      (pares || []).forEach(function (p) { map[p.tipo] = p.codigoUnspsc; });
+      return map;
+    },
+
+    wirePhoneInputs: function (scope) {
+      Array.prototype.forEach.call(scope.querySelectorAll('input[type=tel]'), function (inp) {
+        inp.addEventListener('input', function () {
+          var digits = inp.value.replace(/\D/g, '');
+          if (digits !== inp.value) inp.value = digits;
+        });
+      });
+    },
+
+    /** Formato contable colombiano, solo para mostrar: 12000 -> "$12.000", 2280.5 -> "$2.280,50". '' / null -> "—". */
+    formatMoney: function (n) {
+      if (n === '' || n == null || isNaN(Number(n))) return '—';
+      var v = Math.round(Math.abs(Number(n)) * 100) / 100;
+      var entero = Math.floor(v);
+      var dec = Math.round((v - entero) * 100);
+      var txt = String(entero).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+      return (Number(n) < 0 ? '-' : '') + '$' + txt + (dec ? ',' + String(dec).padStart(2, '0') : '');
+    },
+
+    /** Número entero a partir de un texto con formato ("$12.000" -> 12000); '' si no hay dígitos. */
+    parseDigits: function (text) {
+      var digits = String(text == null ? '' : text).replace(/\D/g, '');
+      return digits ? Number(digits) : '';
+    },
+
+    /**
+     * Campo de moneda: solo acepta dígitos (hasta maxDigits) y se muestra
+     * formateado ("$120.000") mientras se escribe, conservando la posición
+     * del cursor. El valor real se lee con KGP.ui.parseDigits(input.value).
+     */
+    wireMoneyInput: function (input, maxDigits, onChange) {
+      input.addEventListener('input', function () {
+        var caret = input.selectionStart == null ? input.value.length : input.selectionStart;
+        var digitsBeforeCaret = input.value.slice(0, caret).replace(/\D/g, '').replace(/^0+(?=\d)/, '').length;
+        var digits = input.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, maxDigits);
+        input.value = digits ? KGP.ui.formatMoney(Number(digits)) : '';
+        var pos = input.value.length;
+        if (digitsBeforeCaret < digits.length) {
+          var seen = 0;
+          for (var i = 0; i < input.value.length; i++) {
+            if (/\d/.test(input.value[i])) seen++;
+            if (seen === digitsBeforeCaret) { pos = i + 1; break; }
+          }
+          if (digitsBeforeCaret === 0) pos = 1; // justo después del "$"
+        }
+        try { input.setSelectionRange(pos, pos); } catch (e) { /* input sin foco */ }
+        if (onChange) onChange();
+      });
+    }
+  };
+
+  // ---------------- Modal genérico: Cliente / Contacto / Establecimiento ----------------
+
+  /**
+   * Un solo modal compartido (#modal-overlay en Index.html/ViewCotizacion.html)
+   * reutilizado por "Crear cotización" y "Gestionar cotización": ambas vistas
+   * necesitan el mismo formulario de alta/edición rápida de cliente,
+   * solicitante/encargado (contacto) y establecimiento. El llamador decide
+   * QUÉ hacer con el resultado (a qué <select> insertar la opción, qué
+   * estado local actualizar) pasando `onSave(datos) -> Promise`; este módulo
+   * solo se encarga de mostrar el formulario correcto, validar los campos
+   * comunes (requerido/correo/teléfono) y el ciclo de vida del diálogo.
+   */
+  KGP.entityModal = (function () {
+    var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
+    var TITLES = {
+      cliente: { create: 'Agregar nuevo cliente', edit: 'Editar cliente' },
+      contactoSolicitante: { create: 'Agregar contacto del cliente', edit: 'Editar contacto' },
+      contactoEncargado: { create: 'Agregar contacto encargado', edit: 'Editar contacto' },
+      establecimiento: { create: 'Agregar establecimiento', edit: 'Editar establecimiento' },
+      empleado: { create: 'Agregar empleado', edit: 'Editar empleado' }
+    };
+    var state = { type: null, mode: null, target: null, onSave: null };
+    var wired = false;
+
+    function capitalize_(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
+
+    function fill(initial) {
+      var body = document.getElementById('modal-body');
+      Object.keys(initial || {}).forEach(function (key) {
+        var el = body.querySelector('[data-f="' + key + '"]');
+        if (el) el.value = initial[key] == null ? '' : initial[key];
+      });
+    }
+
+    function read() {
+      var body = document.getElementById('modal-body');
+      var out = {};
+      Array.prototype.forEach.call(body.querySelectorAll('[data-f]'), function (el) {
+        out[el.getAttribute('data-f')] = el.value.trim();
+      });
+      return out;
+    }
+
+    function fieldEl(key) { return document.querySelector('#modal-body .field[data-field="' + key + '"]'); }
+    function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+    function clearInvalid() {
+      document.querySelectorAll('#modal-body .field.invalid').forEach(function (f) { f.classList.remove('invalid'); });
+    }
+
+    function validate(type, datos) {
+      clearInvalid();
+      var ok = true;
+      function fail(key) { markInvalid(key); ok = false; }
+
+      if (type === 'cliente') {
+        if (!datos.razonSocial) fail('razonSocial');
+        if (!datos.numeroIdentificacion) fail('numeroIdentificacion');
+      } else if (type === 'contacto' || type === 'establecimiento' || type === 'empleado') {
+        if (!datos.nombre) fail('nombre');
+      }
+      if (datos.correo && !EMAIL_RE.test(datos.correo)) fail('correo');
+      if (datos.telefono && /\D/.test(datos.telefono)) fail('telefono');
+
+      return ok;
+    }
+
+    function open(opts) {
+      opts = opts || {};
+      state.type = opts.type;
+      state.mode = opts.mode;
+      state.target = opts.target || null;
+      state.onSave = opts.onSave;
+
+      var body = document.getElementById('modal-body');
+      body.innerHTML = '';
+      var tpl = document.getElementById('tpl-modal-' + opts.type);
+      body.appendChild(tpl.content.cloneNode(true));
+
+      var titleKey = opts.type === 'contacto' ? ('contacto' + capitalize_(state.target)) : opts.type;
+      document.getElementById('modal-title').textContent = ((TITLES[titleKey] || {})[opts.mode]) || 'Formulario';
+
+      if (opts.mode === 'edit' && opts.initial) fill(opts.initial);
+      KGP.ui.wirePhoneInputs(body);
+
+      document.getElementById('modal-overlay').classList.add('open');
+      var firstInput = body.querySelector('input, select, textarea');
+      if (firstInput) setTimeout(function () { firstInput.focus(); }, 50);
+    }
+
+    function close() {
+      document.getElementById('modal-overlay').classList.remove('open');
+      document.getElementById('modal-body').innerHTML = '';
+      state.type = null; state.mode = null; state.target = null; state.onSave = null;
+    }
+
+    function handleSave() {
+      var datos = read();
+      if (!validate(state.type, datos)) {
+        KGP.toast('Revisa los campos marcados en rojo.', 'error');
+        return;
+      }
+
+      var btn = document.getElementById('modal-save');
+      btn.disabled = true;
+      btn.textContent = 'Guardando…';
+
+      Promise.resolve(state.onSave(datos)).then(function () {
+        close();
+      }).catch(function () { /* el toast de error ya lo muestra el onSave específico */ })
+        .finally(function () {
+          btn.disabled = false;
+          btn.textContent = 'Guardar';
+        });
+    }
+
+    function wireGlobalEvents() {
+      if (wired) return;
+      wired = true;
+      document.getElementById('modal-close').addEventListener('click', close);
+      document.getElementById('modal-cancel').addEventListener('click', close);
+      document.getElementById('modal-save').addEventListener('click', handleSave);
+      document.getElementById('modal-overlay').addEventListener('click', function (e) {
+        if (e.target.id === 'modal-overlay') close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && document.getElementById('modal-overlay').classList.contains('open')) close();
+      });
+    }
+
+    return { open: open, close: close, wireGlobalEvents: wireGlobalEvents, target: function () { return state.target; } };
+  }());
+
+  // ---------------- Modal genérico: Servicio (Crear cotización / Gestión) ----------------
+
+  /**
+   * Popup compartido para agregar/editar UN servicio (tipo/UNSPSC/
+   * descripción + su lista de actividades). A diferencia de KGP.entityModal,
+   * `onSave` nunca llama al servidor: solo recibe {tipo, codigoUnspsc,
+   * descripcion, actividades[]} y el llamador decide qué hacer con eso en su
+   * propio arreglo en memoria (data.servicios / detail.servicios). El
+   * servicio recién agregado/editado NO se persiste en la base de datos
+   * hasta que se envía el formulario completo (Crear cotización / Guardar
+   * cambios) — "Cancelar" simplemente cierra sin invocar `onSave`.
+   *
+   * `showTarifas: true` (solo "Gestionar cotización") muestra además la
+   * sección Tarifas y agrega {tarifa, cantidad, total, observaciones} al
+   * objeto de `onSave`. Observaciones es acumulativo: las anteriores se
+   * muestran en solo lectura y lo escrito en el textarea se agrega como una
+   * línea nueva debajo de ellas (nunca las reemplaza).
+   */
+  KGP.servicioModal = (function () {
+    var TARIFA_MAX_DIGITS = 10;  // = CFG().TARIFA_MAX en el servidor
+    var CANTIDAD_MAX = 99999;    // = CFG().CANTIDAD_MAX en el servidor
+    var state = { onSave: null, actividades: [], actSeq: 0, unspscMap: {}, showTarifas: false, observacionesPrevias: '' };
+    var wired = false;
+
+    function fieldEl(key) { return document.querySelector('#servicio-modal-body .field[data-field="' + key + '"]'); }
+    function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+    function clearInvalid() {
+      document.querySelectorAll('#servicio-modal-body .field.invalid').forEach(function (f) { f.classList.remove('invalid'); });
+    }
+
+    function renderActividades() {
+      var list = document.getElementById('sm-actividades-list');
+      list.innerHTML = '';
+      state.actividades.forEach(function (a, idx) {
+        var tpl = document.getElementById('tpl-actividad');
+        var frag = tpl.content.cloneNode(true);
+        var row = frag.querySelector('[data-actividad]');
+        row.dataset.localId = a.localId;
+        row.querySelector('[data-idx]').textContent = (idx + 1) + '.';
+        var input = row.querySelector('[data-actividad-input]');
+        input.value = a.texto;
+        input.addEventListener('input', function () { a.texto = input.value; });
+        row.querySelector('[data-remove-actividad]').addEventListener('click', function () { removeActividadRow(a.localId); });
+        list.appendChild(frag);
+      });
+      document.getElementById('sm-act-count').textContent = '(' + state.actividades.length + '/10)';
+      document.getElementById('sm-add-actividad').disabled = state.actividades.length >= 10;
+    }
+
+    function addActividadRow() {
+      if (state.actividades.length >= 10) return;
+      state.actividades.push({ localId: 'sact' + (++state.actSeq), texto: '' });
+      renderActividades();
+    }
+
+    function removeActividadRow(localId) {
+      state.actividades = state.actividades.filter(function (a) { return a.localId !== localId; });
+      renderActividades();
+    }
+
+    function readCantidad() {
+      var raw = document.getElementById('sm-cantidad').value.trim();
+      if (raw === '') return '';
+      return /^\d+$/.test(raw) && Number(raw) >= 1 && Number(raw) <= CANTIDAD_MAX ? Number(raw) : null;
+    }
+
+    function updateTotal() {
+      var tarifa = KGP.ui.parseDigits(document.getElementById('sm-tarifa').value);
+      var cantidad = readCantidad();
+      var out = document.getElementById('sm-total');
+      out.value = (tarifa === '' || cantidad === null) ? '—' : KGP.ui.formatMoney(tarifa * (cantidad === '' ? 1 : cantidad));
+    }
+
+    function renderObsHistorial() {
+      var box = document.getElementById('sm-obs-historial');
+      var lines = state.observacionesPrevias.split('\n').filter(function (l) { return l.trim(); });
+      box.hidden = !lines.length;
+      box.innerHTML = lines.map(function (l) { return '<div class="obs-item">' + KGP.escapeHtml(l) + '</div>'; }).join('');
+    }
+
+    function fillTarifas(initial) {
+      initial = initial || {};
+      var tarifa = initial.tarifa;
+      document.getElementById('sm-tarifa').value = (tarifa === '' || tarifa == null) ? '' : KGP.ui.formatMoney(tarifa);
+      var cantidad = initial.cantidad;
+      document.getElementById('sm-cantidad').value = (cantidad === '' || cantidad == null) ? '1' : String(cantidad);
+      document.getElementById('sm-obs-nueva').value = '';
+      state.observacionesPrevias = String(initial.observaciones || '');
+      renderObsHistorial();
+      updateTotal();
+    }
+
+    function open(opts) {
+      opts = opts || {};
+      state.onSave = opts.onSave;
+      state.showTarifas = !!opts.showTarifas;
+      document.getElementById('sm-tarifas-section').hidden = !state.showTarifas;
+      if (state.showTarifas) fillTarifas(opts.initial);
+      state.unspscMap = opts.unspscMap || {};
+      state.actividades = ((opts.initial && opts.initial.actividades) || []).map(function (texto) {
+        return { localId: 'sact' + (++state.actSeq), texto: texto };
+      });
+
+      document.getElementById('servicio-modal-title').textContent = opts.initial ? 'Editar servicio' : 'Agregar servicio';
+      clearInvalid();
+
+      var tipoSel = document.getElementById('sm-tipo');
+      KGP.ui.rebuildSelect(tipoSel, opts.tiposServicio || [], function (t) { return t; }, function (t) { return t; }, '— Selecciona tipo —');
+      tipoSel.value = (opts.initial && opts.initial.tipo) || '';
+
+      var unspscInput = document.getElementById('sm-unspsc');
+      unspscInput.value = (tipoSel.value && state.unspscMap[tipoSel.value]) || '—';
+      tipoSel.onchange = function () {
+        unspscInput.value = (tipoSel.value && state.unspscMap[tipoSel.value]) || '—';
+      };
+
+      document.getElementById('sm-descripcion').value = (opts.initial && opts.initial.descripcion) || '';
+
+      renderActividades();
+
+      document.getElementById('servicio-modal-overlay').classList.add('open');
+      setTimeout(function () { tipoSel.focus(); }, 50);
+    }
+
+    function close() {
+      document.getElementById('servicio-modal-overlay').classList.remove('open');
+      state.onSave = null;
+      state.actividades = [];
+    }
+
+    function handleSave() {
+      clearInvalid();
+      var tipo = document.getElementById('sm-tipo').value;
+      var descripcion = document.getElementById('sm-descripcion').value.trim();
+      var ok = true;
+      if (!tipo) { markInvalid('tipo'); ok = false; }
+      if (!descripcion) { markInvalid('descripcion'); ok = false; }
+      var cantidad = state.showTarifas ? readCantidad() : '';
+      if (cantidad === null) { markInvalid('cantidad'); ok = false; }
+      if (!ok) { KGP.toast('Revisa los campos marcados en rojo.', 'error'); return; }
+
+      var unspsc = document.getElementById('sm-unspsc').value;
+      var servicioData = {
+        tipo: tipo,
+        codigoUnspsc: unspsc === '—' ? '' : unspsc,
+        descripcion: descripcion,
+        actividades: state.actividades.map(function (a) { return a.texto.trim(); }).filter(function (t) { return t; })
+      };
+
+      if (state.showTarifas) {
+        var tarifa = KGP.ui.parseDigits(document.getElementById('sm-tarifa').value);
+        if (tarifa !== '' && cantidad === '') cantidad = 1;
+        var nueva = document.getElementById('sm-obs-nueva').value.trim();
+        var previas = state.observacionesPrevias.trim();
+        servicioData.tarifa = tarifa;
+        servicioData.cantidad = cantidad;
+        servicioData.total = tarifa === '' ? '' : tarifa * cantidad;
+        servicioData.observaciones = nueva ? (previas ? previas + '\n' + nueva : nueva) : previas;
+      }
+
+      var onSave = state.onSave;
+      close();
+      if (onSave) onSave(servicioData);
+    }
+
+    function wireGlobalEvents() {
+      if (wired) return;
+      wired = true;
+      document.getElementById('servicio-modal-close').addEventListener('click', close);
+      document.getElementById('servicio-modal-cancel').addEventListener('click', close);
+      document.getElementById('servicio-modal-save').addEventListener('click', handleSave);
+      document.getElementById('sm-add-actividad').addEventListener('click', addActividadRow);
+      KGP.ui.wireMoneyInput(document.getElementById('sm-tarifa'), TARIFA_MAX_DIGITS, updateTotal);
+      var cantidadInput = document.getElementById('sm-cantidad');
+      cantidadInput.addEventListener('keydown', function (e) {
+        // type=number acepta "e", "+", "-", "." y ","; la cantidad es un entero positivo.
+        if (['e', 'E', '+', '-', '.', ','].indexOf(e.key) !== -1) e.preventDefault();
+      });
+      cantidadInput.addEventListener('input', updateTotal);
+      document.getElementById('servicio-modal-overlay').addEventListener('click', function (e) {
+        if (e.target.id === 'servicio-modal-overlay') close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && document.getElementById('servicio-modal-overlay').classList.contains('open')) close();
+      });
+    }
+
+    return { open: open, close: close, wireGlobalEvents: wireGlobalEvents };
+  }());
+
+  // ---------------- Menú lateral móvil (hamburguesa) ----------------
+
+  function setSidebarOpen(open) {
+    var sidebar = document.getElementById('sidebar');
+    var overlay = document.getElementById('sidebar-overlay');
+    var btn = document.getElementById('hamburger-btn');
+    if (sidebar) sidebar.classList.toggle('open', open);
+    if (overlay) overlay.classList.toggle('open', open);
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  function wireMobileMenu() {
+    var btn = document.getElementById('hamburger-btn');
+    var overlay = document.getElementById('sidebar-overlay');
+    if (btn) btn.addEventListener('click', function () {
+      var sidebar = document.getElementById('sidebar');
+      setSidebarOpen(!sidebar.classList.contains('open'));
+    });
+    if (overlay) overlay.addEventListener('click', function () { setSidebarOpen(false); });
+  }
+
+  // ---------------- Init ----------------
+
+  KGP.init = function () {
+    KGP.setConn('connecting');
+
+    document.querySelectorAll('.nav-item[data-nav]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        KGP.nav(el.getAttribute('data-nav'));
+        setSidebarOpen(false);
+      });
+    });
+
+    wireMobileMenu();
+    KGP.entityModal.wireGlobalEvents();
+    KGP.servicioModal.wireGlobalEvents();
+
+    var initial = window.KGP_INITIAL_VIEW === 'dashboard' ? 'dashboard' : 'cotizacion';
+    KGP.nav(initial);
+
+    // Salvavidas: si algo impide que la vista inicial llame a KGP.hideLoader()
+    // (error no controlado, etc.), no dejar al usuario mirando el loader para
+    // siempre.
+    setTimeout(KGP.hideLoader, 20000);
+  };
+
+}(window.KGP));
+</script>
