@@ -144,6 +144,9 @@ kgp-panel/
 ├── .clasp.json            # Vincula el proyecto local con el script de Apps Script (rootDir: src)
 ├── .claspignore           # Solo se suben .js, .html y appsscript.json
 ├── CLAUDE.md              # Reglas de trabajo y decisiones de diseño detalladas
+├── .claude/skills/        # Skills de Claude Code (copias reales, listas al clonar)
+├── .agents/skills/        # Las mismas skills en formato del CLI `skills`
+├── skills-lock.json       # Origen y hash de cada skill
 ├── assets/
 │   └── LOGO KGP.png
 └── src/
@@ -353,6 +356,16 @@ Las reglas completas están en [CLAUDE.md](CLAUDE.md). Las más importantes:
 - **Menú lateral** en orden fijo: Crear cotización → Gestionar cotización → Gestionar OIS → Gestión de empleados → **Dashboard (siempre de último)**.
 - **Diseño**: paleta blanco + verde oliva (`--primary: #6b7c3f`), breakpoint móvil `760px` con texto centrado.
 - **Verificar sintaxis** de los `.html` con script embebido antes de subir: extraer el `<script>` a un `.js` temporal y correr `node --check`.
+
+### Skills de IA incluidas en el repositorio
+
+El proyecto trae versionadas las skills de diseño de UI que se usan con Claude Code: `better-ui`, `frontend-design`, `interaction-design`, `interface-design` y `web-design-guidelines`.
+
+- `.claude/skills/`: la carpeta que lee Claude Code. Al clonar el repo y abrirlo con Claude Code, las skills ya quedan disponibles sin instalar nada.
+- `.agents/skills/`: la misma copia en el formato del CLI [`skills`](https://github.com/vercel-labs/skills), para otros agentes.
+- `skills-lock.json`: origen (repositorio de GitHub) y hash de cada skill.
+
+En `.claude/skills/` hay **copias reales, no enlaces simbólicos**: los enlaces que crea el CLI apuntan a rutas absolutas de un equipo y se rompen al clonar en otro. Si actualizas o agregas una skill con el CLI, vuelve a copiar su carpeta de `.agents/skills/<skill>` a `.claude/skills/<skill>` antes de hacer commit.
 
 ## Solución de problemas
 

@@ -1,10 +1,8 @@
 # Credenciales de clasp (normalmente viven en el home, por si acaso)
 .clasprc.json
 
-# Herramientas locales de IA (skills instaladas, config local)
-.agents/
-.claude/
-skills-lock.json
+# Config personal de Claude Code (las skills en .claude/skills sí se versionan)
+.claude/settings.local.json
 
 # Carpetas y archivos temporales
 _verify_pull/
