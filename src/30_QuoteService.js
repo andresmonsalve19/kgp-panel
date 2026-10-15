@@ -192,9 +192,9 @@ function qs_resolveEstablecimiento_(estInput, idCliente, idsGenerados) {
  * ID SERVICIO) con sus tarifas, y los totales SUBTOTAL/IVA/TOTAL que se
  * derivan de ellas. fechaElaboracion y CODIGO nunca cambian.
  *
- * ESTADO: payload.estado vacío = se conserva. Si llega (botones "Garantía
+ * ESTADO: payload.estado vacío = se conserva. Si llega (botones "cotización
  * aprobada/rechazada"), solo se acepta mientras la cotización siga en
- * CFG().ESTADO_INICIAL — la decisión de garantía es única e irreversible.
+ * CFG().ESTADO_INICIAL — la decisión de cotización es única e irreversible.
  *
  * Igual que qs_createQuotation: sección crítica corta (solo lectura +
  * escrituras de esta transacción), flush + bump antes de soltar el lock. No
@@ -212,24 +212,24 @@ function qs_updateQuotation(idCotizacion, payload) {
   var clean = validation.clean;
 
   // Aprobar solo es posible junto con la creación de su OIS (popup de
-  // "Garantía aprobada" -> api_aprobarConOis, una sola sección crítica): así
+  // "cotización aprobada" -> api_aprobarConOis, una sola sección crítica): así
   // nunca existe una cotización Aprobada sin su orden. Rechazar sí sigue
   // pasando por aquí.
   if (clean.estado === CFG().ESTADO_APROBADA) {
-    return fail_('VALIDATION', 'Para aprobar la garantía usa el botón "Garantía aprobada" y elige el tipo de orden (OIS).');
+    return fail_('VALIDATION', 'Para aprobar la cotización usa el botón "cotización aprobada" y elige el tipo de orden (OIS).');
   }
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
     return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
   }
+  var res;
   try {
-    var res = qs_applyQuotationUpdate_(idCotizacion, clean, {});
+    res = qs_applyQuotationUpdate_(idCotizacion, clean, {});
     if (res.ok) {
       SpreadsheetApp.flush();
       bumpDataVersion_();
     }
-    return res;
   } catch (e) {
     logError_('qs_updateQuotation', null, { idCotizacion: idCotizacion }, payload, e);
     var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
@@ -237,6 +237,14 @@ function qs_updateQuotation(idCotizacion, payload) {
   } finally {
     lock.releaseLock();
   }
+
+  // Ya fuera del lock: aviso al creador si la cotización acaba de rechazarse
+  // (39_NotifyService.js; nunca lanza). La aprobación avisa al generarse el
+  // documento de su OIS/OIP, porque el correo lleva ese enlace.
+  if (res.ok && res.data.estadoCambio && res.data.estado === CFG().ESTADO_RECHAZADA) {
+    ntf_cotizacionRechazada_(idCotizacion);
+  }
+  return res;
 }
 
 /**
@@ -244,15 +252,16 @@ function qs_updateQuotation(idCotizacion, payload) {
  * bump: DEBE llamarse ya dentro del script lock, con `clean` salido de
  * validateUpdatePayload_. Existe para que otras transacciones reutilicen
  * exactamente la misma escritura de la cotización dentro de SU propio lock:
- *   - ois_aprobarConOis (35_OisService.js): aprobar + crear la OIS en una
- *     sola sección crítica (nunca una cotización Aprobada sin su OIS).
- *   - ois_updateOis: guardar la OIS reescribe los datos compartidos de la
- *     cotización padre, que ya está Aprobada.
+ *   - ois_aprobarConOis (35_OisService.js) / oip_aprobarConOip
+ *     (36_OipService.js): aprobar + crear la orden en una sola sección
+ *     crítica (nunca una cotización Aprobada sin su OIS u OIP).
+ *   - ois_updateOis / oip_updateOip: guardar la orden reescribe los datos
+ *     compartidos de la cotización padre, que ya está Aprobada.
  *
  * opts.permitirDecidida: true = saltarse el bloqueo de "cotización ya
- * decidida = solo lectura". SOLO lo usa la OIS (decisión confirmada con el
- * usuario: la OIS es la única puerta de edición de una cotización aprobada;
- * "Gestionar cotización" sigue bloqueada como siempre).
+ * decidida = solo lectura". SOLO lo usan las órdenes OIS/OIP (decisión
+ * confirmada con el usuario: la orden es la única puerta de edición de una
+ * cotización aprobada; "Gestionar cotización" sigue bloqueada como siempre).
  *
  * Devuelve ok_(...)/fail_(...); las excepciones las maneja el llamador.
  */
@@ -276,17 +285,31 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
   // establecimiento para fallar rápido y no hacer lecturas de más. El
   // formulario de "Gestionar cotización" ya bloquea los campos en la UI
   // (ver applyLockState_ en JsGestion.js.html); este chequeo es la
-  // garantía real del lado del servidor — nunca confiar solo en que el
+  // cotización real del lado del servidor — nunca confiar solo en que el
   // cliente no haya enviado el "Guardar cambios".
   // Única excepción: opts.permitirDecidida (guardar desde la OIS), que igual
-  // nunca puede volver a decidir la garantía — clean.estado debe venir vacío.
+  // nunca puede volver a decidir la cotización — clean.estado debe venir vacío.
   var estadoActual = qs_normEstado_(filaBase[normText_('ESTADO')]);
   if (estadoActual !== CFG().ESTADO_INICIAL) {
     if (!opts.permitirDecidida) {
       return fail_('CONFLICT', 'Esta cotización ya fue marcada como "' + estadoActual + '" y no se puede editar.');
     }
     if (clean.estado && clean.estado !== estadoActual) {
-      return fail_('CONFLICT', 'La garantía de esta cotización ya fue decidida ("' + estadoActual + '").');
+      return fail_('CONFLICT', 'La cotización de esta cotización ya fue decidida ("' + estadoActual + '").');
+    }
+  }
+
+  // Decidir la cotización (aprobar o rechazar) exige tarifas en todos los
+  // servicios, TIEMPO DE ENTREGA y ASESOR COMERCIAL diligenciados. Cubre
+  // también aprobar+crear OIS/OIP, que pasan por aquí.
+  if (clean.estado && clean.estado !== estadoActual) {
+    var faltantes = [];
+    var sinTarifa = clean.servicios.some(function (s) { return s.tarifa === '' || s.tarifa == null; });
+    if (sinTarifa) faltantes.push('las tarifas de todos los servicios');
+    if (!clean.tiempoEntrega) faltantes.push('el tiempo de entrega');
+    if (!clean.asesorComercial) faltantes.push('el asesor comercial');
+    if (faltantes.length) {
+      return fail_('VALIDATION', 'Antes de aprobar o rechazar la cotización debes diligenciar: ' + faltantes.join(', ') + '.');
     }
   }
 
@@ -317,10 +340,10 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
 
   // Si clean.estado llega distinto de estadoActual, el chequeo de arriba ya
   // garantizó que estadoActual es ESTADO_INICIAL, así que aquí "decidir la
-  // garantía" siempre es la primera vez.
+  // cotización" siempre es la primera vez.
   var estado = estadoActual;
   // REVISADO Y APROBADO POR: se fija una sola vez, en el mismo momento en
-  // que la garantía pasa de ESTADO_INICIAL a Aprobada/Rechazada. Fuera de
+  // que la cotización pasa de ESTADO_INICIAL a Aprobada/Rechazada. Fuera de
   // ese momento se conserva el valor ya guardado (filaBase).
   var revisadoAprobadoPor = filaBase[normText_('REVISADO Y APROBADO POR')] || '';
   if (clean.estado && clean.estado !== estadoActual) {
@@ -403,6 +426,9 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
     codigo: codigo,
     numServicios: clean.servicios.length,
     estado: estado,
+    // true solo en la llamada que decidió la cotización (En revisión ->
+    // Aprobada/Rechazada); qs_updateQuotation lo usa para el correo de rechazo.
+    estadoCambio: estado !== estadoActual,
     subtotal: subtotal,
     iva: iva,
     total: totalCotizacion,
@@ -468,7 +494,36 @@ function qs_getCotizacion(idCotizacion) {
   } catch (e) { ois = null; }
   cotizacion.ois = ois;
 
+  // Lo mismo para la OIP (una cotización aprobada genera una OIS o una OIP,
+  // nunca las dos: el popup de aprobación es una elección única).
+  var oip = null;
+  try {
+    var p = oip_findByCotizacion_(cotizacion.idCotizacion);
+    if (p) oip = { idOip: p.idOip, codigo: p.codigo };
+  } catch (e) { oip = null; }
+  cotizacion.oip = oip;
+
   return ok_({ cotizacion: cotizacion, servicios: servicios, cliente: cliente, solicitante: solicitante, establecimiento: establecimiento });
+}
+
+/**
+ * Firma comparable de una lista de servicios (orden + id + tipo + UNSPSC +
+ * descripción + actividades SIN el prefijo "N.M " con que se guardan en la
+ * hoja). Sirve para que una orden (OIS u OIP) decida si al guardar cambió
+ * algo de los servicios de su cotización padre y, por lo tanto, si hay que
+ * reescribirla y regenerar su documento. Tarifas excluidas a propósito:
+ * ninguna de las dos órdenes las edita.
+ */
+function qs_serviciosFirma_(servicios) {
+  return JSON.stringify((servicios || []).map(function (s) {
+    return [
+      s.idServicio || '',
+      cleanText_(s.tipo),
+      cleanText_(s.codigoUnspsc),
+      cleanText_(s.descripcion),
+      (s.actividades || []).map(function (a) { return cleanText_(doc_stripActividadPrefix_(a)); }).filter(function (a) { return a; })
+    ];
+  }));
 }
 
 // ---------------------------------------------------------------------

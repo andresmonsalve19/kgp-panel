@@ -436,7 +436,7 @@ function doc_generateForOis_(idOis, requestId) {
     });
     SpreadsheetApp.flush(); // crítico antes de exportar
 
-    var baseName = doc_oisBaseName_(d.ois.codigo, d.cliente);
+    var baseName = doc_ordenBaseName_(d.ois.codigo, d.cliente);
     var fileName = baseName + '.xlsx';
 
     var existente = doc_findExistingFile_(d.ois);
@@ -541,10 +541,160 @@ function doc_freezeCrossSheetFormulas_(sheet) {
   }
 }
 
-/** "OIS-KGP-NNN-YY-<RAZÓN SOCIAL>" (nombre de la carpeta y, + ".xlsx", del archivo de la OIS). */
-function doc_oisBaseName_(codigoOis, cliente) {
+// ---------------------------------------------------------------------
+// Documento de la OIP
+// ---------------------------------------------------------------------
+
+/**
+ * Genera (o regenera, SIEMPRE sobre el mismo archivo — CLAUDE.md §8) el
+ * spreadsheet de una OIP: un .xlsx con UNA sola hoja, la pestaña
+ * CFG().TEMPLATE_TAB_OIP ("OIP V-4") de la plantilla, guardado en su propia
+ * subcarpeta "OIP-KGP-NNN-YY-<RAZÓN SOCIAL>" dentro de CFG().OIP_FOLDER_ID.
+ *
+ * Idéntico a doc_generateForOis_ salvo en las celdas propias de la hoja
+ * (doc_writeOipCells_). Igual que en la OIS se escribe con sinTarifas: la
+ * fila de identificación de la OIP es la 231, que choca con la tabla de
+ * tarifas de CTZ-V-4 (223..232), así que esas filas no son tarifas en esta
+ * hoja — y el usuario pidió explícitamente quitar las tarifas de la OIP.
+ *
+ * requestId: solo en la generación inicial (idempotencia ante reintentos);
+ * null = regeneración desde "Guardar cambios", que SIEMPRE reescribe.
+ */
+function doc_generateForOip_(idOip, requestId) {
+  if (!CFG().TEMPLATE_SHEET_ID) {
+    return fail_('SCHEMA', 'La plantilla aún no se ha preparado. Ejecuta admin_convertTemplate() desde el editor de Apps Script antes de generar documentos.');
+  }
+  var idemKey = requestId ? 'idem:docoip:' + requestId : null;
+  var cached = idemKey ? cacheGetJson_(idemKey) : null;
+  if (cached) return cached;
+
+  var got = oip_getOip(idOip);
+  if (!got.ok) return got;
+  var d = got.data;
+  var ctx = doc_buildCtx_(d);
+
+  var tmpId = null;
+  try {
+    var copy = Drive.Files.copy(
+      { title: '__TMP_OIP__' + sanitizeFileName_(d.oip.codigo) + '_' + Date.now(), mimeType: MimeType.GOOGLE_SHEETS },
+      CFG().TEMPLATE_SHEET_ID,
+      { convert: true, supportsAllDrives: true }
+    );
+    tmpId = copy.id;
+
+    var ss = SpreadsheetApp.openById(tmpId);
+    var oipSheet = ss.getSheetByName(CFG().TEMPLATE_TAB_OIP);
+    if (!oipSheet) {
+      throw new AppError_('SCHEMA', 'La plantilla no tiene la hoja "' + CFG().TEMPLATE_TAB_OIP + '". Hojas disponibles: [' +
+        ss.getSheets().map(function (s) { return s.getName(); }).join(', ') + ']');
+    }
+    var ctzSheet = (CFG().TEMPLATE_TAB_NAME && ss.getSheetByName(CFG().TEMPLATE_TAB_NAME)) || ss.getSheets()[0];
+    if (ctzSheet.getSheetId() !== oipSheet.getSheetId()) doc_writeCells_(ctzSheet, ctx);
+
+    doc_writeCells_(oipSheet, ctx, { sinTarifas: true });
+    doc_writeOipCells_(oipSheet, ctx, d.oip, d.tareas || []);
+    SpreadsheetApp.flush();
+
+    doc_freezeCrossSheetFormulas_(oipSheet);
+    ss.getSheets().forEach(function (s) {
+      if (s.getSheetId() !== oipSheet.getSheetId()) ss.deleteSheet(s);
+    });
+    SpreadsheetApp.flush(); // crítico antes de exportar
+
+    var baseName = doc_ordenBaseName_(d.oip.codigo, d.cliente);
+    var fileName = baseName + '.xlsx';
+
+    var existente = doc_findExistingFile_(d.oip);
+    var saved;
+    if (existente && existente.mimeType === MimeType.GOOGLE_SHEETS) {
+      doc_replaceNativeSheet_(existente.id, oipSheet);
+      saved = existente;
+    } else if (existente) {
+      saved = Drive.Files.update({}, existente.id, doc_exportXlsx_(tmpId, existente.title || fileName), { supportsAllDrives: true });
+    } else {
+      var folderId = doc_ensureFolder_(CFG().OIP_FOLDER_ID, baseName);
+      saved = Drive.Files.insert(
+        { title: fileName, parents: [{ id: folderId }] },
+        doc_exportXlsx_(tmpId, fileName),
+        { supportsAllDrives: true }
+      );
+    }
+
+    oip_updateDocInfo_(idOip, saved.alternateLink, 'OK', saved.id);
+    bumpDataVersion_();
+
+    var response = ok_({ docFileId: saved.id, docUrl: saved.alternateLink, docNombre: saved.title || fileName });
+    if (idemKey) cachePutJson_(idemKey, response, 21600);
+    return response;
+  } catch (e) {
+    logError_('doc_generateForOip_', requestId, { idOip: idOip }, null, e);
+    try {
+      oip_updateDocInfo_(idOip, undefined, 'ERROR'); // undefined = no tocar link ni id (§8)
+      bumpDataVersion_();
+    } catch (e2) { /* no ocultar el error original */ }
+    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'DRIVE';
+    return fail_(code, errMsg_(e));
+  } finally {
+    if (tmpId) {
+      try {
+        doc_cleanupTemp_(tmpId);
+      } catch (cleanupErr) {
+        logError_('doc_cleanupTemp_', requestId, { idOip: idOip, tmpId: tmpId }, null, cleanupErr);
+      }
+    }
+  }
+}
+
+/**
+ * Celdas propias de la hoja OIP V-4 (ver CELLMAP): fila 231 (código de la
+ * cotización padre, código de la OIP, y año/mes/día iguales a A7/B7/C7) y la
+ * tabla de tareas desde la fila 235.
+ *
+ * Diferencia clave con la OIS: la plantilla NO reserva un bloque fijo de
+ * filas para las tareas. La #1 va en OIP_TAREAS_FILA_BASE y, si hay más, se
+ * INSERTAN las filas que falten justo debajo (una por tarea extra, en una
+ * sola llamada) antes de escribir — así nunca se sobreescribe lo que haya
+ * más abajo en la hoja, por muchas tareas que tenga la OIP.
+ *
+ * Solo se escriben TAREA / RESPONSABLE / FECHA INICIO / FECHA ENTREGA /
+ * OBSERVACION (ni estado ni ID EMPLEADO van a la plantilla).
+ */
+function doc_writeOipCells_(sheet, ctx, oip, tareas) {
+  var cm = CELLMAP();
+  // E7 (cm.CODIGO): doc_writeCells_ ya escribió ahí el código de la
+  // COTIZACIÓN (mismo layout que CTZ-V-4). En la hoja OIP esa celda debe
+  // mostrar el código de la OIP, igual que se hace en la hoja OIS.
+  doc_setText_(sheet, cm.CODIGO, oip.codigo);
+  doc_setText_(sheet, cm.OIP_COT_CODIGO, ctx.codigo);
+  doc_setText_(sheet, cm.OIP_CODIGO, oip.codigo);
+  // Mismos valores que A7/B7/C7 (doc_writeCells_ los escribe con esta misma fecha).
+  doc_setText_(sheet, cm.OIP_FECHA_ANIO, fmtDate_(ctx.fechaElaboracion, 'yyyy'));
+  doc_setText_(sheet, cm.OIP_FECHA_MES, fmtDate_(ctx.fechaElaboracion, 'MM'));
+  doc_setText_(sheet, cm.OIP_FECHA_DIA, fmtDate_(ctx.fechaElaboracion, 'dd'));
+
+  var lista = tareas.slice(0, CFG().LIMITS.MAX_TAREAS_OIP);
+  if (!lista.length) return;
+
+  // Una fila nueva por cada tarea a partir de la segunda: la fila base ya
+  // existe en la plantilla. Se insertan todas de una vez (insertRowsAfter
+  // hereda el formato de la fila de arriba) para no hacer N llamadas.
+  var filaBase = cm.OIP_TAREAS_FILA_BASE;
+  if (lista.length > 1) sheet.insertRowsAfter(filaBase, lista.length - 1);
+
+  lista.forEach(function (t, i) {
+    var fila = filaBase + i;
+    doc_setText_(sheet, cm.OIP_TAREAS_COL_TAREA + fila, t.tarea);
+    doc_setText_(sheet, cm.OIP_TAREAS_COL_RESPONSABLE + fila, t.responsable);
+    doc_setDate_(sheet, cm.OIP_TAREAS_COL_FECHA_INICIO + fila, t.fechaInicio);
+    doc_setDate_(sheet, cm.OIP_TAREAS_COL_FECHA_ENTREGA + fila, t.fechaEntrega);
+    doc_setText_(sheet, cm.OIP_TAREAS_COL_OBSERVACION + fila, t.observacion);
+  });
+}
+
+/** "<CODIGO ORDEN>-<RAZÓN SOCIAL>" (nombre de la carpeta y, + ".xlsx", del archivo de la OIS/OIP). */
+function doc_ordenBaseName_(codigoOrden, cliente) {
   var razon = cliente && cliente.razonSocial ? String(cliente.razonSocial).trim() : '';
-  return sanitizeFileName_(razon ? codigoOis + '-' + razon : codigoOis);
+  return sanitizeFileName_(razon ? codigoOrden + '-' + razon : codigoOrden);
 }
 
 /**

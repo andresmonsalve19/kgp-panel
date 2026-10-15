@@ -57,6 +57,7 @@ function ois_tareaToDto_(t) {
     tarea: t.tarea,
     responsable: t.responsable,
     idEmpleado: t.idEmpleado,
+    tipoResponsable: t.tipoResponsable || '',
     fechaInicio: qs_dateToISO_(t.fechaInicio),
     fechaEntrega: qs_dateToISO_(t.fechaEntrega),
     estado: t.estado === ois_cfg_().TAREA_ESTADO_FINALIZADA ? ois_cfg_().TAREA_ESTADO_FINALIZADA : ois_cfg_().TAREA_ESTADO_INICIAL,
@@ -82,23 +83,6 @@ function ois_toDto_(o, tareasDto, hoyISO) {
     elaboradoPor: o.elaboradoPor,
     actualizadoPor: o.actualizadoPor
   };
-}
-
-/**
- * Nombre del empleado del usuario activo (PERSONAL_KGP, buscado por correo)
- * para ELABORADO POR / ACTUALIZADO POR. '' si el correo no corresponde a
- * ningún empleado (no bloquea la operación, mismo criterio que la cotización).
- */
-function ois_nombreUsuarioActivo_() {
-  var correo = '';
-  try { correo = Session.getActiveUser().getEmail() || ''; } catch (e) { correo = ''; }
-  if (!correo) return '';
-  try {
-    var emp = emp_findByCorreo_(correo);
-    return emp ? emp.nombre : '';
-  } catch (e2) {
-    return '';
-  }
 }
 
 // ---------------------------------------------------------------------
@@ -151,6 +135,12 @@ function ois_aprobarConOis(idCotizacion, payload, requestId) {
     if (previa) {
       return fail_('CONFLICT', 'Esta cotización ya tiene la OIS ' + previa.codigo + '.');
     }
+    // A propósito NO se consulta aquí la hoja OIP (al revés que
+    // oip_aprobarConOip, que sí consulta OIS): una cotización que ya tiene
+    // OIP está Aprobada, y qs_applyQuotationUpdate_ sin permitirDecidida la
+    // rechaza igual unas líneas más abajo. Añadir la consulta haría que la
+    // creación de OIS dependiera de que las hojas de la OIP existan, lo que
+    // rompería un flujo que ya funciona si a esa hoja le falta una columna.
 
     var res = qs_applyQuotationUpdate_(idCotizacion, clean, {});
     if (!res.ok) return res;
@@ -171,7 +161,7 @@ function ois_aprobarConOis(idCotizacion, payload, requestId) {
       fechaVencimiento: addDays_(fechaElaboracion, plazo),
       estado: CFG().OIS_ESTADO_INICIAL,
       requestId: requestId,
-      elaboradoPor: ois_nombreUsuarioActivo_()
+      elaboradoPor: emps_nombreUsuarioActivo_()
     });
 
     SpreadsheetApp.flush();
@@ -378,6 +368,8 @@ function validateOisUpdatePayload_(payload) {
       idTarea: String(t.idTarea || '').trim() || null,
       tarea: tarea,
       idEmpleado: idEmpleado,
+      // INTERNO / TERCERO; se valida contra la hoja al guardar (emp_buscarResponsable_).
+      tipoResponsable: String(t.tipoResponsable || '').trim(),
       fechaInicio: fechaInicio,
       fechaEntrega: fechaEntrega,
       estado: estado,
@@ -435,6 +427,8 @@ function ois_updateOis(idOis, payload) {
   if (validation.errors.length) return fail_('VALIDATION', 'El formulario tiene errores.', validation.errors);
   var clean = validation.clean;
 
+  var resultado;
+  var nuevas = [];
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
     return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
@@ -448,13 +442,15 @@ function ois_updateOis(idOis, payload) {
       return fail_('CONFLICT', 'La OIS ' + ois.codigo + ' ya está finalizada y no se puede editar.');
     }
 
-    // Responsables: cada idEmpleado debe existir; RESPONSABLE = su nombre.
-    var empleadosPorId = {};
-    emp_listEmpleados_().forEach(function (e) { empleadosPorId[e.idEmpleado] = e; });
+    // Responsables: cada uno debe existir en PERSONAL_KGP (interno) o en
+    // PERSONAL_TERCEROS (tercero); RESPONSABLE = su nombre y TIPO RESPONSABLE
+    // = la hoja donde está (emp_buscarResponsable_, 14_EmpleadoRepo.js).
+    var responsables = emp_listResponsables_();
     for (var i = 0; i < clean.tareas.length; i++) {
-      var emp = empleadosPorId[clean.tareas[i].idEmpleado];
-      if (!emp) return fail_('NOT_FOUND', 'Tarea ' + (i + 1) + ': no existe el empleado ' + clean.tareas[i].idEmpleado + '.');
+      var emp = emp_buscarResponsable_(responsables, clean.tareas[i].idEmpleado, clean.tareas[i].tipoResponsable);
+      if (!emp) return fail_('NOT_FOUND', 'Tarea ' + (i + 1) + ': no existe el responsable ' + clean.tareas[i].idEmpleado + '.');
       clean.tareas[i].responsable = emp.nombre;
+      clean.tareas[i].tipoResponsable = emp.tipoResponsable;
     }
 
     // ---- 1. Cotización padre (solo si cambió algo compartido) ----
@@ -467,7 +463,7 @@ function ois_updateOis(idOis, payload) {
       clean.idCliente !== c.idCliente ||
       clean.idSolicitante !== c.idSolicitante ||
       clean.idEstablecimiento !== c.idEstablecimiento ||
-      ois_serviciosFirma_(clean.servicios) !== ois_serviciosFirma_(serviciosActuales);
+      qs_serviciosFirma_(clean.servicios) !== qs_serviciosFirma_(serviciosActuales);
 
     if (cotizacionCambio) {
       var tarifasPorId = {};
@@ -501,7 +497,6 @@ function ois_updateOis(idOis, payload) {
     var filaPorId = {};
     filasActuales.forEach(function (f) { filaPorId[f.obj.idTarea] = f; });
     var enviadas = {};
-    var nuevas = [];
     var actualizaciones = [];
     clean.tareas.forEach(function (t) {
       if (t.idTarea && filaPorId[t.idTarea]) {
@@ -528,13 +523,13 @@ function ois_updateOis(idOis, payload) {
       'PLAZO': clean.plazo,
       'FECHA VENCIMIENTO': fechaVenc,
       'ESTADO': estado,
-      'ACTUALIZADO POR': ois_nombreUsuarioActivo_()
+      'ACTUALIZADO POR': emps_nombreUsuarioActivo_()
     });
 
     SpreadsheetApp.flush();
     bumpDataVersion_();
 
-    return ok_({
+    resultado = ok_({
       idOis: idOis,
       codigo: ois.codigo,
       estado: estado,
@@ -549,22 +544,10 @@ function ois_updateOis(idOis, payload) {
   } finally {
     lock.releaseLock();
   }
+
+  // Ya fuera del lock: un correo al responsable de cada tarea nueva (sin ID
+  // en el payload). Nunca lanza (39_NotifyService.js).
+  ntf_tareasCreadas_('OIS', ois, nuevas);
+  return resultado;
 }
 
-/**
- * Firma comparable de una lista de servicios (orden + id + tipo + UNSPSC +
- * descripción + actividades SIN el prefijo "N.M " con que se guardan en la
- * hoja). Sirve para decidir si la OIS cambió algo de los servicios de la
- * cotización. Tarifas excluidas a propósito (la OIS no las edita).
- */
-function ois_serviciosFirma_(servicios) {
-  return JSON.stringify((servicios || []).map(function (s) {
-    return [
-      s.idServicio || '',
-      cleanText_(s.tipo),
-      cleanText_(s.codigoUnspsc),
-      cleanText_(s.descripcion),
-      (s.actividades || []).map(function (a) { return cleanText_(doc_stripActividadPrefix_(a)); }).filter(function (a) { return a; })
-    ];
-  }));
-}

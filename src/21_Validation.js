@@ -98,7 +98,7 @@ function validateCreatePayload_(payload) {
 
   // ESTADO: toda cotización nueva nace SIEMPRE en CFG().ESTADO_INICIAL; lo
   // que mande el cliente se ignora. Solo cambia después, una vez, con los
-  // botones "Garantía aprobada/rechazada" de Gestionar cotización.
+  // botones "Cotización aprobada/rechazada" de Gestionar cotización.
   var estado = CFG().ESTADO_INICIAL;
 
   if (errors.length) return { clean: null, errors: errors };
@@ -235,7 +235,7 @@ function validateUpdatePayload_(payload) {
   if (!idEstablecimiento) err('establecimiento es obligatorio.');
 
   // ESTADO es opcional: '' = conservar el actual. Si llega, solo puede ser la
-  // decisión de garantía (Aprobada/Rechazada); qs_updateQuotation verifica
+  // decisión de Cotización (Aprobada/Rechazada); qs_updateQuotation verifica
   // además que la cotización siga en ESTADO_INICIAL (la decisión es única).
   var estado = String(payload.estado || '').trim();
   if (estado && estado !== CFG().ESTADO_APROBADA && estado !== CFG().ESTADO_RECHAZADA) {

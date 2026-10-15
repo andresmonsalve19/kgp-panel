@@ -1,0 +1,119 @@
+<!-- Vista "Gestionar tareas": TODAS las tareas de las OIS y OIP en una sola
+     tabla (api_listTareas trae un snapshot completo y el filtrado, orden y
+     paginación ocurren en el cliente, ver JsTareas.js.html).
+
+     Las tareas son las mismas filas de TAREAS_OIS / TAREAS_OIP que editan
+     "Gestionar OIS" y "Gestionar OIP": crear, editar, finalizar o eliminar una
+     tarea aquí se guarda al instante en esas hojas (api_saveTarea /
+     api_setTareaEstado / api_deleteTarea) y después se regenera el documento
+     de su orden en segundo plano.
+
+     El alta/edición reutiliza el popup global de tarea (KGP.tareaModal,
+     #tarea-modal-overlay en ui/ViewOis.html) con su sección "Orden" (tipo +
+     código) activada — no hay un segundo formulario de tarea. -->
+<section class="view" id="view-tareas">
+  <div class="page-header">
+    <div>
+      <h1>Gestionar tareas</h1>
+      <div class="desc">Todas las tareas de las OIS y OIP en un solo lugar: filtra por responsable, estado u orden, finalízalas o registra nuevas. Los cambios se guardan al instante en su OIS u OIP.</div>
+    </div>
+    <div class="dash-header-actions">
+      <span class="tg-doc-status" id="tg-doc-status" aria-live="polite"></span>
+      <button type="button" class="btn btn-sm" id="tg-refresh-btn">
+        <span id="tg-refresh-spinner" style="display:none;" class="spinner dark"></span>
+        Actualizar
+      </button>
+      <button type="button" class="btn btn-primary btn-sm" id="tg-nueva-btn">+ Nueva tarea</button>
+    </div>
+  </div>
+
+  <!-- Bloquea la vista solo en el primer ingreso SIN caché local (mismo
+       patrón que el Dashboard, CLAUDE.md §2.2): con caché se pinta de
+       inmediato y el dato fresco llega en segundo plano. -->
+  <div id="tg-loading" class="detail-loading">
+    <span class="spinner-lg"></span>
+    <div class="page-loader-text">Cargando tareas…</div>
+  </div>
+
+  <div id="tg-content" hidden>
+    <!-- KPIs: cada tarjeta es también un filtro rápido por estado. Se calculan
+         sobre los demás filtros (responsable, orden, tipo, búsqueda, periodo),
+         así "Mis tareas" + "Vencidas" responde directo "¿qué tengo atrasado?". -->
+    <div class="kpi-grid dash-kpis" id="tg-kpis"></div>
+
+    <div class="card">
+      <div class="filters-row">
+        <input type="text" class="search-input" id="tg-search" placeholder="Buscar por tarea, orden, cliente o responsable…" aria-label="Buscar tareas">
+        <select id="tg-filter-responsable" title="Responsable" aria-label="Responsable">
+          <option value="">Todos los responsables</option>
+        </select>
+        <select id="tg-filter-estado" title="Estado" aria-label="Estado">
+          <option value="">Todos los estados</option>
+          <option value="pendientes">Pendientes (sin finalizar)</option>
+          <option value="vencidas">Vencidas</option>
+          <option value="porVencer">Vencen en 7 días</option>
+          <option value="alDia">En curso al día</option>
+          <option value="finalizadas">Finalizadas</option>
+        </select>
+        <select id="tg-filter-periodo" title="Fecha de entrega" aria-label="Fecha de entrega">
+          <option value="">Cualquier fecha de entrega</option>
+          <option value="hoy">Entrega hoy</option>
+          <option value="semana">Entrega esta semana</option>
+          <option value="mes">Entrega este mes</option>
+          <option value="mesSiguiente">Entrega el próximo mes</option>
+          <option value="mesAnterior">Entrega el mes anterior</option>
+        </select>
+        <select id="tg-filter-tipo" title="Tipo de orden" aria-label="Tipo de orden">
+          <option value="">OIS y OIP</option>
+          <option value="OIS">Solo OIS</option>
+          <option value="OIP">Solo OIP</option>
+        </select>
+        <select id="tg-filter-orden" title="Orden" aria-label="Orden">
+          <option value="">Todas las órdenes</option>
+        </select>
+        <select id="tg-sort" title="Ordenar por" aria-label="Ordenar por">
+          <option value="prioridad">Ordenar por prioridad</option>
+          <option value="entregaAsc">Entrega más próxima</option>
+          <option value="entregaDesc">Entrega más lejana</option>
+          <option value="recientes">Inicio más reciente</option>
+          <option value="orden">Código de orden</option>
+          <option value="responsable">Responsable</option>
+        </select>
+        <select id="tg-page-size" title="Resultados por página" aria-label="Resultados por página">
+          <option value="20">20 / página</option>
+          <option value="50">50 / página</option>
+          <option value="100">100 / página</option>
+        </select>
+      </div>
+
+      <div class="filter-chips" id="tg-chips" hidden></div>
+
+      <div class="table-wrap">
+        <table class="data-table tg-table">
+          <thead>
+            <tr>
+              <th class="tg-col-check"><span class="sr-only">Finalizar</span></th>
+              <th>Tarea</th>
+              <th>Orden</th>
+              <th>Responsable</th>
+              <th>Entrega</th>
+              <th>Estado</th>
+              <th class="tg-col-actions">Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="tg-tbody">
+            <tr><td colspan="7" class="empty-state">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination-row">
+        <span id="tg-page-info">—</span>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn btn-sm" id="tg-prev">← Anterior</button>
+          <button type="button" class="btn btn-sm" id="tg-next">Siguiente →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

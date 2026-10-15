@@ -223,7 +223,7 @@ function ds_buildSnapshot_(opts) {
     c.anio = c.fechaElaboracion ? Number(c.fechaElaboracion.slice(0, 4)) : null;
     c.diasRestantes = c.fechaVencimiento ? ds_diffDays_(hoy, c.fechaVencimiento) : null;
     c.vencidaSinDecision = c.estado === cfg.ESTADO_INICIAL && c.diasRestantes != null && c.diasRestantes < 0;
-    c.porVencer = c.estado === cfg.ESTADO_INICIAL && c.diasRestantes != null && c.diasRestantes >= 0 && c.diasRestantes <= 7;
+    c.porVencer = c.estado === cfg.ESTADO_INICIAL && c.diasRestantes != null && c.diasRestantes >= 0 && c.diasRestantes <= cfg.DIAS_POR_VENCER_COTIZACION;
   });
 
   return { all: all, kpis: ds_computeKpis_(all, hoy) };
@@ -386,6 +386,163 @@ function ds_resolverTiposServicio_(all) {
     var acc = porCotizacion[c.idCotizacion];
     c.tipos = acc ? Object.keys(acc).map(function (k) { return acc[k]; }) : [];
   });
+}
+
+// =====================================================================
+// Endpoint 3 — snapshot de órdenes (Dashboard → pestañas OIS / OIP)
+// =====================================================================
+
+/**
+ * Snapshot COMPLETO de las OIS y OIP para las pestañas "OIS" / "OIP" del
+ * Dashboard (JsDashboardOrdenes.js.html). Mismo contrato que
+ * ds_getSnapshot_: el cliente deriva KPIs, gráficas, filtros, orden y
+ * paginación sin volver al servidor, y hace polling barato con el protocolo
+ * de versión.
+ *
+ * A diferencia de las cotizaciones, el ESTADO de una orden ("Vencida") y sus
+ * tareas vencidas dependen del día, no solo de las escrituras: por eso el
+ * token de versión es dataVersion + fecha de hoy (cambia solo a medianoche,
+ * mismo criterio que los listados de OIS/OIP).
+ *
+ * params: {sinceVersion}. Si coincide con el token vigente devuelve
+ * {unchanged:true, version} sin abrir ninguna hoja.
+ */
+function ds_getOrdenesSnapshot_(params) {
+  params = params || {};
+  var hoy = toISODate_(new Date());
+  var token = 'v' + dataVersion_() + ':' + hoy;
+
+  if (params.sinceVersion && String(params.sinceVersion) === token) {
+    return ok_({ unchanged: true, version: token });
+  }
+
+  var cacheKey = 'dash:ordenes:' + token;
+  var cached = cacheGetJson_(cacheKey);
+  if (cached) return ok_(cached);
+
+  var payload = ds_buildOrdenesSnapshot_(token, hoy);
+  cachePutJson_(cacheKey, payload, CFG().CACHE_TTL.DASHBOARD_SNAPSHOT_S);
+  return ok_(payload);
+}
+
+/**
+ * Una entrada por orden (OIS u OIP), con su estado derivado para hoy, el
+ * resumen de sus tareas, la carga pendiente por responsable y (solo OIP) su
+ * facturación — todo en tuplas compactas, igual que `tipos` del snapshot de
+ * cotizaciones. Cada hoja se lee una sola vez.
+ *
+ * Degradación: si las hojas de un tipo de orden fallan (p. ej. falta una
+ * columna), ese tipo queda vacío con un aviso en `avisos` en vez de tumbar
+ * también el otro; lo mismo con OIP_FACTURACION.
+ */
+function ds_buildOrdenesSnapshot_(token, hoy) {
+  var cfg = CFG();
+  var avisos = [];
+
+  var cotPorId = {};
+  qr_tableCotizaciones_().rows.forEach(function (r) {
+    var id = r[normText_('ID COTIZACION')];
+    if (id && !cotPorId[id]) cotPorId[id] = { codigo: r[normText_('CODIGO')], idCliente: r[normText_('ID CLIENTE')] };
+  });
+  var clientePorId = ds_indexarPorId_(cli_table_(), 'ID CLIENTE', function (r) { return r[normText_('RAZON SOCIAL')]; });
+  // Tareas "por vencer": entrega dentro de DIAS_POR_VENCER_TAREAS (hoja CONFIG_GENERAL).
+  var semana = toISODate_(addDays_(parseISODate_(hoy), cfg.DIAS_POR_VENCER_TAREAS));
+
+  function construir(tipo, ordenes, tareasPorOrden, factPorOrden, idKey) {
+    return ordenes.map(function (o) {
+      var tareas = tareasPorOrden[o[idKey]] || [];
+      var dto = tipo === 'OIS' ? ois_toDto_(o, tareas, hoy) : oip_toDto_(o, tareas, hoy);
+      var cot = cotPorId[o.idCotizacion] || {};
+
+      var resumen = { total: tareas.length, finalizadas: 0, vencidas: 0, porVencer: 0 };
+      var carga = {};
+      tareas.forEach(function (t) {
+        if (t.estado === cfg.TAREA_ESTADO_FINALIZADA) { resumen.finalizadas++; return; }
+        var vencida = !!t.fechaEntrega && t.fechaEntrega < hoy;
+        if (vencida) resumen.vencidas++;
+        else if (t.fechaEntrega && t.fechaEntrega <= semana) resumen.porVencer++;
+        var nombre = t.responsable || 'Sin responsable';
+        var c = carga[nombre] || (carga[nombre] = [nombre, 0, 0]);
+        c[1]++;
+        if (vencida) c[2]++;
+      });
+
+      var item = {
+        tipo: tipo,
+        idOrden: o[idKey],
+        codigo: dto.codigo || '',
+        idCotizacion: dto.idCotizacion || '',
+        codigoCotizacion: cot.codigo || '',
+        idCliente: cot.idCliente || '',
+        clienteNombre: (cot.idCliente && clientePorId[cot.idCliente]) || '',
+        fechaElaboracion: dto.fechaElaboracion || '',
+        fechaVencimiento: dto.fechaVencimiento || '',
+        plazo: dto.plazo,
+        estado: dto.estado,
+        anio: dto.fechaElaboracion ? Number(String(dto.fechaElaboracion).slice(0, 4)) : null,
+        diasRestantes: dto.fechaVencimiento ? ds_diffDays_(hoy, dto.fechaVencimiento) : null,
+        urlDocumento: dto.urlDocumento || '',
+        docEstado: dto.docEstado || '',
+        tareas: resumen,
+        // [[responsable, pendientes, vencidas], ...]
+        carga: Object.keys(carga).map(function (k) { return carga[k]; })
+      };
+      // [[año, mes, cuota, facturado (1|0)], ...]
+      if (factPorOrden) item.fact = factPorOrden[o[idKey]] || [];
+      return item;
+    });
+  }
+
+  function agruparTareas(table, rowToObj, fkKey, toDto) {
+    var por = {};
+    table.rows.forEach(function (r) {
+      var t = rowToObj(r);
+      if (!t[fkKey]) return;
+      (por[t[fkKey]] = por[t[fkKey]] || []).push(toDto(t));
+    });
+    return por;
+  }
+
+  var ordenes = [];
+  try {
+    ordenes = ordenes.concat(construir('OIS', ois_listAll_(),
+      agruparTareas(tar_table_(), tar_rowToObj_, 'idOis', ois_tareaToDto_), null, 'idOis'));
+  } catch (e) {
+    logError_('ds_buildOrdenesSnapshot_', null, { tipo: 'OIS' }, null, e);
+    avisos.push('No se pudieron leer las OIS: ' + errMsg_(e));
+  }
+
+  try {
+    var factPorOip = null;
+    try {
+      factPorOip = {};
+      var todas = fac_getAllByOip_();
+      Object.keys(todas).forEach(function (idOip) {
+        factPorOip[idOip] = todas[idOip].map(function (f) {
+          var dto = oip_facturaToDto_(f.obj);
+          return [dto.year, dto.mes, Number(dto.cuota) || 0, dto.estado === cfg.FACT_ESTADO_FACTURADO ? 1 : 0];
+        });
+      });
+    } catch (eFac) {
+      logError_('ds_buildOrdenesSnapshot_', null, { hoja: 'OIP_FACTURACION' }, null, eFac);
+      avisos.push('No se pudo leer la facturación de las OIP: ' + errMsg_(eFac));
+      factPorOip = {};
+    }
+    ordenes = ordenes.concat(construir('OIP', oip_listAll_(),
+      agruparTareas(tarp_table_(), tarp_rowToObj_, 'idOip', oip_tareaToDto_), factPorOip, 'idOip'));
+  } catch (e2) {
+    logError_('ds_buildOrdenesSnapshot_', null, { tipo: 'OIP' }, null, e2);
+    avisos.push('No se pudieron leer las OIP: ' + errMsg_(e2));
+  }
+
+  return {
+    version: token,
+    generadoEn: new Date().toISOString(),
+    hoy: hoy,
+    estados: cfg.ESTADOS_OIS.slice(), // mismas 3 etiquetas para OIS y OIP
+    ordenes: ordenes,
+    avisos: avisos
+  };
 }
 
 function ds_diffDays_(isoDesde, isoHasta) {

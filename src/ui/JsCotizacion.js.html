@@ -22,6 +22,9 @@ window.KGP = window.KGP || {};
 (function (KGP) {
   'use strict';
 
+  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10);  // = CFG().LIMITS.MAX_SERVICIOS (hoja CONFIG_GENERAL)
+  var PLAZO_DEFAULT = KGP.cfg('PLAZO_DEFAULT', 15);  // = CFG().COTIZACION_PLAZO_DEFAULT
+
   var data = {
     bootstrapped: false,
     requestId: null,
@@ -405,8 +408,8 @@ window.KGP = window.KGP || {};
   }
 
   function addServicioBlock() {
-    if (data.servicios.length >= 10) {
-      KGP.toast('Ya alcanzaste el máximo de 10 servicios.', 'warning');
+    if (data.servicios.length >= MAX_SERVICIOS) {
+      KGP.toast('Ya alcanzaste el máximo de ' + MAX_SERVICIOS + ' servicios.', 'warning');
       return;
     }
     openServicioModal(null);
@@ -436,8 +439,8 @@ window.KGP = window.KGP || {};
       row.querySelector('[data-remove-servicio]').addEventListener('click', function () { removeServicioBlock(s.localId); });
       list.appendChild(frag);
     });
-    document.getElementById('cz-servicios-count').textContent = '(' + data.servicios.length + '/10)';
-    document.getElementById('cz-add-servicio').disabled = data.servicios.length >= 10;
+    document.getElementById('cz-servicios-count').textContent = '(' + data.servicios.length + '/' + MAX_SERVICIOS + ')';
+    document.getElementById('cz-add-servicio').disabled = data.servicios.length >= MAX_SERVICIOS;
   }
 
   function collectServicios() {
@@ -624,7 +627,7 @@ window.KGP = window.KGP || {};
     populateClientes();
     syncEditButtons();
     setEstadoField(data.estadoInicial);
-    setDefaults({ fechaElaboracion: new Date().toISOString().slice(0, 10), plazo: 15 });
+    setDefaults({ fechaElaboracion: new Date().toISOString().slice(0, 10), plazo: PLAZO_DEFAULT });
 
     // Un solo round-trip: refresca clientes, catálogo y el código tentativo
     // por si se agregó algo nuevo durante este envío.

@@ -130,6 +130,8 @@ function tar_rowToObj_(row) {
     tarea: row[normText_('TAREA')] || '',
     responsable: row[normText_('RESPONSABLE')] || '',
     idEmpleado: row[normText_('ID EMPLEADO')] || '',
+    // INTERNO / TERCERO (columna opcional; vacío = se deduce por el ID).
+    tipoResponsable: row[normText_('TIPO RESPONSABLE')] || '',
     fechaInicio: row[normText_('FECHA INICIO')] || '',
     fechaEntrega: row[normText_('FECHA ENTREGA')] || '',
     estado: row[normText_('ESTADO')] || '',
@@ -157,6 +159,7 @@ function tar_toRow_(idTarea, idOis, t) {
     'TAREA': t.tarea,
     'RESPONSABLE': t.responsable,
     'ID EMPLEADO': t.idEmpleado,
+    'TIPO RESPONSABLE': t.tipoResponsable || '',
     'FECHA INICIO': t.fechaInicio,
     'FECHA ENTREGA': t.fechaEntrega,
     'ESTADO': t.estado,

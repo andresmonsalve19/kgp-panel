@@ -107,3 +107,55 @@ function ois_codeReserve_(fechaElaboracion) {
   PropertiesService.getScriptProperties().setProperty(propKey, String(next));
   return 'OIS-KGP-' + pad3_(next) + '-' + yy;
 }
+
+/**
+ * Reserva el siguiente CODIGO de OIP: OIP-KGP-NNN-YY. DEBE llamarse dentro
+ * del script lock, igual que code_reserve_ / ois_codeReserve_.
+ *
+ * DIFERENCIA con las otras dos, confirmada explícitamente con el usuario: el
+ * NNN de la OIP **no reinicia cada año**. Es un consecutivo continuo (001,
+ * 002, ... 150) y lo único que cambia con el año es el sufijo YY, que sigue
+ * siendo el año de la fecha de elaboración. Por eso la marca de agua es una
+ * sola ('SEQ_OIP', sin año) y el máximo se busca en la hoja ignorando el YY
+ * del código.
+ *
+ * Consecuencia a tener en cuenta: como el NNN no reinicia, los 3 dígitos son
+ * un techo GLOBAL de 999 OIP en toda la vida del sistema (no 999 por año como
+ * en cotizaciones y OIS). Al llegar ahí hay que pasar a 4 dígitos.
+ */
+function oip_codeReserve_(fechaElaboracion) {
+  var yy = fmtDate_(fechaElaboracion, 'yy');
+  var next = code_nextNumberAnyYear_(CFG().TABS.OIP, 'OIP-KGP-', 'SEQ_OIP');
+
+  if (next > 999) {
+    throw new AppError_('SEQ_OVERFLOW', 'Se alcanzó el máximo de 999 OIP (el consecutivo de la OIP no reinicia por año). Hay que ampliar la numeración a 4 dígitos.');
+  }
+
+  PropertiesService.getScriptProperties().setProperty('SEQ_OIP', String(next));
+  return 'OIP-KGP-' + pad3_(next) + '-' + yy;
+}
+
+/**
+ * Como code_nextNumberFor_ pero SIN atar el consecutivo a un año: busca el
+ * máximo NNN de los códigos "<prefijo>NNN-YY" de la hoja sea cual sea su YY,
+ * lo compara con la marca de agua `propKey` (anti-regresión si se borra una
+ * fila a mano) y devuelve el siguiente. Lo usa la OIP, cuyo consecutivo es
+ * continuo entre años.
+ */
+function code_nextNumberAnyYear_(tabName, prefix, propKey) {
+  var pattern = new RegExp('^' + prefix + '(\\d{3})-\\d{2}$');
+
+  var maxInSheet = 0;
+  repo_readTable_(CFG().DB_SHEET_ID, tabName).rows.forEach(function (row) {
+    var codigo = row[normText_('CODIGO')];
+    if (!codigo) return;
+    var m = pattern.exec(String(codigo).trim());
+    if (m) {
+      var n = Number(m[1]);
+      if (n > maxInSheet) maxInSheet = n;
+    }
+  });
+
+  var watermark = Number(PropertiesService.getScriptProperties().getProperty(propKey) || 0);
+  return Math.max(maxInSheet, watermark) + 1;
+}

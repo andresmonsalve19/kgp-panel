@@ -1,27 +1,36 @@
 <script>
 /**
- * Lógica de la vista "Gestión de empleados": listado completo de
- * PERSONAL_KGP (api_listEmpleados), filtrado Y paginado en el cliente (la
- * tabla crece un empleado a la vez, no una fila por transacción como
- * COTIZACIONES, así que no hace falta paginación server-side ni un
- * protocolo de versión — ver CLAUDE.md §2; el tamaño de página, en cambio,
- * sí lo elige el usuario, 10/20/50, para no tener que scrollear una lista
- * larga). Alta/edición reutilizan KGP.entityModal (tipo "empleado",
- * ui/JsCore.js.html); la baja usa un confirm en 2 pasos por fila, mismo
- * criterio que la decisión de garantía de "Gestionar cotización" (ninguna
- * acción irreversible se dispara con un solo clic).
+ * Lógica de la vista "Gestión de empleados": dos listados con la misma forma,
+ * elegidos con el selector #emp-tipos —
+ *   - Internos: PERSONAL_KGP.
+ *   - Terceros / independientes: PERSONAL_TERCEROS (mismas columnas).
+ * Valores y etiquetas de cada tipo salen de la config
+ * (KGP.ui.tiposResponsable(), CFG().TIPO_RESPONSABLE_* / ETIQUETA_*). Cada
+ * api_* recibe el tipo como último argumento.
+ *
+ * Listado completo por tipo (api_listEmpleados), filtrado Y paginado en el
+ * cliente (la tabla crece un empleado a la vez, no hace falta paginación
+ * server-side — ver CLAUDE.md §2; el tamaño de página lo elige el usuario).
+ * Alta/edición reutilizan KGP.entityModal (tipo "empleado"); la baja usa un
+ * confirm en 2 pasos por fila (ninguna acción irreversible con un solo clic).
+ *
+ * Tras cualquier cambio se refresca KGP.catalog en segundo plano: el popup de
+ * tarea de Gestionar OIS/OIP toma de ahí internos y terceros, y sin esto no
+ * vería a la persona recién creada hasta recargar la página.
  */
 window.KGP = window.KGP || {};
 
 (function (KGP) {
   'use strict';
 
+  var tipos = [];          // [{valor, etiqueta}] — KGP.ui.tiposResponsable()
   var state = {
-    all: [],
+    tipo: '',              // tipo visible (valor de tipos[i])
+    listas: {},            // tipo -> [empleado]
+    loaded: {},            // tipo -> true si ya se consultó en esta sesión
     q: '',
     page: 1,
     pageSize: 10,
-    loaded: false,
     confirmDeleteId: null
   };
 
@@ -29,24 +38,30 @@ window.KGP = window.KGP || {};
 
   KGP.empleados.onEnter = function () {
     wireEvents();
-    if (state.loaded) return; // ya se cargó en esta sesión: no repetir la consulta al volver a la vista
+    if (state.loaded[state.tipo]) return; // ya se cargó en esta sesión: no repetir la consulta al volver a la vista
     fetchList();
   };
 
+  function esTercero() { return state.tipo === tipos[1].valor; }
+  function nombreSingular() { return esTercero() ? 'tercero' : 'empleado'; }
+  function lista() { return state.listas[state.tipo] || []; }
+
   function fetchList(opts) {
     opts = opts || {};
+    var tipo = state.tipo;
     var tbody = document.getElementById('emp-tbody');
     if (!opts.silent) tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Cargando…</td></tr>';
     setRefreshSpinner(true);
 
-    return KGP.apiCall('api_listEmpleados', []).then(function (list) {
-      state.loaded = true;
-      state.all = list;
+    return KGP.apiCall('api_listEmpleados', [tipo]).then(function (list) {
+      state.loaded[tipo] = true;
+      state.listas[tipo] = list;
       state.confirmDeleteId = null;
-      render();
+      if (tipo === state.tipo) render();
     }).catch(function (err) {
+      if (tipo !== state.tipo) return;
       tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No se pudo cargar el listado.</td></tr>';
-      KGP.toast('No se pudo cargar el listado de empleados: ' + KGP.friendlyError(err), 'error');
+      KGP.toast('No se pudo cargar el listado: ' + KGP.friendlyError(err), 'error');
     }).finally(function () {
       setRefreshSpinner(false);
     });
@@ -63,8 +78,8 @@ window.KGP = window.KGP || {};
 
   function filtered() {
     var q = normalize(state.q).trim();
-    if (!q) return state.all;
-    return state.all.filter(function (e) {
+    if (!q) return lista();
+    return lista().filter(function (e) {
       return normalize(e.nombre).indexOf(q) !== -1 ||
         normalize(e.correo).indexOf(q) !== -1 ||
         normalize(e.cargo).indexOf(q) !== -1 ||
@@ -89,7 +104,7 @@ window.KGP = window.KGP || {};
     var page = pageRows();
     if (!page.total) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty-state">' +
-        (state.all.length ? 'No hay empleados que coincidan con la búsqueda.' : 'No hay empleados registrados todavía.') +
+        (lista().length ? 'No hay resultados que coincidan con la búsqueda.' : 'No hay ' + (esTercero() ? 'terceros' : 'empleados') + ' registrados todavía.') +
         '</td></tr>';
     } else {
       tbody.innerHTML = page.rows.map(rowHtml).join('');
@@ -115,8 +130,8 @@ window.KGP = window.KGP || {};
         '<button type="button" class="btn btn-sm btn-ghost" data-action="confirm-no" data-id="' + id + '">Cancelar</button>' +
         '</div>'
       : '<div class="picker-row">' +
-        '<button type="button" class="btn btn-sm btn-icon-edit" data-action="edit" data-id="' + id + '" title="Editar empleado">' + EDIT_SVG + '</button>' +
-        '<button type="button" class="btn btn-sm btn-icon-delete" data-action="delete" data-id="' + id + '" title="Eliminar empleado">' + TRASH_SVG + '</button>' +
+        '<button type="button" class="btn btn-sm btn-icon-edit" data-action="edit" data-id="' + id + '" title="Editar ' + nombreSingular() + '">' + EDIT_SVG + '</button>' +
+        '<button type="button" class="btn btn-sm btn-icon-delete" data-action="delete" data-id="' + id + '" title="Eliminar ' + nombreSingular() + '">' + TRASH_SVG + '</button>' +
         '</div>';
 
     return '<tr>' +
@@ -130,22 +145,52 @@ window.KGP = window.KGP || {};
   }
 
   function findEmpleado(idEmpleado) {
-    return state.all.filter(function (e) { return e.idEmpleado === idEmpleado; })[0] || null;
+    return lista().filter(function (e) { return e.idEmpleado === idEmpleado; })[0] || null;
+  }
+
+  /** Tras un alta/edición/baja: el popup de tarea (KGP.catalog) y Gestionar tareas deben ver el cambio. */
+  function avisarCambio() {
+    KGP.catalog.load(true).catch(function () { /* no crítico: se reintenta al recargar */ });
+    if (KGP.tareas && KGP.tareas.markStale) KGP.tareas.markStale();
+  }
+
+  // ---------------- Selector Internos / Terceros ----------------
+
+  function renderTipos() {
+    document.getElementById('emp-tipos').innerHTML = tipos.map(function (t) {
+      var on = t.valor === state.tipo;
+      return '<button type="button" class="seg-option' + (on ? ' is-active' : '') + '" role="tab" aria-selected="' + on + '" data-tipo="' + KGP.escapeHtml(t.valor) + '">' + KGP.escapeHtml(t.etiqueta) + '</button>';
+    }).join('');
+    document.getElementById('emp-nuevo-btn').textContent = '+ Nuevo ' + nombreSingular();
+  }
+
+  function cambiarTipo(tipo) {
+    if (tipo === state.tipo) return;
+    state.tipo = tipo;
+    state.page = 1;
+    state.confirmDeleteId = null;
+    renderTipos();
+    if (state.loaded[tipo]) render();
+    else fetchList();
   }
 
   // ---------------- Alta / edición (KGP.entityModal) ----------------
 
   function openCreateModal() {
+    var tipo = state.tipo;
+    var singular = nombreSingular();
     KGP.entityModal.open({
       type: 'empleado',
       mode: 'create',
+      title: 'Agregar ' + singular,
       onSave: function (datos) {
-        return KGP.apiCall('api_createEmpleado', [datos]).then(function (creado) {
-          KGP.toast('Empleado "' + creado.nombre + '" guardado.', 'success');
-          state.all.push(creado);
-          render();
+        return KGP.apiCall('api_createEmpleado', [datos, tipo]).then(function (creado) {
+          KGP.toast(singular.charAt(0).toUpperCase() + singular.slice(1) + ' "' + creado.nombre + '" guardado.', 'success');
+          (state.listas[tipo] = state.listas[tipo] || []).push(creado);
+          if (tipo === state.tipo) render();
+          avisarCambio();
         }).catch(function (err) {
-          KGP.toast('No se pudo guardar el empleado: ' + KGP.friendlyError(err), 'error');
+          KGP.toast('No se pudo guardar: ' + KGP.friendlyError(err), 'error');
           throw err;
         });
       }
@@ -155,20 +200,23 @@ window.KGP = window.KGP || {};
   function openEditModal(idEmpleado) {
     var e = findEmpleado(idEmpleado);
     if (!e) return;
+    var tipo = state.tipo;
     KGP.entityModal.open({
       type: 'empleado',
       mode: 'edit',
+      title: 'Editar ' + nombreSingular(),
       editId: idEmpleado,
       initial: e,
       onSave: function (datos) {
-        return KGP.apiCall('api_updateEmpleado', [idEmpleado, datos]).then(function (actualizado) {
-          KGP.toast('Empleado actualizado.', 'success');
-          state.all = state.all.map(function (x) {
+        return KGP.apiCall('api_updateEmpleado', [idEmpleado, datos, tipo]).then(function (actualizado) {
+          KGP.toast('Datos actualizados.', 'success');
+          state.listas[tipo] = (state.listas[tipo] || []).map(function (x) {
             return x.idEmpleado === idEmpleado ? Object.assign({}, x, actualizado) : x;
           });
-          render();
+          if (tipo === state.tipo) render();
+          avisarCambio();
         }).catch(function (err) {
-          KGP.toast('No se pudo actualizar el empleado: ' + KGP.friendlyError(err), 'error');
+          KGP.toast('No se pudo actualizar: ' + KGP.friendlyError(err), 'error');
           throw err;
         });
       }
@@ -188,13 +236,15 @@ window.KGP = window.KGP || {};
   }
 
   function confirmDelete(idEmpleado) {
-    KGP.apiCall('api_deleteEmpleado', [idEmpleado]).then(function () {
-      KGP.toast('Empleado eliminado.', 'success');
-      state.all = state.all.filter(function (e) { return e.idEmpleado !== idEmpleado; });
+    var tipo = state.tipo;
+    KGP.apiCall('api_deleteEmpleado', [idEmpleado, tipo]).then(function () {
+      KGP.toast('Registro eliminado.', 'success');
+      state.listas[tipo] = (state.listas[tipo] || []).filter(function (e) { return e.idEmpleado !== idEmpleado; });
       state.confirmDeleteId = null;
-      render();
+      if (tipo === state.tipo) render();
+      avisarCambio();
     }).catch(function (err) {
-      KGP.toast('No se pudo eliminar el empleado: ' + KGP.friendlyError(err), 'error');
+      KGP.toast('No se pudo eliminar: ' + KGP.friendlyError(err), 'error');
       state.confirmDeleteId = null;
       render();
     });
@@ -214,6 +264,15 @@ window.KGP = window.KGP || {};
   function wireEvents() {
     if (eventsWired) return;
     eventsWired = true;
+
+    tipos = KGP.ui.tiposResponsable();
+    state.tipo = tipos[0].valor;
+    renderTipos();
+
+    document.getElementById('emp-tipos').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-tipo]');
+      if (b) cambiarTipo(b.getAttribute('data-tipo'));
+    });
 
     document.getElementById('emp-search').addEventListener('input', debounce(function (e) {
       state.q = e.target.value;

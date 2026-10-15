@@ -113,7 +113,10 @@ function admin_health() {
     { tabKey: 'ESTABLECIMIENTOS', schemaKey: 'ESTABLECIMIENTOS_CLIENTES' },
     { tabKey: 'PERSONAL', schemaKey: 'PERSONAL_KGP' },
     { tabKey: 'OIS', schemaKey: 'OIS' },
-    { tabKey: 'TAREAS_OIS', schemaKey: 'TAREAS_OIS' }
+    { tabKey: 'TAREAS_OIS', schemaKey: 'TAREAS_OIS' },
+    { tabKey: 'OIP', schemaKey: 'OIP' },
+    { tabKey: 'TAREAS_OIP', schemaKey: 'TAREAS_OIP' },
+    { tabKey: 'OIP_FACTURACION', schemaKey: 'OIP_FACTURACION' }
   ];
 
   checks.forEach(function (c) {
@@ -153,7 +156,9 @@ function admin_health() {
         hojas: hojas,
         hojaUsadaActualmente: cfg.TEMPLATE_TAB_NAME || hojas[0],
         hojaOis: cfg.TEMPLATE_TAB_OIS,
-        hojaOisExiste: hojas.indexOf(cfg.TEMPLATE_TAB_OIS) !== -1
+        hojaOisExiste: hojas.indexOf(cfg.TEMPLATE_TAB_OIS) !== -1,
+        hojaOip: cfg.TEMPLATE_TAB_OIP,
+        hojaOipExiste: hojas.indexOf(cfg.TEMPLATE_TAB_OIP) !== -1
       };
     } catch (e) {
       report.plantilla = { ok: false, error: errMsg_(e) };
@@ -207,6 +212,163 @@ function admin_setOisTabName(nombreHoja) {
   var msg = 'TEMPLATE_TAB_OIS fijado a: "' + nombreHoja + '"';
   Logger.log(msg);
   return { ok: true, nombreHoja: nombreHoja, message: msg };
+}
+
+/** Igual que admin_setOisTabName pero para la pestaña de la OIP ("OIP V-4"). */
+function admin_setOipTabName(nombreHoja) {
+  PropertiesService.getScriptProperties().setProperty('TEMPLATE_TAB_OIP', nombreHoja);
+  var msg = 'TEMPLATE_TAB_OIP fijado a: "' + nombreHoja + '"';
+  Logger.log(msg);
+  return { ok: true, nombreHoja: nombreHoja, message: msg };
+}
+
+/**
+ * Instala el disparador mensual del recordatorio de facturación de las OIP
+ * (día 1 de cada mes, ~7am hora de Bogotá -> oipn_recordatorioFacturacion).
+ *
+ * EJECUTAR UNA SOLA VEZ a mano desde el editor de Apps Script. Es idempotente:
+ * primero borra cualquier disparador que ya apunte a esa función, así
+ * volverla a correr no deja dos recordatorios enviando el correo dos veces.
+ */
+function admin_installOipFacturacionTrigger() {
+  var fn = 'oipn_recordatorioFacturacion';
+  var borrados = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === fn) {
+      ScriptApp.deleteTrigger(t);
+      borrados++;
+    }
+  });
+
+  ScriptApp.newTrigger(fn)
+    .timeBased()
+    .onMonthDay(1)
+    .atHour(7)
+    .inTimezone(CFG().TZ)
+    .create();
+
+  var msg = 'Disparador mensual instalado para ' + fn + ' (día 1, ~7:00 ' + CFG().TZ + ').' +
+    (borrados ? ' Se eliminaron ' + borrados + ' disparador(es) anterior(es) de la misma función.' : '');
+  Logger.log(msg);
+  return { ok: true, borrados: borrados, message: msg };
+}
+
+/** Lista los disparadores del proyecto (para confirmar que el recordatorio quedó instalado una sola vez). */
+function admin_listTriggers() {
+  var list = ScriptApp.getProjectTriggers().map(function (t) {
+    return { funcion: t.getHandlerFunction(), tipo: String(t.getEventType()), fuente: String(t.getTriggerSource()) };
+  });
+  Logger.log(JSON.stringify(list, null, 2));
+  return list;
+}
+
+/**
+ * Prueba el recordatorio de facturación SIN esperar al día 1 y sin la
+ * protección de "ya se ejecutó este mes": borra la marca OIP_NOTIF_LAST y
+ * corre el proceso con la fecha de hoy. Ojo: SÍ crea las filas de
+ * OIP_FACTURACION que falten y SÍ envía el correo de verdad.
+ */
+function admin_probarRecordatorioOip() {
+  PropertiesService.getScriptProperties().deleteProperty('OIP_NOTIF_LAST');
+  var res = oipn_recordatorioFacturacion();
+  Logger.log(JSON.stringify(res, null, 2));
+  return res;
+}
+
+/**
+ * Envía a `destino` un ejemplo de cada correo de la app (todas las claves de
+ * mail_textosDefault_), con la plantilla única y los textos VIGENTES (hoja
+ * CONFIG_CORREO_TEXTOS si tiene valor) sobre datos de muestra: NO lee ni
+ * escribe la BD. Para revisar cómo se ven después de cambiar la plantilla o
+ * los textos. Ejecutar a mano desde el editor, p. ej.
+ * admin_probarCorreos('alguien@dominio.com'). Sin argumento usa
+ * CFG().OIP_NOTIF_EMAIL. Si agregas un correo nuevo, agrega sus variables de
+ * muestra en admin_muestrasCorreo_.
+ */
+function admin_probarCorreos(destino) {
+  cfgs_refresh_(); // textos recién editados en la hoja, sin esperar a recargar la página
+  destino = destino || CFG().OIP_NOTIF_EMAIL;
+  var muestras = admin_muestrasCorreo_();
+  var claves = Object.keys(mail_textosDefault_());
+  claves.forEach(function (clave) {
+    var m = muestras[clave] || { vars: {}, opciones: {} };
+    var opts = mail_construir_(clave, m.vars, m.opciones);
+    opts.asunto = '[Prueba] ' + opts.asunto;
+    mail_send_(destino, opts);
+  });
+  var msg = 'Se enviaron ' + claves.length + ' correos de prueba a ' + destino + '. Cuota restante hoy: ' + MailApp.getRemainingDailyQuota() + '.';
+  Logger.log(msg);
+  return msg;
+}
+
+/** Variables de muestra de cada correo, para admin_probarCorreos. */
+function admin_muestrasCorreo_() {
+  var hoy = ntf_fechaLarga_(new Date());
+  var url = 'https://docs.google.com/spreadsheets/';
+  return {
+    COTIZACION_CREADA: {
+      vars: { nombre: 'Nombre Apellido', codigo: 'CTZ-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', estado: CFG().ESTADO_INICIAL, fechaElaboracion: hoy },
+      opciones: { url: url }
+    },
+    COTIZACION_APROBADA: {
+      vars: { nombre: 'Nombre Apellido', codigo: 'CTZ-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', tipoOrden: 'OIS', nombreOrden: ntf_nombreOrden_('OIS'), codigoOrden: 'OIS-KGP-001-26', fechaAprobacion: hoy },
+      opciones: { url: url }
+    },
+    COTIZACION_RECHAZADA: {
+      vars: { nombre: 'Nombre Apellido', codigo: 'CTZ-KGP-002-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', fecha: hoy, tieneDocumento: 'si' },
+      opciones: { url: url }
+    },
+    TAREA_ASIGNADA: {
+      vars: {
+        nombre: 'Nombre Apellido', tarea: 'Visita técnica de inspección',
+        descripcion: 'Llevar los equipos de medición.\nConfirmar la hora con el encargado del establecimiento.',
+        tipoOrden: 'OIP', nombreOrden: ntf_nombreOrden_('OIP'), codigoOrden: 'OIP-KGP-001-26',
+        cliente: 'CLIENTE DE PRUEBA S.A.S.', fechaInicio: hoy, fechaEntrega: hoy
+      },
+      opciones: { url: url }
+    },
+    OIP_RECORDATORIO: {
+      vars: { mes: 'septiembre de 2026', total: 2, plural: 's', filasCreadas: 1, estadoPendiente: CFG().FACT_ESTADO_PENDIENTE },
+      opciones: {
+        items: [
+          { codigo: 'OIP-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', estado: CFG().FACT_ESTADO_PENDIENTE, nueva: 'si' },
+          { codigo: 'OIP-KGP-002-26', cliente: 'OTRO CLIENTE LTDA', estado: CFG().FACT_ESTADO_PENDIENTE, nueva: '' }
+        ]
+      }
+    }
+  };
+}
+
+/**
+ * Crea (o completa) las hojas CONFIG_* en el spreadsheet de catálogo
+ * (CFG().CAT_SHEET_ID) con todos los parámetros de la app en forma de tabla:
+ * IDs, nombres de hojas, parámetros generales, correo, textos de cada correo
+ * y celdas de la plantilla, más CONFIG_LEEME con las instrucciones.
+ *
+ * EJECUTAR A MANO desde el editor de Apps Script. Se puede repetir cuando se
+ * quiera: nunca pisa un VALOR ya escrito (ni un texto de correo); solo agrega
+ * las filas que falten y refresca las columnas de ayuda (descripción, valor
+ * por defecto, enlace). Ver 06_ConfigSheet.js / CLAUDE.md §15.
+ */
+function admin_crearHojasConfig() {
+  var resumen = cfgs_crearHojas_();
+  cfgs_refresh_();
+  var msg = 'Hojas de configuración listas en https://docs.google.com/spreadsheets/d/' + cfgs_sheetId_() + '/edit\n' + resumen.join('\n');
+  Logger.log(msg);
+  return msg;
+}
+
+/**
+ * Relee las hojas CONFIG_* y muestra en el registro: qué claves se ignoraron
+ * (desconocidas o con un valor no válido) y la configuración efectiva que
+ * está usando la app. No escribe nada.
+ */
+function admin_verConfig() {
+  var r = cfgs_verificar_();
+  Logger.log('Configuración leída: ' + r.leidoEn + ' | claves en la hoja: ' + r.clavesEnHoja + ' | correos en la hoja: ' + r.correosEnHoja);
+  Logger.log(r.avisos.length ? 'AVISOS:\n- ' + r.avisos.join('\n- ') : 'Sin avisos: todo lo de la hoja se aplicó.');
+  Logger.log('Configuración efectiva:\n' + JSON.stringify(r.efectivo, null, 2));
+  return r;
 }
 
 /** Vuelca 3 filas reales de cada hoja de la BD, para verificar que el mapeo de columnas interpreta bien los datos. */

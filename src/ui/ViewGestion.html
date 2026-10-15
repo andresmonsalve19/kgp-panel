@@ -90,8 +90,11 @@
     <div class="detail-header-row">
       <button type="button" class="back-link" id="ge-back-btn">← Volver al listado</button>
       <div class="detail-header-actions">
-        <!-- Solo visible si la cotización ya se aprobó con "Crear OIS" (qs_getCotizacion devuelve cotizacion.ois). -->
+        <!-- Solo visible si la cotización ya se aprobó creando su orden
+             (qs_getCotizacion devuelve cotizacion.ois / cotizacion.oip). Nunca
+             se ven los dos a la vez: la orden es una elección única. -->
         <button type="button" class="btn btn-sm btn-ghost-primary" id="ge-ver-ois-btn" hidden>Ver OIS</button>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="ge-ver-oip-btn" hidden>Ver OIP</button>
         <a href="#" target="_blank" rel="noopener" class="btn btn-sm btn-ghost-primary" id="ge-abrir-doc-btn" hidden>Abrir documento ↗</a>
       </div>
     </div>
@@ -99,7 +102,7 @@
     <!-- Resumen tipo dashboard. Los montos se recalculan en vivo con las
          tarifas de los servicios (misma fórmula que qs_updateQuotation) y se
          persisten al guardar. El ESTADO no es editable como campo: solo
-         cambia una vez, con los botones de garantía (ver JsGestion.js.html). -->
+         cambia una vez, con los botones de Cotización (ver JsGestion.js.html). -->
     <div class="card resumen-card">
       <div class="resumen-head">
         <div class="resumen-title">
@@ -132,8 +135,8 @@
 
       <div class="garantia-row" id="ge-garantia-row" hidden>
         <div class="garantia-actions" id="ge-garantia-actions">
-          <button type="button" class="btn btn-success btn-lg" id="ge-garantia-aprobar">Garantía aprobada</button>
-          <button type="button" class="btn btn-danger btn-lg" id="ge-garantia-rechazar">Garantía rechazada</button>
+          <button type="button" class="btn btn-success btn-lg" id="ge-garantia-aprobar">Cotización aprobada</button>
+          <button type="button" class="btn btn-danger btn-lg" id="ge-garantia-rechazar">Cotización rechazada</button>
         </div>
         <div class="garantia-confirm" id="ge-garantia-confirm" hidden>
           <div id="ge-garantia-confirm-text"></div>
@@ -251,7 +254,7 @@
          al generar/regenerar el documento. -->
     <div class="card">
       <div class="section-title">Tiempo de entrega</div>
-      <div class="field">
+      <div class="field" data-field="tiempoEntrega">
         <label for="ge-tiempo-entrega">Tiempo de entrega de la cotización</label>
         <input type="text" id="ge-tiempo-entrega" placeholder="Ej: 15 días hábiles" maxlength="200">
       </div>
@@ -259,7 +262,7 @@
 
     <div class="card">
       <div class="section-title">Asesor comercial</div>
-      <div class="field">
+      <div class="field" data-field="asesorComercial">
         <label for="ge-asesor-select">Empleado asignado como asesor comercial de esta cotización</label>
         <select id="ge-asesor-select"><option value="">— Sin asignar —</option></select>
       </div>
@@ -273,15 +276,16 @@
   </div>
 </section>
 
-<!-- ---------- Popup: "Garantía aprobada" -> ¿qué orden se crea? ----------
-     Aprobar la garantía SIEMPRE crea su orden en la misma operación (ver
-     api_aprobarConOis): OIS = aprobar + crear la OIS; OIP = aún no
-     disponible (solo muestra el aviso, no aprueba nada); Cancelar = cierra
-     sin cambiar nada (la cotización sigue "En revisión"). -->
+<!-- ---------- Popup: "Cotización aprobada" -> ¿qué orden se crea? ----------
+     Aprobar la Cotización SIEMPRE crea su orden en la misma operación: OIS =
+     aprobar + crear la OIS (api_aprobarConOis); OIP = aprobar + crear la OIP
+     (api_aprobarConOip); Cancelar = cierra sin cambiar nada (la cotización
+     sigue "En revisión"). La elección es única: una cotización produce una
+     OIS o una OIP, nunca las dos. -->
 <div class="modal-overlay" id="aprobar-modal-overlay">
   <div class="modal-box modal-box-sm" role="dialog" aria-modal="true" aria-labelledby="aprobar-modal-title">
     <div class="modal-header">
-      <h2 id="aprobar-modal-title">Aprobar garantía</h2>
+      <h2 id="aprobar-modal-title">Aprobar Cotización</h2>
       <button type="button" class="modal-close" id="aprobar-modal-close" aria-label="Cerrar">✕</button>
     </div>
     <div class="modal-body">
@@ -293,10 +297,9 @@
         </button>
         <button type="button" class="aprobar-option" id="aprobar-oip-btn">
           <span class="aprobar-option-title">OIP</span>
-          <span class="aprobar-option-desc">Próximamente</span>
+          <span class="aprobar-option-desc">Con tareas por mes y facturación</span>
         </button>
       </div>
-      <div class="hint aprobar-oip-note" id="aprobar-oip-note" hidden>La OIP aún no está disponible. Elige OIS o cancela la aprobación.</div>
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-sm" id="aprobar-modal-cancel">Cancelar aprobación</button>

@@ -701,7 +701,7 @@
     gap: 14px;
     flex-wrap: wrap;
   }
-  /* Botón de decisión de garantía: más grande que el .btn normal — es la
+  /* Botón de decisión de cotización: más grande que el .btn normal — es la
      acción más importante de toda la vista de Gestión, debe notarse. */
   .btn-lg {
     padding: 14px 30px;
@@ -1012,8 +1012,6 @@
   .aprobar-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .aprobar-option-title { font-size: 20px; font-weight: 800; color: var(--primary); letter-spacing: 0.02em; }
   .aprobar-option-desc { font-size: 12px; color: var(--text-muted); }
-  #aprobar-oip-btn .aprobar-option-title { color: var(--text-faint); }
-  .aprobar-oip-note { margin-top: 10px; text-align: center; color: var(--warning); }
 
   /* Botón de ícono "marcar como finalizada": contorno verde; relleno verde
      cuando la tarea ya está finalizada (clic = volver a "En curso"). Doble
@@ -1031,6 +1029,35 @@
   .tarea-title { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
   .tarea-row.tarea-finalizada .tarea-title { text-decoration: line-through; color: var(--text-muted); }
   .tareas-empty { padding: 14px; margin-bottom: 10px; }
+
+  /* ---- Tareas por mes (solo "Gestionar OIP") ----
+     La OIP agrupa sus tareas por el mes de la FECHA ENTREGA: un bloque para
+     el mes filtrado y otro, destacado en ámbar, para las de meses anteriores
+     que siguen sin cerrar. */
+  .tareas-filters { margin-bottom: 14px; }
+  .tareas-group { margin-bottom: 6px; }
+  .tareas-group-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--text-muted);
+    padding-bottom: 6px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tareas-group-vencidas {
+    background: var(--warning-bg);
+    border: 1px solid var(--warning);
+    border-radius: var(--radius-md);
+    padding: 12px 12px 2px;
+    margin-bottom: 16px;
+  }
+  .tareas-group-vencidas .tareas-group-title { color: var(--warning); border-bottom-color: var(--warning); }
+
+  /* ---- Tabla de facturación (solo "Gestionar OIP") ---- */
+  .fact-table td { vertical-align: middle; }
+  /* Subtotal / IVA / Total debajo de la tabla: mismo bloque que el resumen
+     de la cotización (.resumen-money-row), separado de la tabla. */
+  .fact-totales { margin: 16px 0 0; }
+  .fact-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
   /* Bloquea toda la vista hasta que el dato termina de cargar (nunca se
      muestra un formulario a medio llenar, ni un dashboard con KPIs en cero
@@ -1050,6 +1077,10 @@
     padding: 80px 20px;
   }
 
+  /* [hidden] explícito: display:flex le gana al atributo hidden del
+     user-agent (mismo problema que .detail-loading, ver arriba). Sin esto,
+     #dash-banner / #dord-banner se veían como una franja ámbar vacía. */
+  .warn-banner[hidden] { display: none; }
   .warn-banner {
     display: flex;
     gap: 8px;
@@ -1183,6 +1214,7 @@
     min-width: 0;
   }
   .chart-card .section-title-row { margin-bottom: 0; }
+  .chart-card[hidden] { display: none; } /* "Facturación por mes" solo existe en la pestaña OIP */
 
   .chart-meta {
     font-family: ui-monospace, monospace;
@@ -1652,6 +1684,138 @@
     border: 0;
   }
 
+  /* ==================================================================
+     Dashboard → selector Cotizaciones / OIS / OIP (JsDashboardOrdenes.js.html)
+     ================================================================== */
+
+  /* Control segmentado: una pastilla por opción, la activa en oliva.
+     .seg-control / .seg-option = el mismo control fuera del Dashboard
+     (Interno/Tercero en el popup de tarea y en Gestión de empleados). */
+  .dash-modulos, .seg-control {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px;
+    margin-bottom: 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+  .dash-modulo, .seg-option {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 8px 16px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
+  }
+  .dash-modulo:hover, .seg-option:hover { background: var(--primary-bg); color: var(--primary-hover); }
+  .dash-modulo:focus-visible, .seg-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .dash-modulo.is-active, .seg-option.is-active { background: var(--primary); color: #fff; }
+  .seg-option:disabled { cursor: not-allowed; opacity: 0.6; }
+  .seg-control.in-form { margin-bottom: 0; box-shadow: none; }
+  .dash-modulo-sub { font-size: 11px; font-weight: 500; opacity: 0.8; }
+
+  /* Columna "Tareas" de la tabla de órdenes: n/total + medidor + vencidas. */
+  .dord-avance {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 92px;
+  }
+  .dord-avance-num { font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; }
+  .dord-avance-venc { font-size: 11px; font-weight: 600; color: var(--danger); }
+
+  /* ==================================================================
+     Gestionar tareas (ViewTareas.html / JsTareas.js.html)
+     ================================================================== */
+
+  /* Sección "Orden" (tipo + código) del popup global de tarea: solo la
+     muestra "Gestionar tareas"; separada del resto del formulario. */
+  .tm-orden-section {
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Estado de la regeneración de documentos en segundo plano (cabecera). */
+  .tg-doc-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .tg-doc-status:empty { display: none; }
+  .tg-doc-status.is-error { color: var(--danger); }
+
+  .tg-table { min-width: 900px; }
+  .tg-table .tg-col-check { width: 46px; text-align: center; }
+  .tg-table .tg-col-actions { width: 1%; white-space: nowrap; }
+  .tg-table .tg-col-tarea { min-width: 240px; max-width: 420px; }
+  tr.tg-row.is-editable { cursor: pointer; }
+
+  /* Texto de la tarea: máximo 2 líneas en la tabla (el completo está en el popup). */
+  .tg-tarea-title {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  tr.tg-row.is-finalizada .tg-tarea-title { text-decoration: line-through; color: var(--text-muted); }
+  .tg-tarea-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+
+  .tg-orden { display: inline-flex; align-items: center; gap: 6px; }
+  .orden-tag {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: var(--primary-bg);
+    color: var(--primary-hover);
+    border: 1px solid var(--primary-soft);
+  }
+  .orden-tag-oip { background: var(--surface-alt); color: var(--text-muted); border-color: var(--border-strong); }
+
+  .tg-days { font-size: 11.5px; margin-top: 2px; }
+  .tg-days:not(.overdue):not(.soon) { color: var(--text-faint); font-weight: 500; }
+
+  .tg-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .tg-confirm {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: 280px;
+    margin-left: auto;
+    white-space: normal;
+    font-size: 12px;
+  }
+  .tg-lock { display: inline-flex; color: var(--text-faint); }
+  .tg-lock svg { width: 16px; height: 16px; }
+
+  /* "Abrir la orden": contorno oliva (no es editar ni eliminar). Doble clase
+     por especificidad, mismo criterio que .btn.btn-icon-edit. */
+  .btn.btn-icon-view {
+    padding: 0; width: 30px; height: 30px; flex: none; border-radius: 8px;
+    background: #fff; color: var(--primary); border-color: var(--primary);
+  }
+  .btn.btn-icon-view svg { width: 15px; height: 15px; }
+  .btn.btn-icon-view:hover { background: var(--primary); color: #fff; }
+
+  .empty-state .btn { margin-left: 8px; }
+
   /* ---------- Topbar móvil + menú lateral (hamburguesa) ---------- */
 
   .mobile-topbar {
@@ -1770,6 +1934,23 @@
     .detail-header-actions { justify-content: center; }
     .tarea-row-info { flex-direction: column; align-items: center; }
     .aprobar-options { grid-template-columns: 1fr; }
+
+    /* "Gestionar OIP": títulos de grupo de tareas y acciones de la tabla de
+       facturación también centrados (regla general de la app en móvil). */
+    .tareas-group-title { justify-content: center; }
+    .fact-actions { justify-content: center; }
+    .fact-totales { grid-template-columns: 1fr; } /* montos largos legibles en pantallas angostas */
+
+    /* Dashboard: selector de módulo a todo el ancho; el subtítulo largo no cabe. */
+    .dash-modulos, .seg-control { display: flex; width: 100%; }
+    .dash-modulo, .seg-option { flex: 1 1 0; justify-content: center; padding: 8px 6px; }
+    .dash-modulo-sub { display: none; }
+    .dord-avance { align-items: center; }
+
+    /* "Gestionar tareas": acciones, confirmaciones y estado de documentos centrados. */
+    .tg-actions, .tg-confirm { justify-content: center; }
+    .tg-confirm { margin: 0 auto; }
+    .dash-header-actions .tg-doc-status { width: 100%; justify-content: center; }
 
     .kpi-card { text-align: center; }
 
