@@ -1,305 +1,258 @@
 # KGP Panel
 
-Panel web interno de **KGP** para gestionar el ciclo comercial y operativo de sus servicios: desde la **cotización** hasta la **orden interna de servicio (OIS)**, con generación automática de documentos Excel a partir de la plantilla oficial de la empresa.
+Panel web interno de **KGP** para gestionar el ciclo comercial y operativo de sus servicios: desde la **cotización** hasta la **orden interna** que la ejecuta (**OIS**, orden interna de servicio, u **OIP**, orden interna de proyectos), con sus tareas, su facturación mensual, sus documentos Excel generados a partir de la plantilla oficial y avisos por correo.
 
-Está construido como una **Web App de Google Apps Script**: no requiere servidores propios ni base de datos externa. Los datos viven en Google Sheets y los documentos generados en Google Drive.
+Es una **Web App de Google Apps Script**: no requiere servidores propios ni base de datos externa. Los datos viven en Google Sheets, los documentos en Google Drive y la configuración en hojas `CONFIG_*` editables a mano.
 
 ---
 
 ## Tabla de contenido
 
-1. [¿De qué se trata?](#de-qué-se-trata)
-2. [Funcionalidades](#funcionalidades)
-3. [Cómo se usa (guía de usuario)](#cómo-se-usa-guía-de-usuario)
-4. [Arquitectura](#arquitectura)
-5. [Estructura del repositorio](#estructura-del-repositorio)
-6. [Modelo de datos (Google Sheets)](#modelo-de-datos-google-sheets)
-7. [Instalación paso a paso](#instalación-paso-a-paso)
-8. [Despliegue y actualizaciones](#despliegue-y-actualizaciones)
-9. [Funciones de administración](#funciones-de-administración)
-10. [Configuración](#configuración)
-11. [Convenciones de desarrollo](#convenciones-de-desarrollo)
-12. [Solución de problemas](#solución-de-problemas)
+1. [Funcionalidades](#funcionalidades)
+2. [Flujos y reglas de negocio](#flujos-y-reglas-de-negocio)
+3. [Arquitectura](#arquitectura)
+4. [Estructura del repositorio](#estructura-del-repositorio)
+5. [Modelo de datos (Google Sheets)](#modelo-de-datos-google-sheets)
+6. [Configuración](#configuración)
+7. [Correos](#correos)
+8. [Seguridad](#seguridad)
+9. [Instalación paso a paso](#instalación-paso-a-paso)
+10. [Despliegue y actualizaciones](#despliegue-y-actualizaciones)
+11. [Funciones de administración](#funciones-de-administración)
+12. [Convenciones de desarrollo](#convenciones-de-desarrollo)
+13. [Solución de problemas](#solución-de-problemas)
 
 ---
-
-## ¿De qué se trata?
-
-Antes de este panel, las cotizaciones se armaban a mano sobre una plantilla de Excel y se registraban por separado en una hoja de cálculo. KGP Panel une ambos pasos:
-
-- El usuario llena un **formulario web** (cliente, solicitante, establecimiento, servicios y actividades).
-- El sistema **reserva un consecutivo** (`CTZ-KGP-001-26`), guarda todo en la base de datos (Google Sheets) y **genera el documento `.xlsx`** de la cotización en Drive, con todas las celdas de la plantilla oficial llenas.
-- Luego la cotización se **gestiona** (tarifas, totales con IVA, asesor comercial, tiempo de entrega) y se **aprueba o rechaza** la garantía.
-- Una cotización aprobada genera su **OIS** (`OIS-KGP-001-26`), donde se planifican y siguen las tareas de ejecución del servicio, con su propio documento.
-- Un **dashboard** muestra el estado de todas las cotizaciones en tiempo real.
 
 ## Funcionalidades
 
 | Vista | Qué permite hacer |
 |---|---|
-| **Crear cotización** | Formulario de nueva cotización. Selección de cliente, solicitante (contacto), establecimiento y su encargado, con alta/edición rápida de cualquiera de ellos en un modal sin salir del formulario. Hasta **10 servicios** por cotización, cada uno con hasta **10 actividades**. El código UNSPSC se autocompleta según el tipo de servicio. Al guardar se genera el documento. |
-| **Gestionar cotización** | Listado filtrable/paginado de cotizaciones y vista de detalle para editar datos generales, servicios, **tarifas** (tarifa × cantidad), observaciones acumulativas, asesor comercial y tiempo de entrega. Calcula **SUBTOTAL, IVA (19 %) y TOTAL**. Botones **"Garantía aprobada" / "Garantía rechazada"** para decidir el estado (una sola vez). "Guardar cambios" regenera el **mismo** documento. |
-| **Gestionar OIS** | Listado y detalle de las órdenes internas de servicio. Gestión de tareas (responsable, fechas, observación, marcar como finalizada), plazo y datos compartidos con la cotización. El estado de la OIS se deriva solo: **En curso / Vencida / Finalizada**. |
-| **Gestión de empleados** | Alta, edición y baja del personal de KGP (`PERSONAL_KGP`). Se usa para trazabilidad ("Elaborado por", "Revisado y aprobado por", "Asesor comercial") y como responsables de tareas de OIS. |
-| **Dashboard** | KPIs, gráficos (distribución por estado, evolución mensual, vigencia, tipos de servicio), tabla con búsqueda, filtros por año/cliente/estado, ordenamiento y paginación, y panel de calidad de datos. |
+| **Crear cotización** | Cliente, solicitante, establecimiento y encargado (con alta/edición rápida en un modal), plazo, descripción y hasta 10 servicios con 10 actividades cada uno. El código UNSPSC se autocompleta. Al guardar se genera el documento `.xlsx`. |
+| **Gestionar cotización** | Listado filtrable y detalle: servicios, **tarifas** (tarifa × cantidad), observaciones acumulativas, asesor comercial y tiempo de entrega. Calcula SUBTOTAL, IVA y TOTAL. Botones **"Cotización aprobada"** (crea su OIS u OIP) y **"Cotización rechazada"**. "Guardar cambios" regenera el **mismo** documento. |
+| **Gestionar OIS** | Órdenes internas de servicio: tareas (responsable interno o tercero, fechas, observación), plazo y datos compartidos con la cotización. Estado derivado: En curso / Vencida / Finalizada. |
+| **Gestionar OIP** | Órdenes internas de proyectos: como la OIS, más la **facturación mensual** (cuota, número de factura, estado) y un recordatorio automático el día 1 de cada mes. Tareas agrupadas por mes de entrega. |
+| **Gestionar tareas** | Todas las tareas de OIS y OIP en una sola tabla, con filtros, KPIs y alta/edición/finalización al instante. |
+| **Gestión de clientes** | Clientes con sus contactos, establecimientos (y su encargado) e historial de cotizaciones. Borrar solo se permite si ninguna cotización usa el registro. |
+| **Gestión de empleados** | Personal interno (`PERSONAL_KGP`) y terceros/independientes (`PERSONAL_TERCEROS`). |
+| **Dashboard** | Pestañas Cotizaciones / OIS / OIP: KPIs, gráficas, filtros, tabla y actualización automática. |
 
-### Flujo de estados
+## Flujos y reglas de negocio
 
 ```
-Cotización:  En revisión ──► Aprobada  (crea su OIS en la misma transacción)
+Cotización:  En revisión ──► Aprobada  (crea su OIS u OIP en la MISMA transacción)
                          └─► Rechazada
-             (la decisión se toma una sola vez; después la cotización queda bloqueada
-              en "Gestionar cotización" y solo se edita a través de su OIS)
+             La decisión es única; después la cotización solo se edita desde su orden.
 
-OIS:         En curso ──► Finalizada  (todas sus tareas finalizadas)
+OIS / OIP:   En curso ──► Finalizada  (todas sus tareas finalizadas)
                      └─► Vencida     (pasó la fecha de vencimiento sin finalizar)
+             Una OIS Finalizada queda de solo lectura; una OIP no (factura ~1 año).
 ```
 
-### Consecutivos
+| | Cotización | OIS | OIP |
+|---|---|---|---|
+| Código | `CTZ-KGP-NNN-YY` | `OIS-KGP-NNN-YY` | `OIP-KGP-NNN-YY` |
+| ¿NNN reinicia cada año? | Sí | Sí | **No** (consecutivo continuo) |
+| Plazo inicial | Formulario (15 días) | El de la cotización | 365 días |
+| Tareas en la plantilla | — | 20 filas fijas | Se insertan filas |
 
-- Cotizaciones: `CTZ-KGP-NNN-YY` (ej. `CTZ-KGP-014-26`).
-- OIS: `OIS-KGP-NNN-YY`.
-- `NNN` reinicia en `001` cada año; `YY` son los dos últimos dígitos del año de elaboración. La reserva ocurre dentro de un lock, así que dos usuarios simultáneos nunca obtienen el mismo número.
-
-## Cómo se usa (guía de usuario)
-
-1. Abre la URL de la Web App (la entrega el administrador). Si es la primera vez, Google pedirá iniciar sesión.
-2. **Crear una cotización**
-   1. En el menú lateral, entra a **Crear cotización**.
-   2. Elige el **cliente**. Si no existe, usa el botón **+** para crearlo en el modal. Lo mismo aplica para el solicitante, el establecimiento y el encargado.
-   3. Ajusta el **plazo** (días de vigencia) y escribe la **descripción** de la cotización.
-   4. Agrega los **servicios**: tipo de servicio (el UNSPSC se llena solo), descripción y sus actividades.
-   5. Pulsa **Guardar**. Se muestra un resumen con el código asignado y el enlace al documento `.xlsx` generado en Drive.
-3. **Gestionar la cotización**
-   1. Entra a **Gestionar cotización** y haz clic en la fila de la cotización.
-   2. Completa **tarifas y cantidades** por servicio, asesor comercial y tiempo de entrega. El resumen muestra el subtotal, IVA y total en vivo.
-   3. Pulsa **Guardar cambios**: se actualiza la base de datos y se regenera el documento sobre el mismo archivo (el enlace no cambia).
-   4. Cuando el cliente responda, usa **Garantía aprobada** (y elige **OIS**) o **Garantía rechazada**.
-4. **Ejecutar la OIS**
-   1. Entra a **Gestionar OIS** y abre la orden.
-   2. Agrega tareas (hasta 20), asigna responsables y fechas, y márcalas como finalizadas a medida que avanza el trabajo.
-   3. Cuando todas las tareas estén finalizadas, la OIS pasa sola a **Finalizada** y queda de solo lectura.
-5. **Seguimiento**: el **Dashboard** muestra el panorama general. El botón **Actualizar** trae los datos más recientes.
-
-> En móvil (≤ 760 px) la interfaz se adapta y centra todo el contenido.
+Los consecutivos se reservan dentro de un lock (dos usuarios nunca obtienen el mismo número) y una marca de agua en las Propiedades del script evita reutilizar números si se borra una fila a mano.
 
 ## Arquitectura
 
 ```
 ┌───────────────────────────── Navegador ──────────────────────────────┐
 │  SPA (HTML + CSS + JS vanilla) servida por HtmlService               │
-│  ui/Index.html → Sidebar + vistas (Cotizacion, Gestion, Ois,         │
-│  Empleados, Dashboard) + módulos compartidos KGP.* (JsCore)          │
+│  ui/Index.html → Sidebar + 8 vistas + módulos compartidos KGP.*      │
+│  window.KGP_CONFIG (parámetros de la config, inyectados por doGet)   │
 │  Caché local stale-while-revalidate (localStorage)                   │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ google.script.run → api_*()
                                 │ respuesta {ok, data, error, meta}
 ┌───────────────────────────────▼──────────────────────────────────────┐
 │  Google Apps Script (V8)                                             │
-│  50_WebApp   → doGet + endpoints api_* (envueltos en safeCall_)      │
-│  3x_*Service → reglas de negocio, locks, orquestación                │
-│  2x_*        → consecutivos, IDs, validación                         │
-│  1x_*Repo    → acceso a hojas (lectura memoizada por ejecución)      │
-│  0x_*        → config, Result, utilidades, caché                     │
+│  5x  Web y admin   → doGet, api_* (safeCall_), admin_* (protegidas)  │
+│  3x/4x Servicios   → reglas de negocio, transacciones (tx_conLock_)  │
+│  2x  IDs/validación→ consecutivos, IDs internos, payloads            │
+│  1x  Repositorios  → una hoja cada uno, lectura memoizada            │
+│  0x  Base          → CFG_(), respuestas, utilidades, caché, correo,  │
+│                      configuración desde hojas, transacciones        │
 └──────┬─────────────────────────────┬──────────────────────┬──────────┘
-       │ SpreadsheetApp              │ Drive API v2         │ CacheService /
-       ▼                             ▼                      ▼ ScriptProperties
-  Google Sheets (BD +          Google Drive (plantilla,   Caché entre requests,
-  catálogo de servicios)       documentos .xlsx de        marcas de agua de
-                               cotizaciones y OIS)        consecutivos, versión de datos
+       │ SpreadsheetApp              │ Drive API v2         │ CacheService / ScriptProperties /
+       ▼                             ▼                      ▼ LockService / MailApp
+  Google Sheets (BD, catálogo,   Google Drive (plantilla,   Caché entre requests, consecutivos,
+  configuración, historial)      documentos y carpetas)     versión de datos, correos
 ```
-
-### Capas del servidor
-
-Apps Script comparte un **namespace global plano** (sin `import`/`export`), así que el orden y los prefijos de nombre hacen el trabajo de los módulos:
-
-| Prefijo de archivo | Capa | Prefijo de funciones |
-|---|---|---|
-| `00`–`03` | Base: configuración (`CFG()`, `SCHEMA()`, `CELLMAP()`), contrato de respuesta, utilidades, caché | `ok_`, `fail_`, `safeCall_`, `normText_`, `dataVersion_` |
-| `10`–`15` | Repositorios: lectura/escritura de cada hoja | `repo_`, `cat_`, `cli_`, `con_`, `est_`, `qr_`, `emp_`, `ois_`, `tar_` |
-| `20`–`21` | IDs, consecutivos y validación de payloads | `id_`, `code_`, `validate*_` |
-| `30`–`35` | Servicios de negocio: cotizaciones, documentos, dashboard, errores, empleados, OIS | `qs_`, `doc_`, `ds_`, `logError_`, `emps_`, `ois_` |
-| `50` | Punto de entrada web y API pública | `doGet`, `include`, `api_*` |
-| `51` | Administración (se ejecuta desde el editor) | `admin_*` |
 
 ### Decisiones clave
 
-- **Contrato único de API**: toda función `api_*` responde `{ok, data, error, meta}` a través de `safeCall_`, que captura cualquier excepción, la registra en la hoja `_ERRORES` y nunca la deja llegar cruda al cliente.
-- **Escritura en dos fases**: la fase 1 (validación, reserva de consecutivo y appends a las hojas) ocurre dentro de un `LockService.getScriptLock()` corto. La generación del documento Excel es una fase 2 separada, fuera del lock, para no bloquear a otros usuarios.
-- **Idempotencia**: la creación usa un `requestId` generado en el cliente para que un reintento no duplique la cotización ni el documento.
-- **Columnas por nombre, nunca por índice**: los encabezados se normalizan (sin tildes, mayúsculas, espacios colapsados) y se resuelven por nombre, así el orden de columnas del Sheet puede cambiar sin romper nada. `SCHEMA()` separa columnas **requeridas** y **opcionales**.
+- **Contrato único de API**: toda `api_*` responde `{ok, data, error, meta}` a través de `safeCall_`; ninguna excepción llega cruda al navegador y los errores quedan en la hoja `_ERRORES`.
+- **Transacciones cortas** (`tx_conLock_`, `07_Transaccion.js`): validar + escribir en las hojas dentro del script lock, con `flush` y `bumpDataVersion_` antes de soltarlo. Los documentos y los correos van **después**, fuera del lock.
+- **Idempotencia**: crear una cotización, aprobarla o generar su documento usa un `requestId` del navegador; un reintento nunca duplica nada.
+- **Columnas por nombre, nunca por índice** (`normText_`): el orden de columnas del Sheet puede cambiar. `SCHEMA_()` separa columnas requeridas y opcionales.
 - **Rendimiento**:
-  - Una sola lectura por hoja por ejecución (`repo_readTable_` memoiza por `ssId + tabName`).
-  - Cachés entre requests invalidadas por **versión de datos** (`dataVersion_()` / `bumpDataVersion_()`), que se incrementa en cada escritura y en cada recarga de página.
-  - El catálogo `TIPOS DE SERVICIOS` se lee **sin caché** a propósito: una fila nueva debe verse de inmediato.
-  - `api_bootstrap` concentra en un solo round-trip todo lo que necesita el formulario (catálogo, clientes, empleados, código tentativo).
-- **Documentos**: la plantilla `.xlsx` se convierte una vez a Google Sheet nativo; cada documento se genera copiando esa plantilla, escribiendo celda por celda según `CELLMAP()` y exportando a `.xlsx`. Al editar, se **sobrescribe el mismo archivo** (`Drive.Files.update`), nunca se crean duplicados.
-- **Frontend sin frameworks**: JS vanilla organizado en módulos compartidos (`KGP.catalog`, `KGP.ui`, `KGP.entityModal`, `KGP.servicioModal`, `KGP.localCache`, `KGP.nav`) definidos en `ui/JsCore.js.html`.
-- **Stale-while-revalidate**: Dashboard y "Gestionar cotización" pintan de inmediato la última versión guardada en `localStorage` y en paralelo piden los datos frescos al servidor. El detalle de edición **nunca** usa caché.
+  - Una sola lectura por hoja y por ejecución (`repo_readTable_`); las escrituras actualizan esa copia en memoria en vez de obligar a releer la hoja, y agrupan las columnas contiguas en un solo `setValues`.
+  - `CFG_()` se construye una vez por ejecución; `normText_` está memoizada.
+  - Cachés entre peticiones invalidadas por **versión de datos** (`dataVersion_`).
+  - Documentos: el formato de texto y el vaciado de celdas van en lote (`RangeList`), la mitad de llamadas que celda por celda.
+  - Sin escaneos de hojas completas en la carga de la página (el código tentativo sale de la marca de agua).
+- **OIS y OIP comparten código** (`41_OrdenComun.js`): un adaptador `ord_spec_(tipo)` declara lo que las distingue; los archivos de cada orden solo exponen sus funciones públicas.
+- **Documentos**: la plantilla `.xlsx` se convierte una vez a Google Sheet nativo; cada documento se genera sobre una copia temporal y al editar se **sobrescribe el mismo archivo** (nunca se crean duplicados).
+- **Frontend sin frameworks**: módulos compartidos en `ui/JsCore.js.html` (`KGP.apiCall`, `KGP.catalog`, `KGP.ui`, `KGP.entityModal`, `KGP.servicioModal`, `KGP.tareaModal`, `KGP.localCache`, `KGP.nav`, `KGP.cfg`).
 
 ## Estructura del repositorio
 
 ```
 kgp-panel/
-├── .clasp.json            # Vincula el proyecto local con el script de Apps Script (rootDir: src)
-├── .claspignore           # Solo se suben .js, .html y appsscript.json
-├── CLAUDE.md              # Reglas de trabajo y decisiones de diseño detalladas
-├── .claude/skills/        # Skills de Claude Code (copias reales, listas al clonar)
-├── .agents/skills/        # Las mismas skills en formato del CLI `skills`
-├── skills-lock.json       # Origen y hash de cada skill
+├── .clasp.json / .claspignore   # Vínculo con Apps Script (rootDir: src) y qué se sube
+├── .gitattributes               # Finales de línea LF
+├── CLAUDE.md                    # Reglas de trabajo y decisiones de diseño detalladas
+├── .claude/skills/, .agents/skills/, skills-lock.json   # Skills de IA versionadas
 ├── assets/
-│   └── LOGO KGP.png
+│   ├── LOGO KGP.png
+│   └── Plantilla Correo KGP (standalone).html   # Diseño fuente de los correos
 └── src/
-    ├── appsscript.json        # Manifiesto: zona horaria, scopes OAuth, Drive API v2, config de webapp
-    ├── 00_Config.js           # CFG(), SCHEMA(), CELLMAP()
-    ├── 01_Result.js           # ok_, fail_, safeCall_
-    ├── 02_Utils.js            # Normalización de texto, fechas, helpers
-    ├── 03_Cache.js            # dataVersion_, helpers de CacheService
-    ├── 10_SheetRepo.js        # Lectura/escritura genérica de hojas por encabezado
-    ├── 11_CatalogRepo.js      # Catálogo TIPOS DE SERVICIOS (tipo ↔ UNSPSC)
-    ├── 12_ClientRepo.js       # Clientes, contactos, establecimientos
-    ├── 13_QuoteRepo.js        # COTIZACIONES y SERVICIOS
-    ├── 14_EmpleadoRepo.js     # PERSONAL_KGP
-    ├── 15_OisRepo.js          # OIS y TAREAS_OIS
-    ├── 20_Ids.js              # IDs internos y consecutivos CTZ/OIS
-    ├── 21_Validation.js       # Validación de payloads
-    ├── 30_QuoteService.js     # Crear/editar cotizaciones, altas rápidas, estados
-    ├── 31_DocService.js       # Generación/regeneración de documentos .xlsx
-    ├── 32_DashboardService.js # Snapshot y consultas del dashboard
-    ├── 33_ErrorLog.js         # Registro en la hoja _ERRORES
-    ├── 34_EmpleadoService.js  # CRUD de empleados
-    ├── 35_OisService.js       # Aprobación con OIS, tareas, estado derivado
-    ├── 50_WebApp.js           # doGet, include, endpoints api_*
-    ├── 51_Admin.js            # Funciones admin_* para el editor
-    ├── otherFunctions.js      # Respaldo literal del Code.js original (no se usa ni se modifica)
+    ├── appsscript.json          # Manifiesto: zona horaria, scopes, Drive API v2, webapp
+    ├── 00_Config.js             # CFG_(), SCHEMA_(), CELLMAP_() (valores por defecto)
+    ├── 01_Result.js             # ok_, fail_, safeCall_
+    ├── 02_Utils.js              # Texto, fechas y helpers
+    ├── 03_Cache.js              # CacheService en trozos + versión de datos
+    ├── 04_MailTemplate.js       # Plantilla única de correo, textos, historial
+    ├── 05_MailAssets.js         # Imágenes del correo en base64 (archivo generado)
+    ├── 06_ConfigSheet.js        # Lectura/creación de las hojas CONFIG_*
+    ├── 07_Transaccion.js        # tx_conLock_: sección crítica común
+    ├── 10_SheetRepo.js          # Acceso genérico a hojas por encabezado
+    ├── 11_CatalogRepo.js        # TIPOS DE SERVICIOS (tipo ↔ UNSPSC)
+    ├── 12_ClientRepo.js         # Clientes, contactos, establecimientos
+    ├── 13_QuoteRepo.js          # COTIZACIONES y SERVICIOS
+    ├── 14_EmpleadoRepo.js       # PERSONAL_KGP y PERSONAL_TERCEROS
+    ├── 15_OisRepo.js            # OIS y TAREAS_OIS
+    ├── 16_OipRepo.js            # OIP, TAREAS_OIP y OIP_FACTURACION
+    ├── 20_Ids.js                # IDs internos y consecutivos
+    ├── 21_Validation.js         # Validación de payloads
+    ├── 30_QuoteService.js       # Cotizaciones y altas rápidas
+    ├── 31_DocService.js         # Generación de documentos .xlsx
+    ├── 32_DashboardService.js   # Snapshots del Dashboard
+    ├── 33_ErrorLog.js           # Hoja _ERRORES
+    ├── 34_EmpleadoService.js    # CRUD de empleados
+    ├── 35_OisService.js         # API de la OIS
+    ├── 36_OipService.js         # API de la OIP + facturación
+    ├── 37_OipNotify.js          # Recordatorio mensual de facturación
+    ├── 38_TareaService.js       # Gestionar tareas
+    ├── 39_NotifyService.js      # Cuándo y a quién se envía cada correo
+    ├── 40_ClienteService.js     # Gestión de clientes (listado, detalle, bajas)
+    ├── 41_OrdenComun.js         # Lógica común de OIS y OIP
+    ├── 50_WebApp.js             # doGet, include, endpoints api_*
+    ├── 51_Admin.js              # Funciones admin_* (solo desde el editor)
+    ├── otherFunctions.js        # Respaldo literal del Code.js original (no se usa ni se modifica)
     └── ui/
-        ├── Index.html             # Shell de la SPA + loader de pantalla completa
-        ├── Sidebar.html           # Menú lateral
-        ├── Styles.css.html        # Estilos (paleta blanco + verde oliva, responsive)
-        ├── JsCore.js.html         # Módulos compartidos KGP.*
-        ├── ViewCotizacion.html / JsCotizacion.js.html
-        ├── ViewGestion.html    / JsGestion.js.html
-        ├── ViewOis.html        / JsOis.js.html
-        ├── ViewEmpleados.html  / JsEmpleados.js.html
-        └── ViewDashboard.html  / JsDashboard.js.html
+        ├── Index.html, Sidebar.html, Styles.css.html, JsCore.js.html
+        ├── ViewCotizacion / JsCotizacion     ├── ViewGestion  / JsGestion
+        ├── ViewOis        / JsOis            ├── ViewOip      / JsOip
+        ├── ViewTareas     / JsTareas         ├── ViewClientes / JsClientes
+        ├── ViewEmpleados  / JsEmpleados
+        └── ViewDashboard  / JsDashboard + JsDashboardOrdenes
 ```
+
+Prefijos de funciones (Apps Script tiene un namespace global plano): `repo_`, `cat_`, `cli_`/`con_`/`est_`, `qr_`, `emp_`, `ois_`/`tar_`, `oip_`/`tarp_`/`fac_` (repos); `id_`, `code_`, `validate*_` ; `qs_`, `doc_`, `ds_`, `emps_`, `ord_`, `tg_`, `ntf_`, `oipn_`, `clis_` (servicios); `mail_`, `cfgs_`, `tx_` (base); `api_*`, `admin_*`. Las funciones privadas terminan en `_`.
 
 ## Modelo de datos (Google Sheets)
 
-La base de datos es un spreadsheet (`CFG().DB_SHEET_ID`) con estas pestañas. Los nombres de columna son los que el sistema busca (sin importar tildes ni mayúsculas); las marcadas como *opcionales* degradan funcionalidad puntual si faltan.
+Base de datos (`DB_SHEET_ID`). Los nombres de columna se buscan sin importar tildes ni mayúsculas; las opcionales degradan funcionalidad puntual si faltan.
 
 | Hoja | Una fila por… | Columnas requeridas | Opcionales |
 |---|---|---|---|
 | `COTIZACIONES` | servicio de una cotización | ID COTIZACION, CODIGO, FECHA ELABORACION, PLAZO, FECHA VENCIMIENTO, ID CLIENTE, ID SOLICITANTE, ID ESTABLECIMIENTO, NUMERO SERVICIO, ID SERVICIO, DESCRIPCION, ESTADO | REQUEST ID, URL DOCUMENTO, DOC ESTADO, CREADO POR, ACTUALIZADO EN, DOC FILE ID, SUBTOTAL, IVA, TOTAL, ELABORADO POR, CARGO, REVISADO Y APROBADO POR, ASESOR COMERCIAL, TIEMPO DE ENTREGA |
 | `SERVICIOS` | servicio | ID SERVICIO, ID COTIZACION, TIPO, CODIGO UNSPSC, DESCRIPCION, ACTIVIDADES | TARIFA, CANTIDAD, TOTAL, OBSERVACIONES |
 | `CLIENTES` | cliente | ID CLIENTE, RAZON SOCIAL, TIPO IDENTIFICACION, NUMERO IDENTIFICACION, DIRECCION, CIUDAD, DEPARTAMENTO, PAIS, TELEFONO, CODIGO CIIU, ACTIVIDAD PRINCIPAL, ACTIVO | — |
-| `CONTACTOS_CLIENTES` | contacto | ID CONTACTO, ID CLIENTE, NOMBRE, TELEFONO, CORREO, CARGO | ID ESTABLECIMIENTO |
+| `CONTACTOS_CLIENTES` | contacto | ID CONTACTO, ID CLIENTE, NOMBRE, TELEFONO, CORREO, CARGO | ID ESTABLECIMIENTO (encargado) |
 | `ESTABLECIMIENTOS_CLIENTES` | establecimiento | ID ESTABLECIMIENTO, ID CLIENTE, NOMBRE, DIRECCION, CIUDAD, DEPARTAMENTO, PAIS | — |
-| `PERSONAL_KGP` | empleado | ID EMPLEADO, NOMBRE, CORREO, TELEFONO, CARGO | — |
-| `OIS` | orden | ID OIS, ID COTIZACION, FECHA ELABORACION, CODIGO, PLAZO, FECHA VENCIMIENTO, ESTADO | REQUEST ID, URL DOCUMENTO, DOC ESTADO, ACTUALIZADO EN, ELABORADO POR, ACTUALIZADO POR, DOC FILE ID |
-| `TAREAS_OIS` | tarea | ID TAREA, ID OIS, TAREA, RESPONSABLE, ID EMPLEADO, FECHA INICIO, FECHA ENTREGA, ESTADO, OBSERVACION | — |
-| `_ERRORES` | error registrado | *(se crea sola)* TIMESTAMP, REQUEST ID, ETAPA, USUARIO, ID COTIZACION, IDS GENERADOS, MENSAJE, STACK, PAYLOAD | — |
+| `PERSONAL_KGP` / `PERSONAL_TERCEROS` | persona | ID EMPLEADO, NOMBRE, CORREO, TELEFONO, CARGO | CEDULA |
+| `OIS` / `OIP` | orden | ID OIS / ID OIP, ID COTIZACION, FECHA ELABORACION, CODIGO, PLAZO, FECHA VENCIMIENTO, ESTADO | REQUEST ID, URL DOCUMENTO, DOC ESTADO, ACTUALIZADO EN, ELABORADO POR, ACTUALIZADO POR, DOC FILE ID |
+| `TAREAS_OIS` / `TAREAS_OIP` | tarea | ID TAREA, ID OIS / ID OIP, TAREA, RESPONSABLE, ID EMPLEADO, FECHA INICIO, FECHA ENTREGA, ESTADO, OBSERVACION | TIPO RESPONSABLE |
+| `OIP_FACTURACION` | mes facturado | ID FACTURACION OIP, ID OIP, MES, YEAR, CUOTA, NUMERO FACTURA, ESTADO | FECHA NOTIFICACION |
+| `_ERRORES` | error | *(se crea sola)* | — |
 
-Además hay un spreadsheet de **catálogo** (`CFG().CAT_SHEET_ID`) con la pestaña `TIPOS DE SERVICIOS`: **columna A = tipo de servicio, columna B = código UNSPSC**, en la misma fila.
-
-Relaciones principales:
+Otros spreadsheets: el de **catálogo y configuración** (`TIPOS DE SERVICIOS`: columna A = tipo, B = UNSPSC, misma fila; y las hojas `CONFIG_*`) y el de **historial de correos** (pestaña `HISTORIAL`).
 
 ```
 CLIENTES 1───* CONTACTOS_CLIENTES
 CLIENTES 1───* ESTABLECIMIENTOS_CLIENTES 1───0..1 CONTACTOS_CLIENTES (encargado)
 COTIZACIONES (por ID COTIZACION) 1───* SERVICIOS
-COTIZACIONES 1───0..1 OIS 1───* TAREAS_OIS
-PERSONAL_KGP ──► responsables de tareas y trazabilidad de cotizaciones
+COTIZACIONES 1───0..1 (OIS | OIP) 1───* TAREAS_*      OIP 1───* OIP_FACTURACION
+PERSONAL_KGP / PERSONAL_TERCEROS ──► responsables de tareas y trazabilidad
 ```
+
+## Configuración
+
+**Nada se configura editando el código.** Todo parámetro tiene un valor por defecto en `CFG_()` / `CELLMAP_()` / `mail_textosDefault_()` y se puede sobrescribir en las hojas del spreadsheet de catálogo:
+
+| Hoja | Contenido |
+|---|---|
+| `CONFIG_LEEME` | Instrucciones de edición. |
+| `CONFIG_IDS` | IDs de spreadsheets, carpetas y archivos (con enlace). |
+| `CONFIG_HOJAS` | Nombres de las pestañas. |
+| `CONFIG_GENERAL` | Plazos, IVA, límites, días "por vencer", prefijos de IDs y códigos, Dashboard, caché. |
+| `CONFIG_CORREO` | Destinatarios, remitente, firma y pie de los correos. |
+| `CONFIG_CORREO_TEXTOS` | Asunto, título, párrafos, botón y datos destacados de cada correo. |
+| `CONFIG_CELDAS` | Mapa de celdas de la plantilla. |
+
+- Se leen **en cada carga de la página** y se guardan en caché para el resto de la sesión.
+- Una celda vacía o un valor que no se puede interpretar se ignora (queda el valor del código): la app nunca se cae por la configuración. `admin_verConfig()` lista lo que se ignoró.
+- `admin_crearHojasConfig()` crea las hojas y agrega las filas de parámetros nuevos **sin tocar los valores ya escritos**.
+
+Propiedades del script (automáticas): `TEMPLATE_SHEET_ID`, `TEMPLATE_TAB_*`, marcas de agua `SEQ_YY` / `SEQ_OIS_YY` / `SEQ_OIP`, `DATA_VERSION`, `OIP_NOTIF_LAST`, `NTF_PEND_*`.
+
+## Correos
+
+Todos usan **una sola plantilla** (`src/04_MailTemplate.js`, diseño de `assets/Plantilla Correo KGP (standalone).html`) y se registran en la hoja `HISTORIAL`.
+
+| Correo | Cuándo | A quién |
+|---|---|---|
+| Cotización creada | Al generarse su documento | Quien la creó |
+| Cotización aprobada | Al generarse el documento de su OIS/OIP | Quien la creó |
+| Cotización rechazada | Al rechazarla | Quien la creó |
+| Tarea asignada | Al crear una tarea | Su responsable (interno o tercero) |
+| Recordatorio de facturación OIP | Día 1 de cada mes | `OIP_NOTIF_EMAIL` |
+
+Un correo que falla nunca rompe la operación que lo disparó; queda en `_ERRORES`. Para ver cómo se ven: `admin_probarCorreos('correo@dominio.com')`.
+
+## Seguridad
+
+- La web app se ejecuta como el propietario (`executeAs: USER_DEPLOYING`). `google.script.run` puede invocar cualquier función global que **no** termine en `_`, por eso:
+  - la configuración (`CFG_`, `SCHEMA_`, `CELLMAP_`) y toda la lógica interna son privadas;
+  - las `admin_*` solo corren si quien las ejecuta es la cuenta dueña del proyecto (`admin_soloEditor_`), es decir, desde el editor;
+  - el navegador solo recibe los parámetros numéricos/etiquetas que necesita (`cfgs_clientConfig_`), nunca IDs ni correos de configuración.
+- Todo texto que llega del servidor se escapa antes de insertarse en el HTML (`KGP.escapeHtml`) y en los correos (`mail_esc_`).
+- El acceso a la URL lo define la implementación (`ANYONE` en el manifiesto). Si la cuenta es de Google Workspace, se recomienda restringirlo al dominio.
 
 ## Instalación paso a paso
 
-### Requisitos previos
+### Requisitos
 
-- Una cuenta de Google (Workspace o personal) con acceso de edición a:
-  - el spreadsheet de base de datos,
-  - el spreadsheet de catálogo,
-  - la plantilla `.xlsx` de cotización (con las pestañas `CTZ-V-4` y `OIS V-4`),
-  - las carpetas de Drive de salida (cotizaciones y OIS).
-- [Node.js](https://nodejs.org/) 18 o superior.
-- [clasp](https://github.com/google/clasp) (CLI oficial de Apps Script).
-- Git.
+- Cuenta de Google con acceso de edición a los spreadsheets (BD, catálogo/configuración, historial), la plantilla `.xlsx` (pestañas `CTZ-V-4`, `OIS V-4`, `OIP V-4`) y las carpetas de salida.
+- [Node.js](https://nodejs.org/) 18+, [clasp](https://github.com/google/clasp) y Git.
 
-### 1. Clonar el repositorio
+### Pasos
 
 ```bash
 git clone https://github.com/andresmonsalve19/kgp-panel.git
 cd kgp-panel
-```
-
-### 2. Instalar y autenticar clasp
-
-```bash
 npm install -g @google/clasp
-clasp login
-```
-
-Además, activa la **Google Apps Script API** para tu cuenta en <https://script.google.com/home/usersettings>.
-
-### 3. Vincular con un proyecto de Apps Script
-
-**Opción A — usar el proyecto existente** (si tienes acceso de editor): `.clasp.json` ya apunta a él, no hay que hacer nada.
-
-**Opción B — crear un proyecto nuevo** (por ejemplo, un entorno de pruebas):
-
-```bash
-clasp create --type standalone --title "KGP Panel" --rootDir src
-```
-
-Revisa que `.clasp.json` quede con `"rootDir": "src"` y el nuevo `scriptId`.
-
-### 4. Preparar Google Sheets y Drive
-
-1. Crea (o ubica) el spreadsheet de **base de datos** con las pestañas y encabezados de la sección [Modelo de datos](#modelo-de-datos-google-sheets). La hoja `_ERRORES` no es necesaria: se crea sola.
-2. Crea (o ubica) el spreadsheet de **catálogo** con la pestaña `TIPOS DE SERVICIOS` (A = tipo, B = UNSPSC).
-3. Sube la **plantilla `.xlsx`** a Drive.
-4. Crea las carpetas de salida para documentos de **cotizaciones** y de **OIS**.
-5. Copia los IDs (la parte de la URL entre `/d/` y `/edit`, o después de `/folders/`) en `CFG()` dentro de [src/00_Config.js](src/00_Config.js):
-
-   ```js
-   DB_SHEET_ID:      '...',  // spreadsheet de base de datos
-   CAT_SHEET_ID:     '...',  // spreadsheet de catálogo
-   TEMPLATE_FILE_ID: '...',  // plantilla .xlsx
-   OUT_FOLDER_ID:    '...',  // carpeta de documentos de cotización
-   OIS_FOLDER_ID:    '...',  // carpeta raíz de las OIS
-   ```
-
-### 5. Subir el código
-
-```bash
+clasp login            # y activar la Apps Script API en https://script.google.com/home/usersettings
 clasp push --force
 ```
 
-El manifiesto [src/appsscript.json](src/appsscript.json) ya habilita el servicio avanzado **Drive API v2** y declara los scopes necesarios.
+`.clasp.json` ya apunta al proyecto existente; para un entorno nuevo: `clasp create --type standalone --title "KGP Panel" --rootDir src`.
 
-### 6. Preparar la plantilla (una sola vez)
+Luego, desde el editor de Apps Script (**Ejecutar → seleccionar función**):
 
-Abre el editor (`clasp open` o desde script.google.com) y ejecuta, en este orden, desde **Ejecutar → seleccionar función**:
-
-1. `admin_convertTemplate()` — convierte la plantilla `.xlsx` a Google Sheet nativo y guarda su ID en las *Propiedades del script* (`TEMPLATE_SHEET_ID`). La primera ejecución pide autorizar los permisos.
-2. `admin_smokeTestTemplate()` — genera un `.xlsx` vacío en la carpeta de salida. Ábrelo y compáralo visualmente con la plantilla original (bordes, imágenes, validaciones).
-3. `admin_health()` — verifica que todas las hojas tengan las columnas requeridas y que la plantilla tenga las pestañas esperadas. Revisa el resultado en **Ver → Registros**.
-4. Si la pestaña de cotización no es la primera de la plantilla, o la de OIS no se llama `OIS V-4`, corrígelas:
-
-   ```js
-   admin_setTemplateTabName('CTZ-V-4');
-   admin_setOisTabName('OIS V-4');
-   ```
-
-### 7. Desplegar como Web App
-
-1. En el editor: **Implementar → Nueva implementación → Tipo: Aplicación web**.
-2. *Ejecutar como*: **Yo** (el propietario). *Quién tiene acceso*: según la política de la empresa (el manifiesto usa `ANYONE`; en Workspace suele restringirse al dominio).
-3. Copia la URL `/exec` y compártela con los usuarios.
-
-### 8. Registrar al personal
-
-Entra a **Gestión de empleados** y registra a las personas que usarán el panel, con el **mismo correo** con el que inician sesión en Google: así el sistema llena automáticamente "Elaborado por" y "Cargo" al crear cotizaciones.
+1. `admin_convertTemplate()` — convierte la plantilla a Google Sheet nativo (una vez).
+2. `admin_crearHojasConfig()` — crea las hojas `CONFIG_*`; ajusta allí los IDs de la BD, carpetas, etc.
+3. `admin_health()` — verifica hojas, columnas y pestañas de la plantilla.
+4. `admin_installOipFacturacionTrigger()` — instala el recordatorio mensual de la OIP.
+5. **Implementar → Nueva implementación → Aplicación web** (Ejecutar como: Yo).
+6. En **Gestión de empleados**, registra al personal con el mismo correo con el que inicia sesión en Google (así se llena "Elaborado por").
 
 ## Despliegue y actualizaciones
 
@@ -307,79 +260,61 @@ Entra a **Gestión de empleados** y registra a las personas que usarán el panel
 clasp push --force
 ```
 
-- La URL de desarrollo (`/dev`) refleja los cambios **al instante** (solo para editores del script).
-- La URL de producción (`/exec`) **no cambia** hasta publicar una nueva versión: **Implementar → Administrar implementaciones → editar (lápiz) → Versión: "Nueva versión" → Implementar**. Editar solo la descripción no publica el código nuevo.
+- `/dev` refleja los cambios **al instante** (solo editores del script).
+- `/exec` (producción) **no cambia** hasta publicar: **Implementar → Administrar implementaciones → editar → Versión: "Nueva versión" → Implementar**.
 
 ## Funciones de administración
 
-Se ejecutan desde el editor de Apps Script y dejan un resumen legible en **Ver → Registros**.
+Solo desde el editor de Apps Script, con la cuenta dueña del proyecto. Dejan su resumen en **Ver → Registros**.
 
 | Función | Uso |
 |---|---|
-| `admin_convertTemplate()` | Convierte la plantilla `.xlsx` a Sheet nativo (una sola vez; no duplica si ya existe). |
+| `admin_convertTemplate()` | Convierte la plantilla `.xlsx` a Sheet nativo (no duplica si ya existe). |
 | `admin_smokeTestTemplate()` | Genera un documento vacío para validar visualmente la plantilla. |
-| `admin_health()` | Diagnóstico de hojas, columnas, catálogo y plantilla. También disponible como `api_health()`. |
-| `admin_setTemplateTabName(nombre)` | Fija la pestaña de la plantilla de cotización. |
-| `admin_setOisTabName(nombre)` | Fija la pestaña de la plantilla de OIS. |
-| `admin_dumpSample()` | Muestra 3 filas reales por hoja para verificar el mapeo de columnas. |
-| `admin_cleanTempFiles()` | Borra archivos temporales `__TMP_*` de más de 24 h que hayan quedado huérfanos. |
-| `admin_clearCaches()` | Invalida todas las cachés del servidor. |
-
-## Configuración
-
-Toda la configuración vive en [src/00_Config.js](src/00_Config.js), dentro de funciones (nunca a nivel top-level):
-
-- **`CFG()`** — IDs de Sheets/Drive, nombres de pestañas, límites (`MAX_SERVICIOS: 10`, `MAX_ACTIVIDADES: 10`, `MAX_TAREAS: 20`, lock de 30 s…), estados, tasa de IVA (`0.19`), TTLs de caché y zona horaria (`America/Bogota`).
-- **`SCHEMA()`** — columnas requeridas y opcionales de cada hoja.
-- **`CELLMAP()`** — celda exacta de la plantilla donde se escribe cada dato. Los servicios se repiten cada 18 filas a partir de la fila 39 (servicio #1 en la 39, #10 en la 201); las tarifas van en una fila por servicio desde la 223; las tareas de OIS desde la 229.
-
-Valores guardados en **Propiedades del script** (Configuración del proyecto → Propiedades del script):
-
-| Propiedad | Descripción |
-|---|---|
-| `TEMPLATE_SHEET_ID` | ID de la plantilla convertida (lo escribe `admin_convertTemplate`). |
-| `TEMPLATE_TAB_NAME` | Pestaña de cotización de la plantilla (opcional). |
-| `TEMPLATE_TAB_OIS` | Pestaña de OIS (por defecto `OIS V-4`). |
-| `SEQ_YY`, `SEQ_OIS_YY` | Marcas de agua de los consecutivos por año (automáticas). |
+| `admin_health()` | Diagnóstico de hojas, columnas, catálogo y plantilla. |
+| `admin_setTemplateTabName / admin_setOisTabName / admin_setOipTabName(nombre)` | Fijan la pestaña de la plantilla de cada documento. |
+| `admin_crearHojasConfig()` | Crea/completa las hojas `CONFIG_*` sin pisar valores. |
+| `admin_verConfig()` | Configuración efectiva y lo que se ignoró. |
+| `admin_probarCorreos(destino)` | Envía un ejemplo de cada correo. |
+| `admin_installOipFacturacionTrigger()` / `admin_listTriggers()` | Instala / lista el recordatorio mensual. |
+| `admin_probarRecordatorioOip()` | Corre el recordatorio ya (crea filas y envía el correo de verdad). |
+| `admin_dumpSample()` | 3 filas reales por hoja para verificar el mapeo de columnas. |
+| `admin_cleanTempFiles()` | Borra temporales `__TMP_*` huérfanos de más de 24 h. |
+| `admin_clearCaches()` | Invalida las cachés y relee la configuración. |
 
 ## Convenciones de desarrollo
 
-Las reglas completas están en [CLAUDE.md](CLAUDE.md). Las más importantes:
+Las reglas completas están en [CLAUDE.md](CLAUDE.md). Las principales:
 
-- **Cero código ejecutable a nivel top-level** en el servidor: el orden en que `clasp` sube los archivos no debe importar.
-- **No tocar ni reutilizar nombres de** `src/otherFunctions.js` (respaldo del código original; la lista de nombres reservados está en el encabezado de `00_Config.js`).
-- **Resolver columnas siempre por nombre normalizado** (`normText_`), nunca por índice.
-- **Toda `api_*` pasa por `safeCall_`** y devuelve `{ok, data, error, meta}`; nunca debe cruzar un `undefined` por `google.script.run`.
-- **Lock corto**: solo reserva de consecutivo + escrituras en hojas; la generación de documentos va fuera.
-- **Reutilizar los módulos de frontend** `KGP.catalog`, `KGP.ui`, `KGP.entityModal` en lugar de duplicar modales, selects o llamadas a `api_bootstrap`.
-- **Loader**: `#page-loader` solo para la carga inicial; las acciones puntuales usan su propio estado de carga (spinner en el botón).
-- **Menú lateral** en orden fijo: Crear cotización → Gestionar cotización → Gestionar OIS → Gestión de empleados → **Dashboard (siempre de último)**.
-- **Diseño**: paleta blanco + verde oliva (`--primary: #6b7c3f`), breakpoint móvil `760px` con texto centrado.
-- **Verificar sintaxis** de los `.html` con script embebido antes de subir: extraer el `<script>` a un `.js` temporal y correr `node --check`.
+- **Nunca un valor quemado en el código**: todo parámetro va a `CFG_()`/`CELLMAP_()` y a su fila en `cfgs_catalogo_()`; el navegador lo lee con `KGP.cfg`.
+- **Cero código ejecutable a nivel top-level** en el servidor (solo constantes literales).
+- **No tocar `src/otherFunctions.js`** ni reutilizar sus nombres.
+- **Columnas por nombre normalizado** (`normText_`), nunca por índice.
+- **Escrituras dentro de `tx_conLock_`**; documentos y correos fuera del lock.
+- **Toda `api_*` pasa por `safeCall_`**; las funciones internas terminan en `_`.
+- **Reutilizar los módulos `KGP.*`** antes de escribir un modal, un select o una llamada nueva.
+- **Correos**: siempre con `mail_enviar_` y textos en `mail_textosDefault_`.
+- **Menú lateral**: Dashboard siempre de último.
+- **Antes de subir**: `node --check` de cada `.js` y de los `<script>` de los `.html`, y `clasp push --force`.
 
-### Skills de IA incluidas en el repositorio
+### Skills de IA incluidas
 
-El proyecto trae versionadas las skills de diseño de UI que se usan con Claude Code: `better-ui`, `frontend-design`, `interaction-design`, `interface-design` y `web-design-guidelines`.
-
-- `.claude/skills/`: la carpeta que lee Claude Code. Al clonar el repo y abrirlo con Claude Code, las skills ya quedan disponibles sin instalar nada.
-- `.agents/skills/`: la misma copia en el formato del CLI [`skills`](https://github.com/vercel-labs/skills), para otros agentes.
-- `skills-lock.json`: origen (repositorio de GitHub) y hash de cada skill.
-
-En `.claude/skills/` hay **copias reales, no enlaces simbólicos**: los enlaces que crea el CLI apuntan a rutas absolutas de un equipo y se rompen al clonar en otro. Si actualizas o agregas una skill con el CLI, vuelve a copiar su carpeta de `.agents/skills/<skill>` a `.claude/skills/<skill>` antes de hacer commit.
+`.claude/skills/` (las lee Claude Code), `.agents/skills/` (mismo contenido para el CLI `skills`) y `skills-lock.json` (origen y hash). Son copias reales, no enlaces simbólicos.
 
 ## Solución de problemas
 
 | Síntoma | Causa probable / solución |
 |---|---|
-| Aviso "La plantilla del documento aún no se ha preparado" | Falta ejecutar `admin_convertTemplate()`. |
-| La cotización se crea pero `DOC ESTADO = ERROR` | Revisa la hoja `_ERRORES`. Luego usa "Guardar cambios" (o `api_regenerateDocument`) para reintentar; se reutiliza el mismo archivo. |
-| "El sistema está ocupado. Intenta de nuevo en unos segundos." | Otro usuario tiene el lock de escritura. Reintenta; el lock dura como máximo 30 s. |
-| Faltan columnas / errores de esquema | Ejecuta `admin_health()` y agrega las columnas indicadas como requeridas. |
-| Cambios hechos a mano en el Sheet no se ven | Recarga la página (F5): cada recarga invalida las cachés. Si persiste, ejecuta `admin_clearCaches()`. |
-| Los cambios de código no se ven en `/exec` | Publica una **Nueva versión** de la implementación (ver [Despliegue](#despliegue-y-actualizaciones)). |
-| "Elaborado por" queda vacío | El correo del usuario no está registrado en **Gestión de empleados**. |
-| Archivos `__TMP_*` en Drive | Restos de ejecuciones interrumpidas; `admin_cleanTempFiles()` los limpia. |
+| "La plantilla del documento aún no se ha preparado" | Falta `admin_convertTemplate()`. |
+| `DOC ESTADO = ERROR` | Revisa `_ERRORES`; "Guardar cambios" (o "Regenerar") reintenta sobre el mismo archivo. |
+| "El sistema está ocupado" | Otro usuario tiene el lock de escritura (máx. 30 s). Reintenta. |
+| Errores de esquema / columnas faltantes | `admin_health()` y agregar las columnas indicadas. |
+| Cambios hechos a mano en el Sheet no se ven | Recarga la página (F5). Si persiste, `admin_clearCaches()`. |
+| Un cambio en `CONFIG_*` no se aplica | Recarga la página; `admin_verConfig()` dice si el valor se ignoró. |
+| Los cambios de código no se ven en `/exec` | Publica una **Nueva versión** de la implementación. |
+| "Elaborado por" vacío o no llega el correo al creador | El correo del usuario no está en **Gestión de empleados**, o Google no expone el correo de usuarios externos al dominio. |
+| Una función `admin_*` dice que solo se ejecuta desde el editor | Ejecútala desde el editor de Apps Script con la cuenta dueña del proyecto. |
 
 ---
 
-**Stack:** Google Apps Script (V8) · HtmlService · Google Sheets · Google Drive API v2 · CacheService / PropertiesService / LockService · HTML/CSS/JavaScript vanilla · clasp
+**Stack:** Google Apps Script (V8) · HtmlService · Google Sheets · Google Drive API v2 · CacheService / PropertiesService / LockService · MailApp · HTML/CSS/JavaScript vanilla · clasp

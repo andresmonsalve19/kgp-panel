@@ -11,6 +11,12 @@
 
 var repo_memoCache_ = null; // objeto vivo solo durante la ejecución actual del script
 
+/**
+ * Memo de la ejecución actual: tablas leídas, CFG_() construida, índices.
+ * Cada llamada de google.script.run es una ejecución nueva, así que nunca
+ * sirve datos de otra petición.
+ * @return {!Object}
+ */
 function repo_memo_() {
   if (!repo_memoCache_) repo_memoCache_ = {};
   return repo_memoCache_;
@@ -23,6 +29,11 @@ function repo_clearMemo_(ssId, tabName) {
   delete memo[key];
 }
 
+/**
+ * Hoja `tabName` del spreadsheet `ssId`.
+ * @throws {AppError_} SCHEMA si el spreadsheet no abre o la hoja no existe
+ *     (el mensaje lista las hojas disponibles).
+ */
 function repo_openSheet_(ssId, tabName) {
   var ss;
   try {
@@ -202,55 +213,102 @@ function repo_findRowByCol_(table, colName, value) {
 
 /**
  * Actualiza celdas puntuales de una fila ya existente, por nombre de
- * columna. patchObj: {NOMBRE_COL: nuevoValor}. rowIndex es el número de
- * fila real (1-based) en el sheet (viene de row.__row).
+ * columna. Atajo de repo_updateCellsMany_ para una sola fila.
+ *
+ * @param {string} ssId
+ * @param {string} tabName
+ * @param {number} rowIndex Fila real (1-based) en el sheet (row.__row).
+ * @param {!Object} patchObj {NOMBRE_COL: nuevoValor}. Columnas que no existan
+ *     en la hoja se ignoran (son opcionales por diseño).
  */
 function repo_updateCells_(ssId, tabName, rowIndex, patchObj) {
-  var table = repo_readTable_(ssId, tabName);
-  var sheet = table.sheet;
-
-  for (var key in patchObj) {
-    var norm = normText_(key);
-    var col = table.hmap[norm];
-    if (!col) continue; // columna no gestionada: se ignora en silencio (es opcional por diseño)
-    var value = patchObj[key];
-    sheet.getRange(rowIndex, col).setValue(value === undefined ? '' : value);
-  }
-  repo_clearMemo_(ssId, tabName);
+  repo_updateCellsMany_(ssId, tabName, [{ rowIndex: rowIndex, patch: patchObj }]);
 }
 
 /**
- * Igual que repo_updateCells_ pero para varias filas de la misma hoja con
- * UNA sola lectura: repo_updateCells_ limpia la memo tras cada llamada, así
- * que llamarlo en un bucle relee la hoja completa una vez por fila (p. ej.
- * las hasta 20 tareas de una OIS). updates: [{rowIndex, patch}].
+ * Actualiza celdas de varias filas de la misma hoja con UNA sola lectura.
+ *
+ * Eficiencia:
+ *   - Por fila, las columnas tocadas que quedan contiguas se escriben con un
+ *     solo setValues (p. ej. 13 campos de una cotización = 2-3 llamadas en vez
+ *     de 13). Las que no son contiguas se escriben aparte: NUNCA se reescribe
+ *     una celda que no esté en el patch (podría tener una fórmula o un dato
+ *     que otro proceso acaba de cambiar).
+ *   - La memo de repo_readTable_ se actualiza EN SITIO con los valores
+ *     escritos en vez de descartarse, así una segunda actualización de la
+ *     misma hoja en esta ejecución no vuelve a leerla entera (antes, editar
+ *     una cotización de 10 servicios releía COTIZACIONES ~20 veces).
+ *
+ * @param {string} ssId
+ * @param {string} tabName
+ * @param {!Array<{rowIndex: number, patch: !Object}>} updates
  */
 function repo_updateCellsMany_(ssId, tabName, updates) {
   if (!updates || !updates.length) return;
   var table = repo_readTable_(ssId, tabName);
   var sheet = table.sheet;
+
   updates.forEach(function (u) {
+    var porCol = {};
     for (var key in u.patch) {
-      var col = table.hmap[normText_(key)];
-      if (!col) continue; // columna no gestionada: se ignora (mismo criterio que repo_updateCells_)
+      var norm = normText_(key);
+      var col = table.hmap[norm];
+      if (!col) continue; // columna no gestionada: se ignora (opcional por diseño)
       var value = u.patch[key];
-      sheet.getRange(u.rowIndex, col).setValue(value === undefined ? '' : value);
+      porCol[col] = { norm: norm, value: (value === undefined || value === null) ? '' : value };
+    }
+    var cols = Object.keys(porCol).map(Number).sort(function (a, b) { return a - b; });
+
+    // Tramos de columnas contiguas -> un setValues por tramo.
+    var i = 0;
+    while (i < cols.length) {
+      var j = i;
+      while (j + 1 < cols.length && cols[j + 1] === cols[j] + 1) j++;
+      var fila = [];
+      for (var k = i; k <= j; k++) fila.push(porCol[cols[k]].value);
+      sheet.getRange(u.rowIndex, cols[i], 1, fila.length).setValues([fila]);
+      i = j + 1;
+    }
+
+    // Memo en sitio (rows[] y values[] están indexados por fila - 2).
+    var row = table.rows[u.rowIndex - 2];
+    var raw = table.values[u.rowIndex - 2];
+    if (row && row.__row === u.rowIndex) {
+      cols.forEach(function (c) {
+        row[porCol[c].norm] = porCol[c].value;
+        if (raw) raw[c - 1] = porCol[c].value;
+      });
+    } else {
+      repo_clearMemo_(ssId, tabName); // fila fuera de la memo: que la próxima lectura vea el sheet real
     }
   });
-  repo_clearMemo_(ssId, tabName);
 }
 
 /**
  * Elimina filas físicas de una hoja (p. ej. al quitar un servicio de una
  * cotización en edición). Borra de abajo hacia arriba para que eliminar una
- * fila no corra los índices de las que faltan por borrar. Limpia la memo
- * para que la siguiente lectura en esta misma ejecución vea el sheet real.
+ * fila no corra los índices de las que faltan por borrar, y agrupa las filas
+ * consecutivas en un solo deleteRows. Limpia la memo para que la siguiente
+ * lectura en esta misma ejecución vea el sheet real.
+ *
+ * @param {string} ssId
+ * @param {string} tabName
+ * @param {!Array<number>} rowIndexes Filas reales (1-based).
  */
 function repo_deleteRows_(ssId, tabName, rowIndexes) {
   if (!rowIndexes || !rowIndexes.length) return;
   var sheet = repo_openSheet_(ssId, tabName);
-  var sorted = rowIndexes.slice().sort(function (a, b) { return b - a; });
-  sorted.forEach(function (r) { sheet.deleteRow(r); });
+  var sorted = rowIndexes.slice()
+    .sort(function (a, b) { return b - a; })
+    .filter(function (r, idx, arr) { return idx === 0 || r !== arr[idx - 1]; }); // una fila repetida se borraría dos veces
+  var i = 0;
+  while (i < sorted.length) {
+    var j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] - 1) j++;
+    if (sorted[i] === sorted[j]) sheet.deleteRow(sorted[i]);
+    else sheet.deleteRows(sorted[j], sorted[i] - sorted[j] + 1);
+    i = j + 1;
+  }
   repo_clearMemo_(ssId, tabName);
 }
 

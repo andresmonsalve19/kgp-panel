@@ -1,0 +1,137 @@
+<!-- Vista "Gestión de clientes" (data-nav="clientes"): listado de todas las
+     empresas clientes y su detalle — datos de la empresa, contactos,
+     establecimientos (con su encargado) e historial de cotizaciones.
+     Lógica en ui/JsClientes.js.html; servidor en 40_ClienteService.js.
+     Altas/ediciones reutilizan KGP.entityModal (plantillas tpl-modal-cliente
+     / -contacto / -establecimiento de ViewCotizacion.html, que son globales).
+     Mismo patrón listado <-> detalle que "Gestionar cotización": el detalle
+     bloquea con #cli-detail-loading hasta tener los datos (CLAUDE.md §3). -->
+<section class="view" id="view-clientes">
+  <div class="page-header">
+    <div>
+      <h1>Gestión de clientes</h1>
+      <div class="desc">Consulta y administra las empresas clientes: sus datos, contactos, establecimientos y cotizaciones.</div>
+    </div>
+  </div>
+
+  <!-- ---------- Estado: listado ---------- -->
+  <div id="cli-list-wrap">
+    <div class="card">
+      <div class="filters-row">
+        <input type="text" class="search-input" id="cli-search" placeholder="Buscar por razón social, identificación o ciudad…">
+        <select id="cli-page-size" title="Resultados por página">
+          <option value="10">10 / página</option>
+          <option value="20">20 / página</option>
+          <option value="50">50 / página</option>
+        </select>
+        <button type="button" class="btn btn-sm" id="cli-refresh-btn">
+          <span id="cli-refresh-spinner" style="display:none;" class="spinner dark"></span>
+          Actualizar
+        </button>
+        <button type="button" class="btn btn-primary btn-sm" id="cli-nuevo-btn">+ Nuevo cliente</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Razón social</th>
+              <th>Identificación</th>
+              <th>Ciudad</th>
+              <th>Teléfono</th>
+              <th>Contactos</th>
+              <th>Establec.</th>
+              <th>Cotizaciones</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="cli-tbody">
+            <tr><td colspan="8" class="empty-state">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination-row">
+        <span id="cli-page-info">—</span>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn btn-sm" id="cli-prev">← Anterior</button>
+          <button type="button" class="btn btn-sm" id="cli-next">Siguiente →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------- Estado: detalle de un cliente ---------- -->
+  <div id="cli-detail-wrap" hidden>
+    <div id="cli-detail-loading" class="detail-loading">
+      <span class="spinner-lg"></span>
+      <div class="page-loader-text">Cargando cliente…</div>
+    </div>
+
+    <div id="cli-detail-content" hidden>
+      <div class="detail-header-row">
+        <button type="button" class="back-link" id="cli-back-btn">← Volver al listado</button>
+        <div class="detail-header-actions" id="cli-detail-actions"></div>
+      </div>
+
+      <!-- Datos de la empresa -->
+      <div class="card">
+        <div class="section-title-row">
+          <div>
+            <div class="section-title" id="cli-det-nombre">—</div>
+            <div class="cell-muted" id="cli-det-ident">—</div>
+          </div>
+          <span class="badge badge-neutral" id="cli-det-inactivo" hidden>Inactivo</span>
+        </div>
+        <div class="resumen-meta-row" id="cli-det-datos"></div>
+      </div>
+
+      <!-- Contactos -->
+      <div class="card">
+        <div class="section-title-row">
+          <div class="section-title">Contactos <span class="cell-muted" id="cli-con-count"></span></div>
+          <button type="button" class="btn btn-sm btn-ghost-primary" id="cli-con-nuevo">+ Agregar contacto</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Nombre</th><th>Cargo</th><th>Teléfono</th><th>Correo</th><th>Encargado de</th><th>Cotizaciones</th><th>Acciones</th></tr>
+            </thead>
+            <tbody id="cli-con-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Establecimientos -->
+      <div class="card">
+        <div class="section-title-row">
+          <div class="section-title">Establecimientos <span class="cell-muted" id="cli-est-count"></span></div>
+          <button type="button" class="btn btn-sm btn-ghost-primary" id="cli-est-nuevo">+ Agregar establecimiento</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Nombre</th><th>Dirección</th><th>Ciudad / Depto. / País</th><th>Encargado</th><th>Cotizaciones</th><th>Acciones</th></tr>
+            </thead>
+            <tbody id="cli-est-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Historial de cotizaciones (solo lectura; "Gestionar →" abre la cotización) -->
+      <div class="card">
+        <div class="section-title-row">
+          <div class="section-title">Cotizaciones <span class="cell-muted" id="cli-cot-count"></span></div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>Código</th><th>Elaboración</th><th>Estado</th><th>Total</th><th></th></tr>
+            </thead>
+            <tbody id="cli-cot-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

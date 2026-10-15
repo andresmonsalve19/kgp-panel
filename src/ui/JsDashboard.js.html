@@ -45,8 +45,11 @@ window.KGP = window.KGP || {};
   // Constantes
   // ===================================================================
 
-  var POLL_BASE_MS = 30000;
-  var POLL_BACKOFF_MS = [30000, 60000, 120000, 300000];
+  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG_().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
+  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_COTIZACION', 7); // = CFG_().DIAS_POR_VENCER_COTIZACION
+  var DIAS_RECIENTES = KGP.cfg('DIAS_RECIENTES_COTIZACION', 7);   // = CFG_().DIAS_RECIENTES_COTIZACION (KPI "Recién creadas")
+  // Tras errores seguidos se espera cada vez más (x1, x2, x4, x10 el intervalo base).
+  var POLL_BACKOFF_MS = [1, 2, 4, 10].map(function (k) { return POLL_BASE_MS * k; });
   var SEARCH_DEBOUNCE_MS = 220;
   var MAX_BARRAS_FECHA = 12;   // columnas de "Cotizaciones creadas"
   var MAX_VIGENCIA = 6;        // filas de "Ventana de vigencia"
@@ -137,7 +140,7 @@ window.KGP = window.KGP || {};
     vigenciaClass: function (dias) {
       if (dias == null) return '';
       if (dias < 0) return 'overdue';
-      if (dias <= 7) return 'soon';
+      if (dias <= DIAS_POR_VENCER) return 'soon';
       return '';
     },
 
@@ -145,7 +148,7 @@ window.KGP = window.KGP || {};
     vigenciaColor: function (dias) {
       if (dias == null) return 'var(--border-strong)';
       if (dias < 0) return 'var(--danger)';
-      if (dias <= 7) return 'var(--warning)';
+      if (dias <= DIAS_POR_VENCER) return 'var(--warning)';
       return 'var(--primary)';
     },
 
@@ -238,17 +241,17 @@ window.KGP = window.KGP || {};
     {
       id: 'pv', tone: 'warn',
       match: function (c) { return !!c.porVencer; },
-      label: function () { return 'Por vencer (≤7 días)'; },
+      label: function () { return 'Por vencer (≤' + DIAS_POR_VENCER + ' días)'; },
       sub: function (ctx, n) { return n ? 'requieren seguimiento' : 'sin urgencias'; }
     },
     {
       id: 'new', tone: '',
       match: function (c, ctx) {
         var d = Rules.antiguedadDias(c, ctx.hoy);
-        return d != null && d >= 0 && d <= 7;
+        return d != null && d >= 0 && d <= DIAS_RECIENTES;
       },
-      label: function () { return 'Recién creadas (≤7 días)'; },
-      sub: function () { return 'elaboradas esta semana'; }
+      label: function () { return 'Recién creadas (≤' + DIAS_RECIENTES + ' días)'; },
+      sub: function () { return 'elaboradas en los últimos ' + DIAS_RECIENTES + ' días'; }
     },
     {
       id: 'docerr', tone: 'alert',
@@ -286,7 +289,7 @@ window.KGP = window.KGP || {};
       match: function (c) { return !!c.vencidaSinDecision; },
       titulo: function (n) { return n + (n === 1 ? ' cotización vencida sin decisión' : ' cotizaciones vencidas sin decisión'); },
       cuerpo: function () {
-        return 'Pasaron su fecha de vencimiento y siguen en revisión: la garantía ' +
+        return 'Pasaron su fecha de vencimiento y siguen en revisión: la cotización ' +
           'debe aprobarse o rechazarse desde "Gestionar cotización".';
       },
       ok: function () { return 'Ninguna cotización pasó su vencimiento sin decisión.'; }
@@ -1358,8 +1361,19 @@ window.KGP = window.KGP || {};
     };
   }());
 
-  KGP.dashboard.onEnter = Ctrl.onEnter;
-  KGP.dashboard.onLeave = Ctrl.onLeave;
+  // Las pestañas OIS / OIP del Dashboard viven en su propio módulo
+  // (JsDashboardOrdenes.js.html, KGP.dashboardOrdenes): se incluye después de
+  // este archivo, pero onEnter/onLeave solo corren al navegar, cuando ya
+  // cargaron todos los scripts. El módulo de cotizaciones sigue activo
+  // (polling barato por versión) aunque se esté mirando otra pestaña.
+  KGP.dashboard.onEnter = function () {
+    Ctrl.onEnter();
+    if (KGP.dashboardOrdenes) KGP.dashboardOrdenes.onEnter();
+  };
+  KGP.dashboard.onLeave = function () {
+    Ctrl.onLeave();
+    if (KGP.dashboardOrdenes) KGP.dashboardOrdenes.onLeave();
+  };
 
 }(window.KGP));
 </script>

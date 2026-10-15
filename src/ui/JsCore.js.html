@@ -20,7 +20,27 @@ window.KGP = window.KGP || {};
   KGP.dashboard = KGP.dashboard || {};
   KGP.gestion = KGP.gestion || {};
   KGP.ois = KGP.ois || {};
+  KGP.oip = KGP.oip || {};
+  KGP.tareas = KGP.tareas || {};
   KGP.empleados = KGP.empleados || {};
+  KGP.clientes = KGP.clientes || {};
+
+  /**
+   * Parámetro de la hoja de configuración (CONFIG_*), que doGet inyecta en
+   * window.KGP_CONFIG en cada carga de la página (06_ConfigSheet.js,
+   * cfgs_clientConfig_). `def` = valor si no llegó o no es un número válido.
+   */
+  KGP.cfg = function (clave, def) {
+    var c = window.KGP_CONFIG || {};
+    var v = Number(c[clave]);
+    return (c[clave] === undefined || c[clave] === null || c[clave] === '' || !isFinite(v)) ? def : v;
+  };
+
+  /** Igual que KGP.cfg pero para textos (etiquetas, valores de listas). */
+  KGP.cfgTexto = function (clave, def) {
+    var v = (window.KGP_CONFIG || {})[clave];
+    return (v === undefined || v === null || String(v).trim() === '') ? def : String(v);
+  };
 
   // ---------------- apiCall: wrapper sobre google.script.run ----------------
 
@@ -42,6 +62,7 @@ window.KGP = window.KGP || {};
     var timeoutMs = opts.timeoutMs || 90000;
 
     function attempt(n) {
+      var timer = null;
       var callPromise = new Promise(function (resolve, reject) {
         google.script.run
           .withSuccessHandler(function (r) {
@@ -60,10 +81,17 @@ window.KGP = window.KGP || {};
       });
 
       var timeoutPromise = new Promise(function (_, reject) {
-        setTimeout(function () { reject({ code: 'TIMEOUT', message: 'La operación tardó demasiado (90s).' }); }, timeoutMs);
+        timer = setTimeout(function () {
+          reject({ code: 'TIMEOUT', message: 'La operación tardó demasiado (' + Math.round(timeoutMs / 1000) + ' s).' });
+        }, timeoutMs);
       });
 
-      return Promise.race([callPromise, timeoutPromise]).catch(function (err) {
+      // El temporizador se cancela en cuanto el servidor responde: si no, cada
+      // llamada dejaba un setTimeout vivo durante 90 s.
+      var race = Promise.race([callPromise, timeoutPromise]);
+      race.then(function () { clearTimeout(timer); }, function () { clearTimeout(timer); });
+
+      return race.catch(function (err) {
         if (err && retryOn.indexOf(err.code) !== -1 && n < retryDelays.length) {
           return new Promise(function (resolve) { setTimeout(resolve, retryDelays[n]); })
             .then(function () { return attempt(n + 1); });
@@ -133,7 +161,10 @@ window.KGP = window.KGP || {};
     if (view === 'dashboard' && KGP.dashboard.onEnter) KGP.dashboard.onEnter();
     if (view === 'gestion' && KGP.gestion.onEnter) KGP.gestion.onEnter();
     if (view === 'ois' && KGP.ois.onEnter) KGP.ois.onEnter();
+    if (view === 'oip' && KGP.oip.onEnter) KGP.oip.onEnter();
+    if (view === 'tareas' && KGP.tareas.onEnter) KGP.tareas.onEnter();
     if (view === 'empleados' && KGP.empleados.onEnter) KGP.empleados.onEnter();
+    if (view === 'clientes' && KGP.clientes.onEnter) KGP.clientes.onEnter();
   };
 
   // ---------------- Utilidades compartidas ----------------
@@ -252,9 +283,19 @@ window.KGP = window.KGP || {};
       });
     },
 
+    /**
+     * <option> de un <select> por su value, o null. Recorre las opciones en
+     * vez de usar querySelector('option[value="..."]'), que se rompe si el
+     * valor trae comillas o barras.
+     */
+    findOption: function (sel, value) {
+      var v = String(value);
+      return Array.prototype.filter.call(sel.options, function (o) { return o.value === v; })[0] || null;
+    },
+
     /** Inserta (o reemplaza si ya existe) una <option> sin tocar la selección actual. */
     addOption: function (sel, value, label) {
-      var existing = sel.querySelector('option[value="' + value + '"]');
+      var existing = KGP.ui.findOption(sel, value);
       if (existing) { existing.textContent = label; return existing; }
       var opt = document.createElement('option');
       opt.value = value;
@@ -270,13 +311,55 @@ window.KGP = window.KGP || {};
     },
 
     updateOptionLabel: function (sel, value, label) {
-      var opt = sel.querySelector('option[value="' + value + '"]');
+      var opt = KGP.ui.findOption(sel, value);
       if (opt) opt.textContent = label;
     },
 
     clientLabel: function (c) { return c.razonSocial + (c.numeroIdentificacion ? ' — ' + c.numeroIdentificacion : ''); },
     contactoLabel: function (c) { return c.nombre + (c.cargo ? ' — ' + c.cargo : ''); },
     establecimientoLabel: function (e) { return e.nombre; },
+
+    /**
+     * "Cédula - Nombre (Cargo)" si el empleado tiene cédula registrada; si no,
+     * solo el nombre. Es la etiqueta del desplegable de responsable de una
+     * tarea (OIS y OIP), que el usuario pidió poder elegir por "Cédula-Nombre".
+     * CEDULA es una columna opcional de PERSONAL_KGP (ver emp_rowToObj_).
+     */
+    empleadoLabel: function (e) {
+      return (e.cedula ? e.cedula + ' - ' : '') + e.nombre + (e.cargo ? ' (' + e.cargo + ')' : '');
+    },
+
+    /**
+     * Tipos de responsable de una tarea, en orden: [{valor, etiqueta}].
+     * Valores y etiquetas salen de la config (CFG_().TIPO_RESPONSABLE_* /
+     * ETIQUETA_RESPONSABLE_*, inyectados por doGet).
+     */
+    tiposResponsable: function () {
+      return [
+        { valor: KGP.cfgTexto('TIPO_RESPONSABLE_INTERNO', 'INTERNO'), etiqueta: KGP.cfgTexto('ETIQUETA_RESPONSABLE_INTERNO', 'Interno (KGP)') },
+        { valor: KGP.cfgTexto('TIPO_RESPONSABLE_TERCERO', 'TERCERO'), etiqueta: KGP.cfgTexto('ETIQUETA_RESPONSABLE_TERCERO', 'Tercero / independiente') }
+      ];
+    },
+
+    /**
+     * Candidatos a responsable de una tarea a partir de api_bootstrap
+     * (KGP.catalog): internos (cat.empleados, PERSONAL_KGP) + terceros
+     * (cat.terceros, PERSONAL_TERCEROS), cada uno con su tipoResponsable.
+     */
+    responsables: function (cat) {
+      var tipos = KGP.ui.tiposResponsable();
+      function marcar(lista, tipo) {
+        return (lista || []).map(function (e) { return Object.assign({}, e, { tipoResponsable: e.tipoResponsable || tipo }); });
+      }
+      return marcar((cat || {}).empleados, tipos[0].valor).concat(marcar((cat || {}).terceros, tipos[1].valor));
+    },
+
+    /** Nombres de mes en español, indexados 1-12 (mesNombre(1) === 'Enero'). */
+    mesNombre: function (mes) {
+      var meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+      return meses[Math.trunc(Number(mes)) - 1] || String(mes || '');
+    },
 
     /** {tipo: codigoUnspsc} a partir de catalogoPares (misma fila = correspondencia real, ver 11_CatalogRepo.js). */
     buildUnspscMap: function (pares) {
@@ -396,6 +479,13 @@ window.KGP = window.KGP || {};
       } else if (type === 'contacto' || type === 'establecimiento' || type === 'empleado') {
         if (!datos.nombre) fail('nombre');
       }
+      // Alta de empleado: todos los campos son obligatorios (en edición se
+      // mantiene lo opcional para no bloquear empleados antiguos incompletos).
+      if (type === 'empleado' && state.mode === 'create') {
+        if (!datos.cargo) fail('cargo');
+        if (!datos.telefono) fail('telefono');
+        if (!datos.correo) fail('correo');
+      }
       if (datos.correo && !EMAIL_RE.test(datos.correo)) fail('correo');
       if (datos.telefono && /\D/.test(datos.telefono)) fail('telefono');
 
@@ -415,7 +505,8 @@ window.KGP = window.KGP || {};
       body.appendChild(tpl.content.cloneNode(true));
 
       var titleKey = opts.type === 'contacto' ? ('contacto' + capitalize_(state.target)) : opts.type;
-      document.getElementById('modal-title').textContent = ((TITLES[titleKey] || {})[opts.mode]) || 'Formulario';
+      // opts.title: título propio (p. ej. "Agregar tercero" con el formulario de empleado).
+      document.getElementById('modal-title').textContent = opts.title || ((TITLES[titleKey] || {})[opts.mode]) || 'Formulario';
 
       if (opts.mode === 'edit' && opts.initial) fill(opts.initial);
       KGP.ui.wirePhoneInputs(body);
@@ -487,8 +578,9 @@ window.KGP = window.KGP || {};
    * línea nueva debajo de ellas (nunca las reemplaza).
    */
   KGP.servicioModal = (function () {
-    var TARIFA_MAX_DIGITS = 10;  // = CFG().TARIFA_MAX en el servidor
-    var CANTIDAD_MAX = 99999;    // = CFG().CANTIDAD_MAX en el servidor
+    var TARIFA_MAX_DIGITS = KGP.cfg('TARIFA_MAX_DIGITS', 10); // dígitos de CFG_().TARIFA_MAX
+    var CANTIDAD_MAX = KGP.cfg('CANTIDAD_MAX', 99999);         // = CFG_().CANTIDAD_MAX
+    var MAX_ACTIVIDADES = KGP.cfg('MAX_ACTIVIDADES', 10);      // = CFG_().LIMITS.MAX_ACTIVIDADES
     var state = { onSave: null, actividades: [], actSeq: 0, unspscMap: {}, showTarifas: false, observacionesPrevias: '' };
     var wired = false;
 
@@ -513,12 +605,12 @@ window.KGP = window.KGP || {};
         row.querySelector('[data-remove-actividad]').addEventListener('click', function () { removeActividadRow(a.localId); });
         list.appendChild(frag);
       });
-      document.getElementById('sm-act-count').textContent = '(' + state.actividades.length + '/10)';
-      document.getElementById('sm-add-actividad').disabled = state.actividades.length >= 10;
+      document.getElementById('sm-act-count').textContent = '(' + state.actividades.length + '/' + MAX_ACTIVIDADES + ')';
+      document.getElementById('sm-add-actividad').disabled = state.actividades.length >= MAX_ACTIVIDADES;
     }
 
     function addActividadRow() {
-      if (state.actividades.length >= 10) return;
+      if (state.actividades.length >= MAX_ACTIVIDADES) return;
       state.actividades.push({ localId: 'sact' + (++state.actSeq), texto: '' });
       renderActividades();
     }
@@ -658,6 +750,294 @@ window.KGP = window.KGP || {};
     return { open: open, close: close, wireGlobalEvents: wireGlobalEvents };
   }());
 
+  // ---------------- Modal genérico: Tarea (Gestionar OIS / Gestionar OIP) ----------------
+
+  /**
+   * Popup compartido para agregar/editar UNA tarea. Mismo contrato que
+   * KGP.servicioModal: `onSave` NO llama al servidor — recibe
+   * {tarea, idEmpleado, responsable, fechaInicio, fechaEntrega, observacion}
+   * y el llamador decide qué hacer con eso en su propio arreglo en memoria
+   * (detail.tareas). Nada llega a la base de datos hasta el "Guardar cambios"
+   * de la vista; "Cancelar" cierra sin invocar `onSave`.
+   *
+   * El HTML (#tarea-modal-overlay) vive en ui/ViewOis.html pero es GLOBAL, no
+   * está atado a esa vista — mismo criterio que las plantillas tpl-servicio /
+   * tpl-modal-* de ui/ViewCotizacion.html (ver CLAUDE.md §2.1).
+   *
+   * OBSERVACION es acumulativa: las anteriores se muestran en solo lectura y
+   * lo escrito en el textarea se agrega como una línea nueva debajo, nunca las
+   * reemplaza.
+   *
+   * empleados: internos + terceros, cada uno con tipoResponsable (usa
+   * KGP.ui.responsables(cat) o el snapshot de Gestionar tareas). El popup
+   * muestra el selector Interno/Tercero y filtra el desplegable por tipo;
+   * onSave recibe además `tipoResponsable`.
+   *
+   * opts: {empleados:[], initial: tarea|null, onSave(datos),
+   *        idEmpleadoDefault, fechaInicioDefault, fechaEntregaDefault}.
+   *
+   * Solo "Gestionar tareas" (JsTareas.js.html) usa además:
+   *   - ordenes: [{tipo:'OIS'|'OIP', idOrden, codigo, clienteNombre,
+   *     fechaVencimiento, numTareas}] — muestra la sección "Orden" (tipo +
+   *     código) y agrega {tipo, idOrden} a los datos de onSave. Sin `ordenes`
+   *     la sección queda oculta (Gestionar OIS/OIP: la orden es la abierta).
+   *   - ordenFija: {tipo, idOrden, codigo, clienteNombre} — al editar una
+   *     tarea existente, la orden se muestra pero no se puede cambiar.
+   *   - tipoDefault / idOrdenDefault: preselección al crear.
+   *   - onSave puede devolver una Promise: el popup se queda abierto con
+   *     "Guardando…" hasta que resuelva, y sigue abierto si se rechaza (el
+   *     llamador muestra el error). Si no devuelve Promise, se cierra de
+   *     inmediato, como siempre.
+   */
+  KGP.tareaModal = (function () {
+    var state = { onSave: null, empleados: [], observacionPrevia: '', editando: null, ordenes: null, saving: false };
+    var wired = false;
+
+    function $(id) { return document.getElementById(id); }
+    function fieldEl(key) { return document.querySelector('#tarea-modal-body .field[data-field="' + key + '"]'); }
+    function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
+    function clearInvalid() {
+      document.querySelectorAll('#tarea-modal-body .field.invalid').forEach(function (f) { f.classList.remove('invalid'); });
+    }
+
+    function syncIdEmpleado() {
+      $('tm-id-empleado').value = $('tm-responsable').value || '—';
+    }
+
+    // ---- Tipo de responsable: interno (PERSONAL_KGP) / tercero (PERSONAL_TERCEROS) ----
+
+    function tipoInterno() { return KGP.ui.tiposResponsable()[0].valor; }
+    function tipoDe(e) { return (e && e.tipoResponsable) || tipoInterno(); }
+
+    function tipoActual() {
+      var b = document.querySelector('#tm-tipo-responsable .seg-option.is-active');
+      return b ? b.getAttribute('data-tipo') : tipoInterno();
+    }
+
+    function setTipo(tipo) {
+      Array.prototype.forEach.call(document.querySelectorAll('#tm-tipo-responsable .seg-option'), function (b) {
+        var on = b.getAttribute('data-tipo') === tipo;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-checked', on ? 'true' : 'false');
+      });
+    }
+
+    function tieneOpcion(sel, valor) {
+      return Array.prototype.some.call(sel.options, function (o) { return o.value === valor; });
+    }
+
+    /** Llena el desplegable de responsable solo con las personas del tipo elegido. */
+    function rebuildResponsables(tipo, idSeleccionado) {
+      var sel = $('tm-responsable');
+      var lista = state.empleados.filter(function (e) { return tipoDe(e) === tipo; });
+      var etiqueta = (KGP.ui.tiposResponsable().filter(function (t) { return t.valor === tipo; })[0] || {}).etiqueta || '';
+      KGP.ui.rebuildSelect(sel, lista, function (e) { return e.idEmpleado; }, KGP.ui.empleadoLabel,
+        lista.length ? '— Selecciona el responsable —' : '— No hay personas registradas: ' + etiqueta + ' —');
+      // Si el responsable guardado ya no está en su hoja, se conserva como
+      // opción para no perder el dato al editar otra cosa de la tarea.
+      var t = state.editando;
+      if (t && t.idEmpleado && t.idEmpleado === idSeleccionado && !tieneOpcion(sel, t.idEmpleado)) {
+        KGP.ui.addOption(sel, t.idEmpleado, t.responsable || t.idEmpleado);
+      }
+      sel.value = idSeleccionado && tieneOpcion(sel, idSeleccionado) ? idSeleccionado : '';
+      syncIdEmpleado();
+    }
+
+    function ordenLabel(o) { return o.codigo + (o.clienteNombre ? ' — ' + o.clienteNombre : ''); }
+
+    function findOrden(tipo, idOrden) {
+      return (state.ordenes || []).filter(function (o) { return o.tipo === tipo && o.idOrden === idOrden; })[0] || null;
+    }
+
+    function syncOrdenHint() {
+      var o = findOrden($('tm-tipo-orden').value, $('tm-orden').value);
+      $('tm-orden-hint').textContent = o
+        ? ((o.fechaVencimiento ? 'Vence: ' + o.fechaVencimiento + ' · ' : '') + (o.numTareas || 0) + ' tarea' + (o.numTareas === 1 ? '' : 's') + ' registrada' + (o.numTareas === 1 ? '' : 's'))
+        : '';
+    }
+
+    /** Llena el desplegable de código con las órdenes del tipo elegido. */
+    function rebuildOrdenes(idOrdenDefault) {
+      var tipo = $('tm-tipo-orden').value;
+      var sel = $('tm-orden');
+      if (!tipo) {
+        sel.innerHTML = '<option value="">— Primero elige OIS u OIP —</option>';
+        sel.disabled = true;
+        syncOrdenHint();
+        return;
+      }
+      var lista = (state.ordenes || []).filter(function (o) { return o.tipo === tipo; });
+      KGP.ui.rebuildSelect(sel, lista, function (o) { return o.idOrden; }, ordenLabel,
+        lista.length ? '— Selecciona la ' + tipo + ' —' : '— No hay ' + tipo + ' disponibles —');
+      sel.disabled = !lista.length;
+      sel.value = (idOrdenDefault && findOrden(tipo, idOrdenDefault)) ? idOrdenDefault : '';
+      syncOrdenHint();
+    }
+
+    function setupOrdenSection(opts) {
+      var section = $('tm-orden-section');
+      section.style.display = state.ordenes ? '' : 'none';
+      if (!state.ordenes) return;
+      var tipoSel = $('tm-tipo-orden');
+      var fija = opts.ordenFija || null;
+      if (fija) {
+        tipoSel.value = fija.tipo;
+        KGP.ui.rebuildSelect($('tm-orden'), [fija], function (o) { return o.idOrden; }, ordenLabel, '—');
+        $('tm-orden').value = fija.idOrden;
+        tipoSel.disabled = true;
+        $('tm-orden').disabled = true;
+        $('tm-orden-hint').textContent = 'La orden de una tarea ya creada no se puede cambiar.';
+      } else {
+        tipoSel.disabled = false;
+        tipoSel.value = opts.tipoDefault || '';
+        rebuildOrdenes(opts.idOrdenDefault);
+      }
+    }
+
+    function setSaving(saving) {
+      state.saving = saving;
+      var btn = $('tarea-modal-save');
+      btn.disabled = saving;
+      btn.textContent = saving ? 'Guardando…' : 'Guardar tarea';
+    }
+
+    function open(opts) {
+      opts = opts || {};
+      var tarea = opts.initial || null;
+      state.onSave = opts.onSave;
+      state.empleados = opts.empleados || [];
+      state.editando = tarea;
+      state.ordenes = opts.ordenes || null;
+      setSaving(false);
+      clearInvalid();
+      $('tarea-modal-title').textContent = tarea ? 'Editar tarea' : 'Agregar tarea';
+      setupOrdenSection(opts);
+
+      // Tipo de la tarea: el guardado; si la fila no lo tiene (tarea antigua o
+      // hoja sin la columna TIPO RESPONSABLE), el de la hoja donde está su ID;
+      // al crear, el del responsable por defecto o interno.
+      var idInicial = tarea ? tarea.idEmpleado : (opts.idEmpleadoDefault || '');
+      var encontrado = state.empleados.filter(function (e) { return e.idEmpleado === idInicial; })[0];
+      var tipo = (tarea && tarea.tipoResponsable) || (encontrado ? tipoDe(encontrado) : tipoInterno());
+      setTipo(tipo);
+      rebuildResponsables(tipo, idInicial);
+
+      document.getElementById('tm-tarea').value = tarea ? tarea.tarea : '';
+      document.getElementById('tm-fecha-inicio').value = tarea ? tarea.fechaInicio : (opts.fechaInicioDefault || '');
+      document.getElementById('tm-fecha-entrega').value = tarea ? tarea.fechaEntrega : (opts.fechaEntregaDefault || '');
+      document.getElementById('tm-obs-nueva').value = '';
+      state.observacionPrevia = tarea ? String(tarea.observacion || '') : '';
+
+      var box = document.getElementById('tm-obs-historial');
+      var lines = state.observacionPrevia.split('\n').filter(function (l) { return l.trim(); });
+      box.hidden = !lines.length;
+      box.innerHTML = lines.map(function (l) { return '<div class="obs-item">' + KGP.escapeHtml(l) + '</div>'; }).join('');
+
+      document.getElementById('tarea-modal-overlay').classList.add('open');
+      setTimeout(function () { document.getElementById('tm-tarea').focus(); }, 50);
+    }
+
+    function close() {
+      // Mientras un guardado asíncrono está en curso el popup no se cierra
+      // (ni con Cancelar, Escape o clic afuera): si la respuesta llegara con
+      // otro popup ya abierto, lo cerraría por error.
+      if (state.saving) return;
+      var el = document.getElementById('tarea-modal-overlay');
+      if (el) el.classList.remove('open');
+      state.onSave = null;
+      state.editando = null;
+      state.ordenes = null;
+    }
+
+    function handleSave() {
+      if (state.saving) return;
+      clearInvalid();
+      var texto = document.getElementById('tm-tarea').value.trim();
+      var idEmpleado = document.getElementById('tm-responsable').value;
+      var inicio = document.getElementById('tm-fecha-inicio').value;
+      var entrega = document.getElementById('tm-fecha-entrega').value;
+      var ok = true;
+      if (state.ordenes) {
+        if (!$('tm-tipo-orden').value) { markInvalid('tipoOrden'); ok = false; }
+        if (!$('tm-orden').value) { markInvalid('orden'); ok = false; }
+      }
+      if (!texto) { markInvalid('tarea'); ok = false; }
+      if (!idEmpleado) { markInvalid('responsable'); ok = false; }
+      if (!inicio) { markInvalid('fechaInicio'); ok = false; }
+      document.getElementById('tm-fecha-entrega-err').textContent = 'Elige la fecha de entrega.';
+      if (!entrega) {
+        markInvalid('fechaEntrega'); ok = false;
+      } else if (inicio && entrega < inicio) {
+        document.getElementById('tm-fecha-entrega-err').textContent = 'La fecha de entrega no puede ser anterior a la de inicio.';
+        markInvalid('fechaEntrega'); ok = false;
+      }
+      if (!ok) { KGP.toast('Revisa los campos marcados en rojo.', 'error'); return; }
+
+      var tipoResp = tipoActual();
+      var emp = state.empleados.filter(function (e) { return e.idEmpleado === idEmpleado && tipoDe(e) === tipoResp; })[0];
+      var nueva = document.getElementById('tm-obs-nueva').value.trim();
+      var previa = state.observacionPrevia.trim();
+      var datos = {
+        tarea: texto,
+        idEmpleado: idEmpleado,
+        tipoResponsable: tipoResp,
+        responsable: emp ? emp.nombre : ((state.editando && state.editando.responsable) || ''),
+        fechaInicio: inicio,
+        fechaEntrega: entrega,
+        observacion: nueva ? (previa ? previa + '\n' + nueva : nueva) : previa
+      };
+      if (state.ordenes) {
+        datos.tipo = $('tm-tipo-orden').value;
+        datos.idOrden = $('tm-orden').value;
+      }
+
+      var onSave = state.onSave;
+      var result = onSave ? onSave(datos) : null;
+      if (!result || typeof result.then !== 'function') {
+        close();
+        return;
+      }
+      setSaving(true);
+      result.then(function () {
+        setSaving(false);
+        close();
+      }, function () {
+        // El llamador ya mostró el error: se deja el popup abierto para corregir/reintentar.
+        setSaving(false);
+      });
+    }
+
+    function wireGlobalEvents() {
+      if (wired) return;
+      wired = true;
+      document.getElementById('tarea-modal-close').addEventListener('click', close);
+      document.getElementById('tarea-modal-cancel').addEventListener('click', close);
+      document.getElementById('tarea-modal-save').addEventListener('click', handleSave);
+      document.getElementById('tm-responsable').addEventListener('change', syncIdEmpleado);
+      // Opciones Interno / Tercero desde la config; cambiar de tipo vacía el responsable.
+      var seg = document.getElementById('tm-tipo-responsable');
+      seg.innerHTML = KGP.ui.tiposResponsable().map(function (t) {
+        return '<button type="button" class="seg-option" role="radio" aria-checked="false" data-tipo="' + KGP.escapeHtml(t.valor) + '">' + KGP.escapeHtml(t.etiqueta) + '</button>';
+      }).join('');
+      seg.addEventListener('click', function (e) {
+        var b = e.target.closest('.seg-option');
+        if (!b || b.classList.contains('is-active')) return;
+        setTipo(b.getAttribute('data-tipo'));
+        rebuildResponsables(b.getAttribute('data-tipo'), '');
+      });
+      document.getElementById('tm-tipo-orden').addEventListener('change', function () { rebuildOrdenes(''); });
+      document.getElementById('tm-orden').addEventListener('change', syncOrdenHint);
+      document.getElementById('tarea-modal-overlay').addEventListener('click', function (e) {
+        if (e.target.id === 'tarea-modal-overlay') close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && document.getElementById('tarea-modal-overlay').classList.contains('open')) close();
+      });
+    }
+
+    return { open: open, close: close, wireGlobalEvents: wireGlobalEvents };
+  }());
+
   // ---------------- Menú lateral móvil (hamburguesa) ----------------
 
   function setSidebarOpen(open) {
@@ -679,10 +1059,37 @@ window.KGP = window.KGP || {};
     if (overlay) overlay.addEventListener('click', function () { setSidebarOpen(false); });
   }
 
+  // ---------------- Límites de la config en el HTML ----------------
+
+  /**
+   * Los View*.html se incluyen sin plantilla (no pueden leer la config), así
+   * que los topes que muestran salen de aquí:
+   *   - data-cfg-max="CLAVE": el atributo max del input = KGP.cfg(CLAVE).
+   *   - data-cfg-plantilla="... {CLAVE} ...": el texto del elemento con cada
+   *     {CLAVE} reemplazada por su valor (p. ej. el mensaje de error del plazo).
+   * Si la clave no llegó, se deja lo que ya trae el HTML.
+   */
+  function aplicarConfigAlHtml() {
+    document.querySelectorAll('[data-cfg-max]').forEach(function (el) {
+      var v = KGP.cfg(el.getAttribute('data-cfg-max'), null);
+      if (v != null) el.setAttribute('max', String(v));
+    });
+    document.querySelectorAll('[data-cfg-plantilla]').forEach(function (el) {
+      var completo = true;
+      var texto = el.getAttribute('data-cfg-plantilla').replace(/\{(\w+)\}/g, function (m, clave) {
+        var v = KGP.cfgTexto(clave, null);
+        if (v == null) completo = false;
+        return v == null ? m : v;
+      });
+      if (completo) el.textContent = texto;
+    });
+  }
+
   // ---------------- Init ----------------
 
   KGP.init = function () {
     KGP.setConn('connecting');
+    aplicarConfigAlHtml();
 
     document.querySelectorAll('.nav-item[data-nav]').forEach(function (el) {
       el.addEventListener('click', function () {
@@ -694,6 +1101,7 @@ window.KGP = window.KGP || {};
     wireMobileMenu();
     KGP.entityModal.wireGlobalEvents();
     KGP.servicioModal.wireGlobalEvents();
+    KGP.tareaModal.wireGlobalEvents();
 
     var initial = window.KGP_INITIAL_VIEW === 'dashboard' ? 'dashboard' : 'cotizacion';
     KGP.nav(initial);

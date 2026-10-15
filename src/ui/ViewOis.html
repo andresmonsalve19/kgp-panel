@@ -132,8 +132,8 @@
         </div>
         <div class="field" data-field="plazo">
           <label for="oi-plazo">Plazo (días) <span class="req">*</span></label>
-          <input type="number" id="oi-plazo" min="1" max="365" step="1" required>
-          <div class="err">Ingresa un plazo entre 1 y 365 días.</div>
+          <input type="number" id="oi-plazo" min="1" max="365" step="1" required data-cfg-max="MAX_PLAZO_DIAS">
+          <div class="err" data-cfg-plantilla="Ingresa un plazo entre 1 y {MAX_PLAZO_DIAS} días.">Ingresa un plazo entre 1 y 365 días.</div>
         </div>
         <div class="field">
           <label>Fecha de vencimiento</label>
@@ -233,7 +233,9 @@
 </section>
 
 <!-- Fila compacta de una tarea (clonada por JS). Tres acciones con ícono:
-     finalizar / reabrir (check), editar (lápiz) y eliminar (caneca). -->
+     finalizar / reabrir (check), editar (lápiz) y eliminar (caneca).
+     GLOBAL, no atada a esta vista: la usan "Gestionar OIS" y "Gestionar OIP"
+     (mismo criterio que tpl-servicio en ui/ViewCotizacion.html, CLAUDE.md §2.1). -->
 <template id="tpl-tarea">
   <div class="servicio-row tarea-row" data-tarea>
     <div class="servicio-row-info tarea-row-info">
@@ -255,7 +257,14 @@
 <!-- ---------- Popup: agregar/editar una tarea ----------
      Solo edita estado en memoria (igual que el popup de servicio): "Guardar
      tarea" actualiza la lista en pantalla; nada llega a la base de datos
-     hasta "Guardar cambios". -->
+     hasta "Guardar cambios".
+
+     GLOBAL: vive en este archivo pero lo maneja KGP.tareaModal
+     (ui/JsCore.js.html) y lo comparten "Gestionar OIS", "Gestionar OIP" y
+     "Gestionar tareas" (esta última con la sección "Orden" visible y
+     guardando al instante, ver JsTareas.js.html) —
+     mismo criterio que los tpl-modal-* de ui/ViewCotizacion.html. No lo
+     dupliques en una vista nueva: pásale un onSave. -->
 <div class="modal-overlay" id="tarea-modal-overlay">
   <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="tarea-modal-title">
     <div class="modal-header">
@@ -263,11 +272,40 @@
       <button type="button" class="modal-close" id="tarea-modal-close" aria-label="Cerrar">✕</button>
     </div>
     <div class="modal-body" id="tarea-modal-body">
+      <!-- Orden a la que pertenece la tarea. Solo la muestra "Gestionar
+           tareas" (KGP.tareaModal con opts.ordenes); en Gestionar OIS/OIP la
+           orden es la que está abierta y esta sección queda oculta. Se oculta
+           con style.display (no con [hidden]): .field-grid fija display:grid y
+           le ganaría al atributo hidden. -->
+      <div class="field-grid tm-orden-section" id="tm-orden-section" style="display:none;">
+        <div class="field" data-field="tipoOrden">
+          <label for="tm-tipo-orden">Tipo de orden <span class="req">*</span></label>
+          <select id="tm-tipo-orden">
+            <option value="">— Selecciona —</option>
+            <option value="OIS">OIS — Orden interna de servicio</option>
+            <option value="OIP">OIP — Orden interna de proyectos</option>
+          </select>
+          <div class="err">Elige si la tarea es de una OIS o de una OIP.</div>
+        </div>
+        <div class="field" data-field="orden">
+          <label for="tm-orden">Código de la orden <span class="req">*</span></label>
+          <select id="tm-orden"><option value="">— Primero elige OIS u OIP —</option></select>
+          <div class="err">Selecciona la orden a la que pertenece la tarea.</div>
+          <div class="hint" id="tm-orden-hint"></div>
+        </div>
+      </div>
       <div class="field-grid">
         <div class="field full" data-field="tarea">
           <label for="tm-tarea">Tarea <span class="req">*</span></label>
           <textarea id="tm-tarea" rows="2" maxlength="5000"></textarea>
           <div class="err">La tarea es obligatoria.</div>
+        </div>
+        <!-- Interno (PERSONAL_KGP) o tercero (PERSONAL_TERCEROS). Las opciones
+             (valor y etiqueta) las pinta KGP.tareaModal desde la config
+             (KGP.cfgTexto TIPO_RESPONSABLE_* / ETIQUETA_RESPONSABLE_*). -->
+        <div class="field full" data-field="tipoResponsable">
+          <label>¿Quién realiza la tarea? <span class="req">*</span></label>
+          <div class="seg-control in-form" id="tm-tipo-responsable" role="radiogroup" aria-label="Tipo de responsable"></div>
         </div>
         <div class="field" data-field="responsable">
           <label for="tm-responsable">Responsable <span class="req">*</span></label>

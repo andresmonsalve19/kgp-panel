@@ -1,0 +1,887 @@
+<script>
+/**
+ * Dashboard → pestañas "OIS" y "OIP" (y el selector de pestañas).
+ *
+ * El Dashboard tiene tres módulos que se eligen con el selector de arriba
+ * (#dash-modulos): "Cotizaciones" (JsDashboard.js.html, sin cambios) y
+ * "OIS" / "OIP" (este archivo). OIS y OIP comparten TODO el código: tienen la
+ * misma forma (estado derivado, vencimiento, tareas), así que el tipo activo
+ * solo decide qué órdenes entran al universo y qué tarjetas aplican (la
+ * facturación solo existe en la OIP).
+ *
+ * Mismo modelo que el Dashboard de cotizaciones:
+ *   - api_getOrdenesDashboard entrega UN snapshot con todas las OIS y OIP
+ *     (ds_getOrdenesSnapshot_, 32_DashboardService.js). KPIs, gráficas,
+ *     filtros, orden y paginación se derivan aquí: cambiar de pestaña, de
+ *     filtro o de página no cuesta ningún round-trip.
+ *   - Polling barato con protocolo de versión mientras la pestaña está
+ *     visible; "Actualizar" fuerza el dato fresco.
+ *   - Stale-while-revalidate (CLAUDE.md §2.2): el primer ingreso pinta el
+ *     último snapshot de KGP.localCache y SIEMPRE pide el real.
+ *   - Las tarjetas KPI son también filtros rápidos (catálogo declarativo
+ *     `Vistas`: agregar un KPI = agregar una entrada).
+ *
+ * Cada pestaña (OIS / OIP) recuerda sus propios filtros mientras dure la
+ * sesión; la pestaña elegida se recuerda por navegador.
+ *
+ * NOTA DE ALCANCE: aquí todo es de solo lectura. Las órdenes se editan en
+ * "Gestionar OIS/OIP" (botón "Gestionar →" de cada fila) y sus tareas también
+ * en "Gestionar tareas".
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  // ===================================================================
+  // Constantes
+  // ===================================================================
+
+  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG_().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
+  // Tras errores seguidos se espera cada vez más (x1, x2, x4, x10 el intervalo base).
+  var POLL_BACKOFF_MS = [1, 2, 4, 10].map(function (k) { return POLL_BASE_MS * k; });
+  var SEARCH_DEBOUNCE_MS = 220;
+  // Una orden dura semanas o meses (una OIP, un año): 15 días de aviso. Las
+  // cotizaciones usan 7 porque su plazo típico es de días.
+  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_ORDENES', 15); // = CFG_().DIAS_POR_VENCER_ORDENES
+  var MAX_MESES = 12;          // columnas de "Órdenes creadas" y "Facturación por mes"
+  var MAX_VIGENCIA = 6;        // filas de "Ventana de vigencia"
+  var MAX_RESPONSABLES = 7;    // filas de "Tareas pendientes por responsable"
+  var CACHE_KEY = 'dashboard:ordenes';
+  var MODULO_KEY = 'dashboard:modulo';
+
+  var ESTADO = { CURSO: 'En curso', FIN: 'Finalizada', VENC: 'Vencida' }; // = CFG_().ESTADOS_OIS / ESTADOS_OIP
+  var MODULOS = ['cot', 'OIS', 'OIP'];
+  var TITULOS = { cot: 'Dashboard de cotizaciones', OIS: 'Dashboard de OIS', OIP: 'Dashboard de OIP' };
+  var COLOR_ESTADO = {};
+  COLOR_ESTADO[ESTADO.CURSO] = 'var(--chart-revision)';
+  COLOR_ESTADO[ESTADO.FIN] = 'var(--chart-aprobada)';
+  COLOR_ESTADO[ESTADO.VENC] = 'var(--chart-rechazada)';
+
+  /** Estado inicial de los filtros de una pestaña; también es el destino de "Limpiar". */
+  function defaultUi() {
+    return { q: '', anio: '', cliente: '', estado: '', vista: 'all', sortBy: 'codigo', sortDir: 'asc', pageSize: 20, page: 1 };
+  }
+
+  var st = {
+    modulo: 'cot',
+    snap: null,
+    version: null,          // token del último snapshot REAL (null si solo hay caché)
+    error: '',
+    ui: { OIS: defaultUi(), OIP: defaultUi() },
+    activo: false,          // la vista Dashboard está en pantalla
+    wired: false,
+    primeraVez: true,
+    enVuelo: false,
+    errores: 0,
+    pollTimer: null,
+    renderPendiente: false
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function h(s) { return KGP.escapeHtml(s); }
+  function esOrden() { return st.modulo === 'OIS' || st.modulo === 'OIP'; }
+  function uiActual() { return st.ui[st.modulo]; }
+
+  // ===================================================================
+  // Fmt / Rules — puras
+  // ===================================================================
+
+  var MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+  /** 143000 → "$143k"; 1250000 → "$1,3M"; 0/'' → "—". Mismo formato que el Dashboard de cotizaciones. */
+  function compactMoney(n) {
+    var v = Number(n);
+    if (!isFinite(v) || !v) return '—';
+    if (Math.abs(v) >= 1000000) return '$' + (v / 1000000).toFixed(1).replace('.', ',') + 'M';
+    if (Math.abs(v) >= 1000) return '$' + Math.round(v / 1000) + 'k';
+    return '$' + Math.round(v);
+  }
+  function pct(parte, total) { return total ? Math.round((parte / total) * 100) + '%' : '0%'; }
+  function width(parte, total, minPct) {
+    if (!total || !parte) return '0%';
+    return Math.max(minPct == null ? 2 : minPct, Math.round((parte / total) * 100)) + '%';
+  }
+  function norm(s) {
+    var txt = String(s == null ? '' : s);
+    if (txt.normalize) txt = txt.normalize('NFD').replace(/[̀-ͯ]/g, '');
+    return txt.toLowerCase().trim();
+  }
+  /** "2026-10" → "oct 26". */
+  function mesLabel(ym) {
+    var m = Number(String(ym).slice(5, 7));
+    return (MESES[m - 1] || '?') + ' ' + String(ym).slice(2, 4);
+  }
+  function marcaTiempo(iso) {
+    var d = iso ? new Date(iso) : null;
+    if (!d || isNaN(d.getTime())) return '';
+    return d.getDate() + ' ' + MESES[d.getMonth()] + ' ' + d.getFullYear() + ', ' +
+      String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  function dias(n) { return n == null ? '—' : n + ' d'; }
+  function vigenciaClass(d) { return d == null ? '' : d < 0 ? 'overdue' : d <= DIAS_POR_VENCER ? 'soon' : ''; }
+  function vigenciaColor(d) {
+    if (d == null) return 'var(--border-strong)';
+    if (d < 0) return 'var(--danger)';
+    if (d <= DIAS_POR_VENCER) return 'var(--warning)';
+    return 'var(--primary)';
+  }
+  /** Misma insignia que "Gestionar OIS/OIP". */
+  function estadoBadgeClass(estado) {
+    if (estado === ESTADO.FIN) return 'badge-aprobado';
+    if (estado === ESTADO.VENC) return 'badge-rechazado';
+    return 'badge-revision';
+  }
+  /** Mismo criterio que Rules.documentoInvalido del Dashboard de cotizaciones. */
+  function documentoInvalido(o) {
+    return o.docEstado === 'ERROR' || (o.docEstado !== 'PENDIENTE' && !o.urlDocumento);
+  }
+  function porVencer(o) {
+    return o.estado !== ESTADO.FIN && o.diasRestantes != null && o.diasRestantes >= 0 && o.diasRestantes <= DIAS_POR_VENCER;
+  }
+  function factPendiente(o) { return (o.fact || []).some(function (f) { return !f[3]; }); }
+
+  var comparadores = {
+    codigo: function (a, b) { return String(a.codigo || '').localeCompare(String(b.codigo || '')); },
+    cliente: function (a, b) { return String(a.clienteNombre || '').localeCompare(String(b.clienteNombre || '')); },
+    fechaElaboracion: function (a, b) { return String(a.fechaElaboracion || '').localeCompare(String(b.fechaElaboracion || '')); },
+    fechaVencimiento: function (a, b) { return String(a.fechaVencimiento || '').localeCompare(String(b.fechaVencimiento || '')); },
+    estado: function (a, b) { return String(a.estado || '').localeCompare(String(b.estado || '')); },
+    // null (sin vencimiento) al final, no confundido con "ya vencida".
+    diasRestantes: function (a, b) {
+      var x = a.diasRestantes == null ? Infinity : a.diasRestantes;
+      var y = b.diasRestantes == null ? Infinity : b.diasRestantes;
+      return x - y;
+    },
+    // Sin tareas = -1: queda antes que una orden con 0% de avance.
+    avance: function (a, b) {
+      var x = a.tareas.total ? a.tareas.finalizadas / a.tareas.total : -1;
+      var y = b.tareas.total ? b.tareas.finalizadas / b.tareas.total : -1;
+      return x - y;
+    },
+    tareasVencidas: function (a, b) { return a.tareas.vencidas - b.tareas.vencidas; }
+  };
+
+  // ===================================================================
+  // Vistas — catálogo declarativo de KPIs / filtros rápidos
+  // ===================================================================
+
+  /**
+   * Cada entrada es una tarjeta KPI y, a la vez, el filtro que aplica al
+   * pulsarla. `match` null = "todas". `solo` limita la tarjeta a un tipo.
+   * ctx = {tipo, anio, tareas, tareasFin, tareasVenc, montoPendiente}.
+   */
+  var Vistas = [
+    {
+      id: 'all', tone: '', match: null,
+      label: function (ctx) { return ctx.tipo + ' ' + (ctx.anio || 'totales'); },
+      sub: function (ctx) { return ctx.tareas + (ctx.tareas === 1 ? ' tarea registrada' : ' tareas registradas'); },
+      meter: function () { return 1; }
+    },
+    {
+      id: 'curso', tone: 'warn',
+      match: function (o) { return o.estado === ESTADO.CURSO; },
+      label: function () { return 'En curso'; }
+    },
+    {
+      id: 'fin', tone: 'good',
+      match: function (o) { return o.estado === ESTADO.FIN; },
+      label: function () { return 'Finalizadas'; }
+    },
+    {
+      id: 'venc', tone: 'alert',
+      match: function (o) { return o.estado === ESTADO.VENC; },
+      label: function () { return 'Vencidas'; },
+      sub: function (ctx, n) { return n ? 'pasaron su fecha de vencimiento' : 'ninguna vencida'; }
+    },
+    {
+      id: 'pv', tone: 'warn', match: porVencer,
+      label: function () { return 'Vencen en ≤' + DIAS_POR_VENCER + ' días'; },
+      sub: function (ctx, n) { return n ? 'requieren seguimiento' : 'sin urgencias'; }
+    },
+    {
+      id: 'pend', tone: '',
+      match: function (o) { return o.tareas.total > o.tareas.finalizadas; },
+      label: function () { return 'Con tareas pendientes'; },
+      sub: function (ctx) { return 'avance global ' + pct(ctx.tareasFin, ctx.tareas); },
+      meter: function (ctx) { return ctx.tareas ? ctx.tareasFin / ctx.tareas : 0; }
+    },
+    {
+      id: 'tven', tone: 'alert',
+      match: function (o) { return o.tareas.vencidas > 0; },
+      label: function () { return 'Con tareas vencidas'; },
+      sub: function (ctx) { return ctx.tareasVenc + (ctx.tareasVenc === 1 ? ' tarea atrasada' : ' tareas atrasadas'); }
+    },
+    {
+      id: 'sint', tone: 'warn',
+      match: function (o) { return !o.tareas.total; },
+      label: function () { return 'Sin tareas'; },
+      sub: function (ctx, n) { return n ? 'falta planificarlas' : 'todas tienen tareas'; }
+    },
+    {
+      id: 'fact', tone: 'warn', solo: 'OIP', match: factPendiente,
+      label: function () { return 'Facturación pendiente'; },
+      sub: function (ctx) { return ctx.montoPendiente ? compactMoney(ctx.montoPendiente) + ' por facturar' : 'meses sin cuota registrada'; }
+    },
+    {
+      id: 'docerr', tone: 'alert', match: documentoInvalido,
+      label: function () { return 'Sin documento válido'; },
+      sub: function (ctx, n) { return n ? 'se pueden regenerar' : 'todos generados'; }
+    }
+  ];
+
+  function vistasDelTipo(tipo) {
+    return Vistas.filter(function (v) { return !v.solo || v.solo === tipo; });
+  }
+  function vistaPorId(tipo, id) {
+    return vistasDelTipo(tipo).filter(function (v) { return v.id === id; })[0] || null;
+  }
+
+  // ===================================================================
+  // Select — derivaciones puras (snapshot + filtros → view-model)
+  // ===================================================================
+
+  function viewModel() {
+    var tipo = st.modulo;
+    var ui = uiActual();
+    var delTipo = st.snap.ordenes.filter(function (o) { return o.tipo === tipo; });
+
+    // Universo de los KPIs: tipo + año (los demás filtros no mueven el marco,
+    // mismo criterio que el Dashboard de cotizaciones).
+    var anio = ui.anio ? Number(ui.anio) : null;
+    var universo = anio ? delTipo.filter(function (o) { return o.anio === anio; }) : delTipo;
+
+    var ctx = { tipo: tipo, anio: ui.anio, tareas: 0, tareasFin: 0, tareasVenc: 0, montoPendiente: 0 };
+    universo.forEach(function (o) {
+      ctx.tareas += o.tareas.total;
+      ctx.tareasFin += o.tareas.finalizadas;
+      ctx.tareasVenc += o.tareas.vencidas;
+      (o.fact || []).forEach(function (f) { if (!f[3]) ctx.montoPendiente += Number(f[2]) || 0; });
+    });
+
+    var vistas = vistasDelTipo(tipo);
+    var counts = vistas.map(function () { return 0; });
+    universo.forEach(function (o) {
+      for (var i = 0; i < vistas.length; i++) if (!vistas[i].match || vistas[i].match(o)) counts[i]++;
+    });
+    var total = universo.length;
+    var kpis = vistas.map(function (v, i) {
+      var n = counts[i];
+      return {
+        id: v.id,
+        tone: v.tone,
+        label: v.label(ctx),
+        value: v.value ? v.value(ctx, n) : String(n),
+        sub: v.sub ? v.sub(ctx, n) : pct(n, total) + ' del total',
+        meter: Math.round((v.meter ? v.meter(ctx, n) : (total ? n / total : 0)) * 100),
+        activa: v.id === ui.vista
+      };
+    });
+
+    var vista = vistaPorId(tipo, ui.vista);
+    var match = vista && vista.match;
+    var q = norm(ui.q);
+    var filtradas = universo.filter(function (o) {
+      if (ui.cliente && o.idCliente !== ui.cliente) return false;
+      if (ui.estado && o.estado !== ui.estado) return false;
+      if (match && !match(o)) return false;
+      if (q) {
+        var heno = norm([o.codigo, o.codigoCotizacion, o.clienteNombre]
+          .concat((o.carga || []).map(function (c) { return c[0]; })).join(' '));
+        if (heno.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+
+    var cmp = comparadores[ui.sortBy] || comparadores.codigo;
+    var dir = ui.sortDir === 'desc' ? -1 : 1;
+    var ordenadas = filtradas.slice().sort(function (a, b) { return dir * cmp(a, b) || comparadores.codigo(a, b); });
+
+    var totalPaginas = Math.max(1, Math.ceil(ordenadas.length / ui.pageSize));
+    if (ui.page > totalPaginas) ui.page = totalPaginas;
+    if (ui.page < 1) ui.page = 1;
+    var desde = (ui.page - 1) * ui.pageSize;
+
+    // Catálogos de los filtros: solo valores que existen en este tipo.
+    var clientes = {}, anios = {};
+    delTipo.forEach(function (o) {
+      if (o.idCliente && !clientes[o.idCliente]) clientes[o.idCliente] = o.clienteNombre || o.idCliente;
+      if (o.anio) anios[o.anio] = true;
+    });
+
+    return {
+      tipo: tipo,
+      ui: ui,
+      ctx: ctx,
+      universo: universo,
+      kpis: kpis,
+      graficas: series(filtradas, tipo),
+      filas: ordenadas.slice(desde, desde + ui.pageSize),
+      paginacion: {
+        total: ordenadas.length, page: ui.page, totalPaginas: totalPaginas,
+        desde: ordenadas.length ? desde + 1 : 0, hasta: Math.min(desde + ui.pageSize, ordenadas.length)
+      },
+      catalogos: {
+        clientes: Object.keys(clientes).map(function (id) { return { value: id, text: clientes[id] }; })
+          .sort(function (a, b) { return a.text.localeCompare(b.text); }),
+        anios: Object.keys(anios).map(Number).sort(function (a, b) { return b - a; }),
+        estados: st.snap.estados || [ESTADO.CURSO, ESTADO.FIN, ESTADO.VENC]
+      },
+      chips: chips(ui, clientes, tipo)
+    };
+  }
+
+  /** Las 5 gráficas en una sola pasada por las órdenes filtradas. */
+  function series(rows, tipo) {
+    var porEstado = {}, porMes = {}, carga = {}, fact = {};
+    var pendientesTotal = 0;
+
+    rows.forEach(function (o) {
+      porEstado[o.estado] = (porEstado[o.estado] || 0) + 1;
+
+      if (o.fechaElaboracion) {
+        var ym = String(o.fechaElaboracion).slice(0, 7);
+        var g = porMes[ym] || (porMes[ym] = { n: 0, abiertas: 0 });
+        g.n++;
+        if (o.estado !== ESTADO.FIN) g.abiertas++;
+      }
+
+      (o.carga || []).forEach(function (c) {
+        var acc = carga[c[0]] || (carga[c[0]] = { nombre: c[0], pendientes: 0, vencidas: 0 });
+        acc.pendientes += c[1];
+        acc.vencidas += c[2];
+        pendientesTotal += c[1];
+      });
+
+      (o.fact || []).forEach(function (f) {
+        if (!f[0] || !f[1]) return;
+        var key = f[0] + '-' + String(f[1]).padStart(2, '0');
+        var m = fact[key] || (fact[key] = { total: 0, pendiente: 0, filas: 0 });
+        var cuota = Number(f[2]) || 0;
+        m.total += cuota;
+        m.filas++;
+        if (!f[3]) m.pendiente += cuota;
+      });
+    });
+
+    return {
+      estado: serieEstado(porEstado, rows.length),
+      meses: serieMeses(porMes),
+      vigencia: serieVigencia(rows),
+      carga: serieCarga(carga),
+      pendientesTotal: pendientesTotal,
+      fact: tipo === 'OIP' ? serieFact(fact) : null
+    };
+  }
+
+  function serieEstado(porEstado, total) {
+    var orden = [ESTADO.CURSO, ESTADO.FIN, ESTADO.VENC];
+    Object.keys(porEstado).forEach(function (k) { if (orden.indexOf(k) === -1) orden.push(k); });
+    var acumulado = 0, tramos = [];
+    var items = orden.filter(function (e) { return porEstado[e]; }).map(function (e) {
+      var n = porEstado[e];
+      var p = total ? (n / total) * 100 : 0;
+      var color = COLOR_ESTADO[e] || 'var(--border-strong)';
+      tramos.push(color + ' ' + acumulado.toFixed(2) + '% ' + (acumulado + p).toFixed(2) + '%');
+      acumulado += p;
+      return { nombre: e, n: n, color: color, pct: Math.round(p) + '%' };
+    });
+    return { items: items, total: total, gradient: tramos.length ? 'conic-gradient(' + tramos.join(', ') + ')' : 'var(--border)' };
+  }
+
+  function serieMeses(porMes) {
+    var claves = Object.keys(porMes).sort().slice(-MAX_MESES);
+    var max = 1;
+    claves.forEach(function (k) { max = Math.max(max, porMes[k].n); });
+    return claves.map(function (k) {
+      var g = porMes[k];
+      return {
+        label: mesLabel(k), valor: String(g.n),
+        alto: Math.max(6, Math.round((g.n / max) * 100)) + '%',
+        altoInterno: Math.round((g.abiertas / g.n) * 100) + '%'
+      };
+    });
+  }
+
+  function serieVigencia(rows) {
+    var abiertas = rows.filter(function (o) { return o.estado !== ESTADO.FIN && o.diasRestantes != null; });
+    abiertas.sort(function (a, b) { return a.diasRestantes - b.diasRestantes; });
+    var top = abiertas.slice(0, MAX_VIGENCIA);
+    var max = 1;
+    top.forEach(function (o) { max = Math.max(max, Math.abs(o.diasRestantes)); });
+    return top.map(function (o) {
+      return {
+        codigo: String(o.codigo || '').replace(/^OI[SP]-KGP-/, '#'),
+        titulo: o.codigo + (o.clienteNombre ? ' — ' + o.clienteNombre : ''),
+        dias: dias(o.diasRestantes),
+        clase: vigenciaClass(o.diasRestantes),
+        color: vigenciaColor(o.diasRestantes),
+        ancho: width(Math.abs(o.diasRestantes), max, 4)
+      };
+    });
+  }
+
+  function serieCarga(carga) {
+    var lista = Object.keys(carga).map(function (k) { return carga[k]; });
+    lista.sort(function (a, b) { return b.pendientes - a.pendientes || b.vencidas - a.vencidas; });
+    lista = lista.slice(0, MAX_RESPONSABLES);
+    var max = 1;
+    lista.forEach(function (c) { max = Math.max(max, c.pendientes); });
+    return lista.map(function (c) {
+      return {
+        nombre: c.nombre,
+        meta: c.pendientes + (c.pendientes === 1 ? ' pendiente' : ' pendientes') +
+          (c.vencidas ? ' · ' + c.vencidas + (c.vencidas === 1 ? ' vencida' : ' vencidas') : ''),
+        ancho: width(c.pendientes, max, 4),
+        // Ámbar si arrastra tareas vencidas: quién necesita apoyo salta a la vista.
+        color: c.vencidas ? 'var(--warning)' : 'var(--primary)'
+      };
+    });
+  }
+
+  function serieFact(fact) {
+    var claves = Object.keys(fact).sort().slice(-MAX_MESES);
+    var max = 1, facturado = 0, pendiente = 0;
+    claves.forEach(function (k) {
+      max = Math.max(max, fact[k].total);
+      facturado += fact[k].total - fact[k].pendiente;
+      pendiente += fact[k].pendiente;
+    });
+    return {
+      barras: claves.map(function (k) {
+        var m = fact[k];
+        return {
+          label: mesLabel(k),
+          // Filas sin cuota registrada: se muestra el conteo en vez de "—".
+          valor: m.total ? compactMoney(m.total) : m.filas + (m.filas === 1 ? ' fila' : ' filas'),
+          alto: Math.max(6, Math.round((m.total / max) * 100)) + '%',
+          altoInterno: m.total ? Math.round((m.pendiente / m.total) * 100) + '%' : '0%'
+        };
+      }),
+      meta: compactMoney(facturado) + ' facturado · ' + compactMoney(pendiente) + ' pendiente'
+    };
+  }
+
+  function chips(ui, clientes, tipo) {
+    var out = [];
+    if (ui.anio) out.push({ tipo: 'anio', label: 'Año ' + ui.anio });
+    if (ui.cliente) out.push({ tipo: 'cliente', label: clientes[ui.cliente] || ui.cliente });
+    if (ui.estado) out.push({ tipo: 'estado', label: ui.estado });
+    if (ui.vista && ui.vista !== 'all') {
+      var v = vistaPorId(tipo, ui.vista);
+      if (v) out.push({ tipo: 'vista', label: v.label({ tipo: tipo }) });
+    }
+    if (ui.q.trim()) out.push({ tipo: 'q', label: '“' + ui.q.trim() + '”' });
+    return out;
+  }
+
+  // ===================================================================
+  // View — pintado
+  // ===================================================================
+
+  function llenarSelect(sel, items, placeholder, seleccionado) {
+    sel.innerHTML = '';
+    sel.appendChild(new Option(placeholder, ''));
+    items.forEach(function (i) { sel.appendChild(new Option(i.text, i.value)); });
+    sel.value = seleccionado || '';
+  }
+
+  function barrasHtml(barras, vacio) {
+    return barras.length
+      ? barras.map(function (b) {
+        return '<div class="bar-col"><span class="bar-value">' + h(b.valor) + '</span>' +
+          '<div class="bar-stack" style="height:' + b.alto + '"><span style="height:' + b.altoInterno + '"></span></div>' +
+          '<span class="bar-label">' + h(b.label) + '</span></div>';
+      }).join('')
+      : '<div class="chart-empty">' + h(vacio) + '</div>';
+  }
+
+  function paint(vm) {
+    var tipo = vm.tipo;
+    var ui = vm.ui;
+
+    // ---- Cabecera ----
+    var abiertas = vm.universo.filter(function (o) { return o.estado !== ESTADO.FIN; }).length;
+    var vencidas = vm.universo.filter(function (o) { return o.estado === ESTADO.VENC; }).length;
+    var partes = [
+      vm.universo.length + ' ' + tipo,
+      abiertas + (abiertas === 1 ? ' abierta' : ' abiertas'),
+      vencidas + (vencidas === 1 ? ' vencida' : ' vencidas')
+    ];
+    if (vm.ctx.tareas) partes.push('avance de tareas ' + pct(vm.ctx.tareasFin, vm.ctx.tareas));
+    $('dord-summary').textContent = 'Seguimiento en tiempo real · ' + partes.join(' · ');
+    var marca = marcaTiempo(st.snap.generadoEn);
+    $('dord-updated').textContent = marca ? 'Actualizado ' + marca : '';
+
+    var avisos = st.snap.avisos || [];
+    $('dord-banner').hidden = !avisos.length;
+    $('dord-banner').textContent = avisos.join(' · ');
+
+    // ---- KPIs ----
+    $('dord-kpis').innerHTML = vm.kpis.map(function (k) {
+      var clases = ['kpi-card', 'kpi-action'];
+      if (k.tone) clases.push(k.tone);
+      if (k.activa) clases.push('kpi-active');
+      return '<button type="button" class="' + clases.join(' ') + '" data-vista="' + h(k.id) + '" aria-pressed="' + (k.activa ? 'true' : 'false') + '">' +
+        '<span class="label">' + h(k.label) + '</span>' +
+        '<span class="value">' + h(k.value) + '</span>' +
+        '<span class="sub">' + h(k.sub) + '</span>' +
+        '<span class="kpi-meter"><span style="width:' + k.meter + '%"></span></span>' +
+        '</button>';
+    }).join('');
+
+    // ---- Gráficas ----
+    var g = vm.graficas;
+    $('dord-donut').style.setProperty('--donut', g.estado.gradient);
+    $('dord-donut-total').textContent = g.estado.total;
+    $('dord-donut-meta').textContent = ui.anio || 'todos los años';
+    $('dord-donut-legend').innerHTML = g.estado.items.length
+      ? g.estado.items.map(function (i) {
+        return '<li><span class="legend-dot" style="background:' + i.color + '"></span>' +
+          '<span class="legend-name">' + h(i.nombre) + '</span>' +
+          '<span class="legend-count">' + i.n + '</span>' +
+          '<span class="legend-pct">' + i.pct + '</span></li>';
+      }).join('')
+      : '<li class="chart-empty">Sin datos</li>';
+
+    $('dord-bars').innerHTML = barrasHtml(g.meses, 'Sin ' + tipo + ' en el periodo filtrado');
+
+    $('dord-vigencia').innerHTML = g.vigencia.length
+      ? g.vigencia.map(function (v) {
+        return '<div class="hbar" title="' + h(v.titulo) + '">' +
+          '<span class="hbar-key">' + h(v.codigo) + '</span>' +
+          '<span class="hbar-track"><span style="width:' + v.ancho + ';background:' + v.color + '"></span></span>' +
+          '<span class="hbar-val ' + v.clase + '">' + h(v.dias) + '</span></div>';
+      }).join('')
+      : '<div class="chart-empty">Ninguna ' + h(tipo) + ' abierta con vencimiento</div>';
+
+    $('dord-carga-meta').textContent = g.pendientesTotal + (g.pendientesTotal === 1 ? ' tarea pendiente' : ' tareas pendientes');
+    $('dord-carga').innerHTML = g.carga.length
+      ? g.carga.map(function (c) {
+        return '<div class="hbar-labeled"><div class="hbar-head"><span class="hbar-name">' + h(c.nombre) + '</span>' +
+          '<span class="hbar-meta">' + h(c.meta) + '</span></div>' +
+          '<span class="hbar-track"><span style="width:' + c.ancho + ';background:' + c.color + '"></span></span></div>';
+      }).join('')
+      : '<div class="chart-empty">Sin tareas pendientes</div>';
+
+    $('dord-fact-card').hidden = !g.fact;
+    if (g.fact) {
+      $('dord-fact-meta').textContent = g.fact.meta;
+      $('dord-fact').innerHTML = barrasHtml(g.fact.barras, 'Sin facturación registrada');
+    }
+
+    // ---- Filtros, controles y chips ----
+    llenarSelect($('dord-filter-anio'), vm.catalogos.anios.map(function (a) { return { value: String(a), text: String(a) }; }), 'Todos los años', ui.anio);
+    llenarSelect($('dord-filter-cliente'), vm.catalogos.clientes, 'Todos los clientes', ui.cliente);
+    llenarSelect($('dord-filter-estado'), vm.catalogos.estados.map(function (e) { return { value: e, text: e }; }), 'Todos los estados', ui.estado);
+    // Si el valor guardado ya no existe en el catálogo (p. ej. otro tipo), se suelta.
+    if ($('dord-filter-anio').value !== ui.anio) ui.anio = '';
+    if ($('dord-filter-cliente').value !== ui.cliente) ui.cliente = '';
+    if (document.activeElement !== $('dord-search')) $('dord-search').value = ui.q;
+    $('dord-sort-by').value = ui.sortBy;
+    $('dord-page-size').value = String(ui.pageSize);
+    $('dord-sort-dir').textContent = ui.sortDir === 'asc' ? '↑ Ascendente' : '↓ Descendente';
+
+    var chipsBox = $('dord-chips');
+    chipsBox.hidden = !vm.chips.length;
+    chipsBox.innerHTML = vm.chips.length
+      ? '<span class="chips-label">Filtros</span>' + vm.chips.map(function (c) {
+        return '<button type="button" class="chip" data-chip="' + h(c.tipo) + '">' + h(c.label) +
+          '<span class="chip-x" aria-hidden="true">✕</span><span class="sr-only">Quitar filtro</span></button>';
+      }).join('')
+      : '';
+
+    // ---- Tabla ----
+    var tbody = $('dord-tbody');
+    tbody.innerHTML = vm.filas.length
+      ? vm.filas.map(filaHtml).join('')
+      : '<tr><td colspan="9" class="empty-state">' +
+        (vm.universo.length ? 'No hay ' + h(tipo) + ' que coincidan con los filtros.' : 'Aún no hay ' + h(tipo) + ' registradas.') +
+        '</td></tr>';
+
+    var p = vm.paginacion;
+    $('dord-page-info').textContent = p.total
+      ? 'Mostrando ' + p.desde + '–' + p.hasta + ' de ' + p.total + ' · página ' + p.page + ' de ' + p.totalPaginas
+      : 'Sin resultados';
+    $('dord-prev').disabled = p.page <= 1;
+    $('dord-next').disabled = p.page >= p.totalPaginas;
+  }
+
+  function filaHtml(o) {
+    var t = o.tareas;
+    var cerrada = o.estado === ESTADO.FIN;
+    var avance = t.total ? Math.round((t.finalizadas / t.total) * 100) : 0;
+    var tareasHtml = t.total
+      ? '<div class="dord-avance" title="' + avance + '% de las tareas finalizadas">' +
+        '<span class="dord-avance-num">' + t.finalizadas + '/' + t.total + '</span>' +
+        '<span class="kpi-meter"><span style="width:' + avance + '%"></span></span>' +
+        (t.vencidas ? '<span class="dord-avance-venc">' + t.vencidas + (t.vencidas === 1 ? ' vencida' : ' vencidas') + '</span>' : '') +
+        '</div>'
+      : '<span class="cell-muted">Sin tareas</span>';
+
+    var doc;
+    if (documentoInvalido(o)) {
+      doc = '<button type="button" class="btn btn-sm" data-regen="' + h(o.idOrden) + '">Regenerar</button>';
+    } else if (o.docEstado === 'PENDIENTE') {
+      doc = '<span class="cell-muted">Pendiente…</span>';
+    } else {
+      doc = '<a class="link" href="' + h(o.urlDocumento) + '" target="_blank" rel="noopener">Abrir ↗</a>';
+    }
+
+    return '<tr>' +
+      '<td class="cell-mono">' + h(o.codigo) + '</td>' +
+      '<td><span class="cell-cliente"><span class="cliente-nombre">' + h(o.clienteNombre || '—') + '</span>' +
+        '<span class="cliente-contacto">' + (o.codigoCotizacion ? 'Cotización ' + h(o.codigoCotizacion) : '—') + '</span></span></td>' +
+      '<td class="cell-muted cell-mono">' + h(o.fechaElaboracion || '—') + '</td>' +
+      '<td class="cell-muted cell-mono">' + h(o.fechaVencimiento || '—') + '</td>' +
+      // Una orden finalizada ya no corre contra su vencimiento.
+      '<td class="days-left ' + (cerrada ? '' : vigenciaClass(o.diasRestantes)) + '">' + (cerrada ? '—' : h(dias(o.diasRestantes))) + '</td>' +
+      '<td>' + tareasHtml + '</td>' +
+      '<td><span class="badge ' + estadoBadgeClass(o.estado) + '">' + h(o.estado) + '</span></td>' +
+      '<td>' + doc + '</td>' +
+      '<td><button type="button" class="btn btn-sm" data-abrir="' + h(o.idOrden) + '">Gestionar →</button></td>' +
+      '</tr>';
+  }
+
+  function programarRender() {
+    if (st.renderPendiente) return;
+    st.renderPendiente = true;
+    requestAnimationFrame(function () {
+      st.renderPendiente = false;
+      if (esOrden() && st.snap) paint(viewModel());
+    });
+  }
+
+  /** Revela el contenido del panel (con datos o con el error) y quita el spinner propio. */
+  function revelar() {
+    var listo = !!st.snap || !!st.error;
+    $('dord-loading').hidden = listo;
+    $('dord-content').hidden = !listo;
+    if (!st.snap && st.error) {
+      $('dord-tbody').innerHTML = '<tr><td colspan="9" class="empty-state">' + h(st.error) + '</td></tr>';
+    }
+  }
+
+  // ===================================================================
+  // Datos y polling
+  // ===================================================================
+
+  function fetchSnapshot(forzar) {
+    if (st.enVuelo) return;
+    st.enVuelo = true;
+    spinner(true);
+    var params = { sinceVersion: forzar ? null : st.version };
+
+    KGP.apiCall('api_getOrdenesDashboard', [params]).then(function (res) {
+      st.errores = 0;
+      st.error = '';
+      if (res.unchanged) return;
+      st.snap = res;
+      st.version = res.version;
+      KGP.localCache.set(CACHE_KEY, res);
+      programarRender();
+    }).catch(function (err) {
+      st.errores++;
+      if (!st.snap) st.error = 'No se pudo cargar el dashboard de órdenes: ' + KGP.friendlyError(err);
+      // En segundo plano (pestaña de cotizaciones visible) no se molesta con
+      // toasts: el error se ve al abrir la pestaña de órdenes.
+      if (st.activo && esOrden()) KGP.toast('Dashboard de órdenes: ' + KGP.friendlyError(err), 'error', 5000);
+    }).finally(function () {
+      st.enVuelo = false;
+      spinner(false);
+      if (esOrden()) revelar();
+      programarPoll();
+      KGP.hideLoader();
+    });
+  }
+
+  function spinner(visible) {
+    var s = $('dord-refresh-spinner');
+    if (s) s.style.display = visible ? 'inline-block' : 'none';
+  }
+
+  /** Solo se hace polling mientras se mira una pestaña de órdenes. */
+  function programarPoll() {
+    detenerPoll();
+    if (!st.activo || !esOrden() || document.hidden) return;
+    var base = st.errores ? POLL_BACKOFF_MS[Math.min(st.errores - 1, POLL_BACKOFF_MS.length - 1)] : POLL_BASE_MS;
+    var jitter = Math.floor(Math.random() * 10000) - 5000;
+    st.pollTimer = setTimeout(function () { fetchSnapshot(false); }, Math.max(5000, base + jitter));
+  }
+
+  function detenerPoll() {
+    if (st.pollTimer) { clearTimeout(st.pollTimer); st.pollTimer = null; }
+  }
+
+  // ===================================================================
+  // Selector de módulo (Cotizaciones / OIS / OIP)
+  // ===================================================================
+
+  function aplicarModulo() {
+    var orden = esOrden();
+    Array.prototype.forEach.call(document.querySelectorAll('#dash-modulos [data-modulo]'), function (b) {
+      var on = b.getAttribute('data-modulo') === st.modulo;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    $('dash-title').textContent = TITULOS[st.modulo];
+
+    // Cada módulo tiene su propio resumen y "Actualizar" en la cabecera.
+    ['dash-cot-panel', 'dash-summary', 'dash-updated', 'dash-refresh'].forEach(function (id) { $(id).hidden = orden; });
+    ['dord-panel', 'dord-summary', 'dord-updated', 'dord-refresh'].forEach(function (id) { $(id).hidden = !orden; });
+
+    if (orden) {
+      revelar();
+      programarRender();
+    }
+    programarPoll();
+  }
+
+  function setModulo(modulo) {
+    if (MODULOS.indexOf(modulo) === -1 || modulo === st.modulo) return;
+    st.modulo = modulo;
+    KGP.localCache.set(MODULO_KEY, modulo);
+    aplicarModulo();
+    // Al entrar a una pestaña de órdenes, comprobar si hay datos nuevos
+    // (protocolo de versión: casi siempre responde "sin cambios" sin leer hojas).
+    if (esOrden() && st.activo) fetchSnapshot(false);
+  }
+
+  // ===================================================================
+  // Eventos
+  // ===================================================================
+
+  function patchUi(patch, resetPage) {
+    var ui = uiActual();
+    Object.keys(patch).forEach(function (k) { ui[k] = patch[k]; });
+    if (resetPage !== false) ui.page = 1;
+    programarRender();
+  }
+
+  function debounce(fn, ms) {
+    var t;
+    return function () {
+      var args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(null, args); }, ms);
+    };
+  }
+
+  function abrirOrden(idOrden) {
+    if (st.modulo === 'OIS' && KGP.ois.openDetail) KGP.ois.openDetail(idOrden);
+    else if (st.modulo === 'OIP' && KGP.oip.openDetail) KGP.oip.openDetail(idOrden);
+  }
+
+  function regenerar(btn) {
+    var id = btn.getAttribute('data-regen');
+    var fn = st.modulo === 'OIS' ? 'api_regenerateOisDocument' : 'api_regenerateOipDocument';
+    btn.disabled = true;
+    btn.textContent = 'Generando…';
+    KGP.apiCall(fn, [id]).then(function () {
+      KGP.toast('Documento regenerado.', 'success');
+    }).catch(function (err) {
+      KGP.toast('Error al regenerar: ' + KGP.friendlyError(err), 'error');
+    }).finally(function () {
+      fetchSnapshot(true);
+    });
+  }
+
+  function wire() {
+    if (st.wired) return;
+    st.wired = true;
+
+    $('dash-modulos').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-modulo]');
+      if (b) setModulo(b.getAttribute('data-modulo'));
+    });
+
+    $('dord-refresh').addEventListener('click', function () { fetchSnapshot(true); });
+    $('dord-search').addEventListener('input', debounce(function (e) { patchUi({ q: e.target.value }); }, SEARCH_DEBOUNCE_MS));
+    $('dord-filter-anio').addEventListener('change', function (e) { patchUi({ anio: e.target.value }); });
+    $('dord-filter-cliente').addEventListener('change', function (e) { patchUi({ cliente: e.target.value }); });
+    $('dord-filter-estado').addEventListener('change', function (e) { patchUi({ estado: e.target.value, vista: 'all' }); });
+    $('dord-sort-by').addEventListener('change', function (e) { patchUi({ sortBy: e.target.value }); });
+    $('dord-page-size').addEventListener('change', function (e) { patchUi({ pageSize: Number(e.target.value) }); });
+    $('dord-sort-dir').addEventListener('click', function () {
+      patchUi({ sortDir: uiActual().sortDir === 'asc' ? 'desc' : 'asc' });
+    });
+    $('dord-reset').addEventListener('click', function () {
+      $('dord-search').value = '';
+      st.ui[st.modulo] = defaultUi();
+      programarRender();
+    });
+    $('dord-prev').addEventListener('click', function () {
+      var ui = uiActual();
+      if (ui.page > 1) patchUi({ page: ui.page - 1 }, false);
+    });
+    $('dord-next').addEventListener('click', function () { patchUi({ page: uiActual().page + 1 }, false); });
+
+    $('dord-kpis').addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-vista]');
+      if (!btn) return;
+      var id = btn.getAttribute('data-vista');
+      // Segundo clic sobre el KPI activo = volver a "todas".
+      patchUi({ vista: uiActual().vista === id ? 'all' : id, estado: '' });
+    });
+
+    $('dord-chips').addEventListener('click', function (e) {
+      var chip = e.target.closest('[data-chip]');
+      if (!chip) return;
+      var tipo = chip.getAttribute('data-chip');
+      var patch = {};
+      if (tipo === 'q') { $('dord-search').value = ''; patch.q = ''; }
+      else if (tipo === 'vista') patch.vista = 'all';
+      else patch[tipo] = '';
+      patchUi(patch);
+    });
+
+    $('dord-tbody').addEventListener('click', function (e) {
+      var abrir = e.target.closest('[data-abrir]');
+      if (abrir) return abrirOrden(abrir.getAttribute('data-abrir'));
+      var regen = e.target.closest('[data-regen]');
+      if (regen) regenerar(regen);
+    });
+
+    document.addEventListener('visibilitychange', function () {
+      if (!st.activo || !esOrden()) return;
+      if (document.hidden) detenerPoll();
+      else fetchSnapshot(false);
+    });
+  }
+
+  // ===================================================================
+  // Ciclo de vida (lo llama KGP.dashboard.onEnter/onLeave, JsDashboard.js.html)
+  // ===================================================================
+
+  KGP.dashboardOrdenes = {
+    onEnter: function () {
+      st.activo = true;
+      wire();
+
+      if (st.primeraVez) {
+        st.primeraVez = false;
+        var guardado = KGP.localCache.get(MODULO_KEY);
+        if (MODULOS.indexOf(guardado) !== -1) st.modulo = guardado;
+        var cacheado = KGP.localCache.get(CACHE_KEY);
+        if (cacheado && Array.isArray(cacheado.ordenes)) st.snap = cacheado; // st.version sigue null: se pide el real igual
+        aplicarModulo();
+        // Siempre se pide el dato real, aunque se esté mirando la pestaña de
+        // cotizaciones: así pasar a OIS/OIP es instantáneo. En ese caso se
+        // difiere un poco para no competir con la carga de las cotizaciones.
+        if (esOrden()) fetchSnapshot(true);
+        else setTimeout(function () { fetchSnapshot(true); }, 1500);
+        return;
+      }
+
+      aplicarModulo();
+      if (esOrden()) fetchSnapshot(false);
+    },
+
+    onLeave: function () {
+      st.activo = false;
+      detenerPoll();
+    }
+  };
+
+}(window.KGP));
+</script>

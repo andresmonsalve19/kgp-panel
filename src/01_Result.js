@@ -21,8 +21,14 @@ function fail_(code, message, details) {
   };
 }
 
+/**
+ * Metadatos de toda respuesta: hora del servidor y versión de la app, más
+ * los campos de `extra`.
+ * @param {Object=} extra
+ * @return {!Object}
+ */
 function meta_(extra) {
-  var base = { ts: new Date().toISOString(), v: CFG().APP_VERSION };
+  var base = { ts: new Date().toISOString(), v: CFG_().APP_VERSION };
   if (extra) {
     for (var k in extra) { base[k] = extra[k]; }
   }

@@ -12,14 +12,15 @@
  */
 
 function qr_tableCotizaciones_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.COTIZACIONES);
-  repo_requireCols_(t.hmap, CFG().TABS.COTIZACIONES, SCHEMA().COTIZACIONES.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.COTIZACIONES);
+  repo_requireCols_(t.hmap, CFG_().TABS.COTIZACIONES, SCHEMA_().COTIZACIONES.required);
   return t;
 }
 
+/** SERVICIOS leída (memo) y con sus columnas requeridas verificadas. */
 function qr_tableServicios_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.SERVICIOS);
-  repo_requireCols_(t.hmap, CFG().TABS.SERVICIOS, SCHEMA().SERVICIOS.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.SERVICIOS);
+  repo_requireCols_(t.hmap, CFG_().TABS.SERVICIOS, SCHEMA_().SERVICIOS.required);
   return t;
 }
 
@@ -31,8 +32,8 @@ function qr_tableServicios_() {
  * Lanza SCHEMA con la lista exacta de columnas que faltan.
  */
 function qr_requireTarifaCols_() {
-  repo_requireCols_(qr_tableServicios_().hmap, CFG().TABS.SERVICIOS, ['TARIFA', 'CANTIDAD', 'TOTAL', 'OBSERVACIONES']);
-  repo_requireCols_(qr_tableCotizaciones_().hmap, CFG().TABS.COTIZACIONES, ['SUBTOTAL', 'IVA', 'TOTAL']);
+  repo_requireCols_(qr_tableServicios_().hmap, CFG_().TABS.SERVICIOS, ['TARIFA', 'CANTIDAD', 'TOTAL', 'OBSERVACIONES']);
+  repo_requireCols_(qr_tableCotizaciones_().hmap, CFG_().TABS.COTIZACIONES, ['SUBTOTAL', 'IVA', 'TOTAL']);
 }
 
 /** Celda numérica de Sheets -> número, o '' si está vacía / no es numérica. */
@@ -67,7 +68,7 @@ function qr_formatActividades_(numeroServicio, actividades) {
 function qr_createServicios_(idCotizacion, servicios) {
   var out = [];
   var rows = servicios.map(function (s) {
-    var idServicio = id_new_('SRV');
+    var idServicio = id_new_(CFG_().ID_PREFIJO_SERVICIO);
     out.push({ numero: s.numero, idServicio: idServicio });
     return {
       'ID SERVICIO': idServicio,
@@ -82,7 +83,7 @@ function qr_createServicios_(idCotizacion, servicios) {
       'OBSERVACIONES': s.observaciones
     };
   });
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.SERVICIOS, rows);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.SERVICIOS, rows);
   return out;
 }
 
@@ -147,7 +148,7 @@ function qr_createCotizaciones_(ctx, serviciosConId) {
     return row;
   });
 
-  return repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.COTIZACIONES, rows);
+  return repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.COTIZACIONES, rows);
 }
 
 /** Todas las filas (una por servicio) de una cotización. */
@@ -206,12 +207,13 @@ function qr_updateCamposCompartidos_(idCotizacion, patch) {
     throw new AppError_('NOT_FOUND', 'No existe la cotización ' + idCotizacion);
   }
   var now = new Date();
-  matches.forEach(function (m) {
-    var full = {};
-    for (var k in patch) full[k] = patch[k];
-    if (hasActualizadoEn) full['ACTUALIZADO EN'] = now;
-    repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.COTIZACIONES, m.rowIndex, full);
-  });
+  var full = {};
+  for (var k in patch) full[k] = patch[k];
+  if (hasActualizadoEn) full['ACTUALIZADO EN'] = now;
+  // Todas las filas de la cotización con UNA sola lectura de la hoja.
+  repo_updateCellsMany_(CFG_().DB_SHEET_ID, CFG_().TABS.COTIZACIONES, matches.map(function (m) {
+    return { rowIndex: m.rowIndex, patch: full };
+  }));
   return now;
 }
 
@@ -220,7 +222,7 @@ function qr_updateServicio_(idServicio, numero, datos) {
   var table = qr_tableServicios_();
   var match = repo_findRowByCol_(table, 'ID SERVICIO', idServicio);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el servicio ' + idServicio + '.');
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.SERVICIOS, match.rowIndex, {
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.SERVICIOS, match.rowIndex, {
     'TIPO': cleanText_(datos.tipo),
     'CODIGO UNSPSC': cleanText_(datos.codigoUnspsc),
     'DESCRIPCION': cleanText_(datos.descripcion),
@@ -238,7 +240,7 @@ function qr_updateNumeroServicio_(idCotizacion, idServicio, numero) {
   var matches = repo_findRowsByCol_(table, 'ID COTIZACION', [idCotizacion]);
   var match = matches.filter(function (m) { return m.obj[normText_('ID SERVICIO')] === idServicio; })[0];
   if (match) {
-    repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.COTIZACIONES, match.rowIndex, { 'NUMERO SERVICIO': numero });
+    repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.COTIZACIONES, match.rowIndex, { 'NUMERO SERVICIO': numero });
   }
 }
 
@@ -247,11 +249,11 @@ function qr_deleteServicio_(idCotizacion, idServicio) {
   var tablaC = qr_tableCotizaciones_();
   var matchC = repo_findRowsByCol_(tablaC, 'ID COTIZACION', [idCotizacion])
     .filter(function (m) { return m.obj[normText_('ID SERVICIO')] === idServicio; })[0];
-  if (matchC) repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.COTIZACIONES, [matchC.rowIndex]);
+  if (matchC) repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.COTIZACIONES, [matchC.rowIndex]);
 
   var tablaS = qr_tableServicios_();
   var matchS = repo_findRowByCol_(tablaS, 'ID SERVICIO', idServicio);
-  if (matchS) repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.SERVICIOS, [matchS.rowIndex]);
+  if (matchS) repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.SERVICIOS, [matchS.rowIndex]);
 }
 
 /**
@@ -274,12 +276,12 @@ function qr_updateDocInfo_(idCotizacion, docUrl, docEstado, docFileId) {
   var hasDocFileId = qr_hasOptionalCol_(table, 'DOC FILE ID');
   if (!hasDocUrl && !hasDocEstado && !hasDocFileId) return;
 
+  var patch = {};
+  if (hasDocUrl && docUrl !== undefined) patch['URL DOCUMENTO'] = docUrl || '';
+  if (hasDocEstado) patch['DOC ESTADO'] = docEstado;
+  if (hasDocFileId && docFileId !== undefined) patch['DOC FILE ID'] = docFileId || '';
   var matches = repo_findRowsByCol_(table, 'ID COTIZACION', [idCotizacion]);
-  matches.forEach(function (m) {
-    var patch = {};
-    if (hasDocUrl && docUrl !== undefined) patch['URL DOCUMENTO'] = docUrl || '';
-    if (hasDocEstado) patch['DOC ESTADO'] = docEstado;
-    if (hasDocFileId && docFileId !== undefined) patch['DOC FILE ID'] = docFileId || '';
-    repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.COTIZACIONES, m.rowIndex, patch);
-  });
+  repo_updateCellsMany_(CFG_().DB_SHEET_ID, CFG_().TABS.COTIZACIONES, matches.map(function (m) {
+    return { rowIndex: m.rowIndex, patch: patch };
+  }));
 }

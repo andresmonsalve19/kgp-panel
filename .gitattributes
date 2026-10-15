@@ -1,0 +1,7 @@
+# Finales de línea normalizados a LF en el repo y en la copia de trabajo
+# (clasp sube los archivos tal cual; evita diffs de solo CRLF/LF en Windows).
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary

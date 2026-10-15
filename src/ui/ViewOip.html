@@ -1,0 +1,378 @@
+<!-- Vista "Gestionar OIP": calca "Gestionar OIS" (ViewOis.html) — mismo
+     listado buscable/filtrable con filas clickeables y el mismo detalle de
+     edición con los datos compartidos de la cotización padre
+     (cliente/solicitante/establecimiento/encargado/servicios SIN tarifas) y
+     sin Asesor comercial.
+
+     Lo propio de esta vista frente a la OIS:
+       - Tareas agrupadas por mes de FECHA ENTREGA, con filtros de año/mes/
+         estado y un apartado aparte de tareas de meses anteriores sin cerrar.
+       - Sección Facturación (tabla + "Agregar Factura"), que se guarda en la
+         BD al instante y nunca va al documento.
+     Los cambios se guardan con api_updateOip (BD) y luego se regeneran los
+     documentos: el de la OIP siempre, el de la cotización solo si cambió algo
+     compartido. -->
+<section class="view" id="view-oip">
+  <div class="page-header">
+    <div>
+      <h1>Gestionar OIP</h1>
+      <div class="desc">Órdenes creadas al aprobar una cotización como OIP. Edita sus datos, sus tareas y su facturación mensual; los cambios compartidos también actualizan la cotización.</div>
+    </div>
+  </div>
+
+  <!-- ---------- Estado: listado ---------- -->
+  <div id="op-list-wrap">
+    <div class="card">
+      <div class="filters-row">
+        <input type="text" class="search-input" id="op-search" placeholder="Buscar por código, cotización o cliente…">
+        <select id="op-filter-anio">
+          <option value="">Todos los años</option>
+        </select>
+        <select id="op-filter-estado">
+          <option value="">Todos los estados</option>
+          <option value="En curso">En curso</option>
+          <option value="Finalizada">Finalizada</option>
+          <option value="Vencida">Vencida</option>
+        </select>
+        <select id="op-sort-by" title="Ordenar por">
+          <option value="codigo">Ordenar por Código</option>
+          <option value="codigoCotizacion">Ordenar por Cotización</option>
+          <option value="cliente">Ordenar por Cliente</option>
+          <option value="fechaElaboracion">Ordenar por Elaboración</option>
+          <option value="fechaVencimiento">Ordenar por Vencimiento</option>
+          <option value="estado">Ordenar por Estado</option>
+          <option value="tareas">Ordenar por Tareas</option>
+        </select>
+        <button type="button" class="btn btn-sm" id="op-sort-dir" title="Cambiar orden ascendente/descendente">↑ Ascendente</button>
+        <select id="op-page-size" title="Resultados por página">
+          <option value="20">20 / página</option>
+          <option value="50">50 / página</option>
+          <option value="100">100 / página</option>
+        </select>
+        <button type="button" class="btn btn-sm" id="op-refresh-btn">
+          <span id="op-refresh-spinner" style="display:none;" class="spinner dark"></span>
+          Actualizar
+        </button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Código OIP</th>
+              <th>Cotización</th>
+              <th>Cliente</th>
+              <th>Elaboración</th>
+              <th>Vencimiento</th>
+              <th>Tareas</th>
+              <th>Estado</th>
+            </tr>
+          </thead>
+          <tbody id="op-tbody">
+            <tr><td colspan="7" class="empty-state">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination-row">
+        <span id="op-page-info">—</span>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn btn-sm" id="op-prev">← Anterior</button>
+          <button type="button" class="btn btn-sm" id="op-next">Siguiente →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ---------- Estado: detalle / edición ----------
+       Mismo patrón que Gestionar OIS (CLAUDE.md §3): nada del formulario se
+       ve hasta que la OIP termina de cargar. -->
+  <div id="op-detail-wrap" hidden>
+    <div id="op-detail-loading" class="detail-loading">
+      <span class="spinner-lg"></span>
+      <div class="page-loader-text" id="op-detail-loading-text">Cargando OIP…</div>
+    </div>
+
+    <div id="op-detail-content" hidden>
+    <div class="detail-header-row">
+      <button type="button" class="back-link" id="op-back-btn">← Volver al listado</button>
+      <div class="detail-header-actions">
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-ver-cot-btn">Ver cotización</button>
+        <a href="#" target="_blank" rel="noopener" class="btn btn-sm btn-ghost-primary" id="op-abrir-doc-btn" hidden>Abrir documento ↗</a>
+      </div>
+    </div>
+
+    <div class="card resumen-card">
+      <div class="resumen-head resumen-head-oi">
+        <span class="badge badge-revision resumen-estado" id="op-res-estado">En curso</span>
+        <div class="resumen-title">
+          <div class="resumen-codigo-oi" id="op-res-title">—</div>
+          <!-- A diferencia de la OIS, una OIP Finalizada NO se bloquea: sigue
+               facturando. Por eso aquí no hay aviso de "quedará de solo
+               lectura". -->
+          <div class="hint" id="op-res-cierre" hidden>Todas las tareas están finalizadas: al guardar, la OIP quedará marcada como Finalizada (se puede seguir editando y facturando).</div>
+        </div>
+      </div>
+      <div class="resumen-meta-row">
+        <div class="resumen-meta-item"><span class="meta-label">Cotización</span><span class="meta-value" id="op-res-cot">—</span></div>
+        <div class="resumen-meta-item"><span class="meta-label">Fecha de elaboración</span><span class="meta-value" id="op-res-fecha">—</span></div>
+        <div class="resumen-meta-item"><span class="meta-label">Vencimiento</span><span class="meta-value" id="op-res-venc">—</span></div>
+        <div class="resumen-meta-item"><span class="meta-label">Tareas finalizadas</span><span class="meta-value" id="op-res-tareas">0/0</span></div>
+        <div class="resumen-meta-item"><span class="meta-label">Facturado</span><span class="meta-value" id="op-res-facturado">—</span></div>
+        <div class="resumen-meta-item"><span class="meta-label">Elaborado por</span><span class="meta-value" id="op-res-elaborado">—</span></div>
+        <div class="resumen-meta-item"><span class="meta-label">Actualizado por</span><span class="meta-value" id="op-res-actualizado">—</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Datos de la OIP</div>
+      <div class="field-grid">
+        <div class="field">
+          <label>Código</label>
+          <input type="text" class="codigo-preview" id="op-codigo" readonly value="—">
+        </div>
+        <div class="field">
+          <label>Cotización de origen</label>
+          <input type="text" id="op-cotizacion" readonly value="—">
+          <div class="hint" id="op-id-cotizacion"></div>
+        </div>
+        <div class="field">
+          <label>Fecha de elaboración</label>
+          <input type="text" id="op-fecha" readonly value="—">
+        </div>
+        <div class="field" data-field="plazo">
+          <label for="op-plazo">Plazo (días) <span class="req">*</span></label>
+          <input type="number" id="op-plazo" min="1" max="365" step="1" required data-cfg-max="MAX_PLAZO_DIAS">
+          <div class="err" data-cfg-plantilla="Ingresa un plazo entre 1 y {MAX_PLAZO_DIAS} días.">Ingresa un plazo entre 1 y 365 días.</div>
+        </div>
+        <div class="field">
+          <label>Fecha de vencimiento</label>
+          <input type="text" id="op-fecha-venc" readonly value="—">
+          <div class="hint">Fecha de elaboración + plazo.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title-row">
+        <div class="section-title">Cliente</div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-cliente-nuevo-btn">+ Agregar nuevo cliente</button>
+      </div>
+      <div class="field" data-field="cliente">
+        <label for="op-cliente-select">Selecciona un cliente <span class="req">*</span></label>
+        <div class="picker-row">
+          <select id="op-cliente-select"><option value="">— Selecciona —</option></select>
+          <button type="button" class="btn btn-sm btn-icon-edit" id="op-cliente-editar-btn" disabled title="Editar cliente"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
+        </div>
+        <div class="err">Selecciona un cliente.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title-row">
+        <div class="section-title">Solicitante (contacto del cliente)</div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-solicitante-nuevo-btn">+ Agregar contacto del cliente</button>
+      </div>
+      <div class="field" data-field="solicitante">
+        <label for="op-solicitante-select">Selecciona un contacto <span class="req">*</span></label>
+        <div class="picker-row">
+          <select id="op-solicitante-select"><option value="">— Selecciona —</option></select>
+          <button type="button" class="btn btn-sm btn-icon-edit" id="op-solicitante-editar-btn" disabled title="Editar contacto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
+        </div>
+        <div class="err">Selecciona un solicitante.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title-row">
+        <div class="section-title">Establecimiento a atender</div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-establecimiento-nuevo-btn">+ Agregar establecimiento</button>
+      </div>
+      <div class="field" data-field="establecimiento">
+        <label for="op-establecimiento-select">Selecciona un establecimiento <span class="req">*</span></label>
+        <div class="picker-row">
+          <select id="op-establecimiento-select"><option value="">— Selecciona —</option></select>
+          <button type="button" class="btn btn-sm btn-icon-edit" id="op-establecimiento-editar-btn" disabled title="Editar establecimiento"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
+        </div>
+        <div class="err">Selecciona un establecimiento.</div>
+      </div>
+
+      <hr class="divider">
+      <div class="section-title-row" style="margin-bottom:10px;">
+        <div class="section-title">Encargado de este establecimiento</div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-encargado-nuevo-btn">+ Agregar contacto encargado</button>
+      </div>
+      <div class="field" data-field="encargado">
+        <label for="op-encargado-select">Contacto encargado (opcional)</label>
+        <div class="picker-row">
+          <select id="op-encargado-select"><option value="">— Selecciona —</option></select>
+          <button type="button" class="btn btn-sm btn-icon-edit" id="op-encargado-editar-btn" disabled title="Editar contacto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mismos servicios de la cotización padre (tpl-servicio + KGP.servicioModal
+         SIN showTarifas): las tarifas no se ven ni se editan aquí, y el
+         servidor conserva las ya guardadas al reescribir la cotización. -->
+    <div class="card">
+      <div class="section-title">
+        Servicios <span class="badge-count" id="op-servicios-count">(0/10)</span>
+      </div>
+      <div class="hint" style="margin-bottom:12px;">Son los mismos servicios de la cotización: cualquier cambio aquí también se guarda en la cotización y en su documento.</div>
+      <div id="op-servicios-list"></div>
+      <button type="button" class="add-row-btn" id="op-add-servicio">+ Agregar servicio</button>
+      <div class="limit-note">Máximo 10 servicios.</div>
+    </div>
+
+    <!-- ---------- Tareas, agrupadas por mes de FECHA ENTREGA ---------- -->
+    <div class="card">
+      <div class="section-title-row">
+        <div class="section-title">
+          Tareas <span class="badge-count" id="op-tareas-count">(0/200)</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-add-tarea">+ Agregar tarea</button>
+      </div>
+      <div class="hint" style="margin-bottom:12px;">Las tareas nuevas, editadas, finalizadas o eliminadas solo se guardan en la base de datos al oprimir "Guardar cambios". Una tarea pertenece al mes de su fecha de entrega.</div>
+
+      <div class="filters-row tareas-filters">
+        <select id="op-tareas-anio" title="Año de las tareas"></select>
+        <select id="op-tareas-mes" title="Mes de las tareas">
+          <option value="">Todos los meses</option>
+        </select>
+        <select id="op-tareas-estado" title="Estado de las tareas">
+          <option value="">Todas</option>
+          <option value="En curso">Pendientes</option>
+          <option value="Finalizada">Completadas</option>
+        </select>
+        <button type="button" class="btn btn-sm" id="op-tareas-mes-actual">Mes actual</button>
+      </div>
+
+      <!-- Apartado de arrastre: tareas de meses ANTERIORES al filtrado que
+           siguen sin cerrar. Se arma solo, no depende del filtro de mes. -->
+      <div id="op-tareas-vencidas-group" class="tareas-group tareas-group-vencidas" hidden>
+        <div class="tareas-group-title">
+          <span>Vencidas o pendientes de meses anteriores</span>
+          <span class="badge-count" id="op-tareas-vencidas-count">(0)</span>
+        </div>
+        <div id="op-tareas-vencidas-list"></div>
+      </div>
+
+      <div class="tareas-group">
+        <div class="tareas-group-title">
+          <span id="op-tareas-group-label">Tareas del mes</span>
+          <span class="badge-count" id="op-tareas-mes-count">(0)</span>
+        </div>
+        <div id="op-tareas-list"></div>
+      </div>
+
+      <div class="limit-note">Máximo 200 tareas por OIP.</div>
+    </div>
+
+    <!-- ---------- Facturación ----------
+         A diferencia de las tareas, cada fila se guarda en la base de datos
+         en el momento (api_saveOipFactura) y no se escribe en el documento. -->
+    <div class="card">
+      <div class="section-title-row">
+        <div class="section-title">
+          Facturación <span class="badge-count" id="op-fact-count">(0)</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-add-factura">+ Agregar Factura</button>
+      </div>
+      <div class="hint" style="margin-bottom:12px;">Control de la facturación mensual de esta OIP. Cada fila se guarda de inmediato (no espera a "Guardar cambios"). El día 1 de cada mes llega un recordatorio por correo con el mes pendiente de facturar.</div>
+
+      <div class="table-wrap">
+        <table class="data-table fact-table">
+          <thead>
+            <tr>
+              <th># Factura</th>
+              <th>Año</th>
+              <th>Mes</th>
+              <th>Cuota</th>
+              <th>Número factura</th>
+              <th>Estado</th>
+              <th>Notificado</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="op-fact-tbody">
+            <tr><td colspan="8" class="empty-state">Aún no hay facturación registrada en esta OIP.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Totales de la facturación: SUBTOTAL = suma de las cuotas de TODAS las
+           filas (facturadas y pendientes), IVA = SUBTOTAL × 19 %, TOTAL =
+           SUBTOTAL + IVA. Solo se muestran (no se guardan en ninguna hoja):
+           se recalculan en el cliente cada vez que cambia la tabla, ver
+           renderFacturacion en JsOip.js.html. Mismo bloque visual que el
+           resumen de "Gestionar cotización". -->
+      <div class="resumen-money-row fact-totales">
+        <div class="kpi-card"><div class="label">Subtotal</div><div class="value" id="op-fact-subtotal">$0</div></div>
+        <div class="kpi-card"><div class="label">IVA (19%)</div><div class="value" id="op-fact-iva">$0</div></div>
+        <div class="kpi-card good"><div class="label">Total</div><div class="value" id="op-fact-total">$0</div></div>
+      </div>
+    </div>
+
+    <div class="card card-guardar">
+      <button type="button" class="btn btn-primary" id="op-guardar-btn">Guardar cambios</button>
+      <div id="op-doc-status" class="result-doc"></div>
+    </div>
+    </div>
+  </div>
+</section>
+
+<!-- ---------- Popup: agregar/editar una fila de facturación ----------
+     A diferencia del popup de tarea, "Guardar" aquí SÍ escribe en la base de
+     datos de inmediato (api_saveOipFactura). -->
+<div class="modal-overlay" id="factura-modal-overlay">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="factura-modal-title">
+    <div class="modal-header">
+      <h2 id="factura-modal-title">Agregar factura</h2>
+      <button type="button" class="modal-close" id="factura-modal-close" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="modal-body" id="factura-modal-body">
+      <div class="field-grid">
+        <div class="field">
+          <label for="fm-numero"># Factura</label>
+          <input type="text" class="codigo-preview" id="fm-numero" readonly value="—">
+          <div class="hint">Consecutivo dentro de esta OIP.</div>
+        </div>
+        <div class="field" data-field="year">
+          <label for="fm-year">Año <span class="req">*</span></label>
+          <select id="fm-year"></select>
+          <div class="err">Selecciona el año.</div>
+        </div>
+        <div class="field" data-field="mes">
+          <label for="fm-mes">Mes <span class="req">*</span></label>
+          <select id="fm-mes"></select>
+          <div class="err">Selecciona el mes.</div>
+        </div>
+        <div class="field" data-field="cuota">
+          <label for="fm-cuota">Cuota</label>
+          <input type="text" id="fm-cuota" inputmode="numeric" placeholder="$0">
+          <div class="err">Ingresa un valor válido.</div>
+          <div class="hint">Valor a facturar en el mes.</div>
+        </div>
+        <div class="field">
+          <label for="fm-num-factura">Número factura</label>
+          <input type="text" id="fm-num-factura" maxlength="60" placeholder="Ej. FV-1234">
+        </div>
+        <div class="field" data-field="estado">
+          <label for="fm-estado">Estado <span class="req">*</span></label>
+          <select id="fm-estado">
+            <option value="PENDIENTE DE FACTURAR">PENDIENTE DE FACTURAR</option>
+            <option value="FACTURADO">FACTURADO</option>
+          </select>
+          <div class="err">Selecciona el estado.</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-sm" id="factura-modal-cancel">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="factura-modal-save">
+        <span id="factura-modal-spinner" style="display:none;" class="spinner"></span>
+        Guardar
+      </button>
+    </div>
+  </div>
+</div>

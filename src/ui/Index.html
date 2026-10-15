@@ -25,7 +25,10 @@
     <?!= include('ui/ViewDashboard'); ?>
     <?!= include('ui/ViewGestion'); ?>
     <?!= include('ui/ViewOis'); ?>
+    <?!= include('ui/ViewOip'); ?>
+    <?!= include('ui/ViewTareas'); ?>
     <?!= include('ui/ViewEmpleados'); ?>
+    <?!= include('ui/ViewClientes'); ?>
   </main>
 </div>
 
@@ -33,13 +36,21 @@
 
 <script>
   window.KGP_INITIAL_VIEW = <?!= JSON.stringify(initialView); ?>;
+  // Parámetros de la hoja de configuración (CONFIG_*), leídos por doGet en
+  // esta misma carga (06_ConfigSheet.js, cfgs_clientConfig_). Se consultan
+  // con KGP.cfg('CLAVE', def) (números) o KGP.cfgTexto('CLAVE', def) (textos).
+  window.KGP_CONFIG = <?!= clientConfigJson ?>;
 </script>
 <?!= include('ui/JsCore.js'); ?>
 <?!= include('ui/JsCotizacion.js'); ?>
 <?!= include('ui/JsDashboard.js'); ?>
+<?!= include('ui/JsDashboardOrdenes.js'); ?>
 <?!= include('ui/JsGestion.js'); ?>
 <?!= include('ui/JsOis.js'); ?>
+<?!= include('ui/JsOip.js'); ?>
+<?!= include('ui/JsTareas.js'); ?>
 <?!= include('ui/JsEmpleados.js'); ?>
+<?!= include('ui/JsClientes.js'); ?>
 <script>
   KGP.init();
 </script>

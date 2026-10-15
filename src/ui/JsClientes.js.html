@@ -1,0 +1,508 @@
+<script>
+/**
+ * Lógica de la vista "Gestión de clientes" (ui/ViewClientes.html).
+ *
+ * Listado: api_listClientesGestion (todos los clientes con sus conteos),
+ * filtrado y paginado en el cliente — mismo criterio que "Gestión de
+ * empleados" (la tabla crece un cliente a la vez). Se carga una vez por
+ * sesión; "Actualizar" lo repite.
+ *
+ * Detalle: api_getClienteGestion (datos + contactos + establecimientos +
+ * cotizaciones) en un solo round-trip, SIEMPRE fresco (se edita sobre él,
+ * mismo criterio que el detalle de "Gestionar cotización", CLAUDE.md §2.2.5).
+ * Bloquea con #cli-detail-loading hasta tenerlo.
+ *
+ * Altas/ediciones: KGP.entityModal + los endpoints de siempre
+ * (api_createCliente, api_updateCliente, api_createContacto, ...). Bajas: un
+ * confirm en 2 pasos por fila y el servidor las rechaza (CONFLICT) si alguna
+ * cotización usa el registro. Tras cualquier cambio: se refresca el detalle,
+ * se marca el listado como viejo y KGP.catalog se recarga en segundo plano
+ * (los desplegables de cliente de las demás vistas salen de ahí).
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  KGP.clientes = KGP.clientes || {};
+
+  var list = { all: [], q: '', page: 1, pageSize: 10, loaded: false, stale: false, confirmDeleteId: null };
+  var det = { id: null, data: null, confirm: null }; // confirm: {tipo:'cliente'|'contacto'|'establecimiento', id}
+  var eventsWired = false;
+
+  var EDIT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+  var TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return KGP.escapeHtml(s == null ? '' : s); }
+  function guion(s) { return s === '' || s == null ? '—' : esc(s); }
+
+  KGP.clientes.onEnter = function () {
+    wireEvents();
+    if (!list.loaded || list.stale) fetchList({ silent: list.loaded });
+  };
+
+  // =====================================================================
+  // Listado
+  // =====================================================================
+
+  function fetchList(opts) {
+    opts = opts || {};
+    if (!opts.silent) $('cli-tbody').innerHTML = '<tr><td colspan="8" class="empty-state">Cargando…</td></tr>';
+    setRefreshSpinner(true);
+    return KGP.apiCall('api_listClientesGestion', []).then(function (res) {
+      list.all = res.clientes || [];
+      list.loaded = true;
+      list.stale = false;
+      list.confirmDeleteId = null;
+      renderList();
+    }).catch(function (err) {
+      if (!list.loaded) $('cli-tbody').innerHTML = '<tr><td colspan="8" class="empty-state">No se pudo cargar el listado.</td></tr>';
+      KGP.toast('No se pudo cargar el listado de clientes: ' + KGP.friendlyError(err), 'error');
+    }).finally(function () {
+      setRefreshSpinner(false);
+    });
+  }
+
+  function setRefreshSpinner(show) {
+    var el = $('cli-refresh-spinner');
+    if (el) el.style.display = show ? 'inline-block' : 'none';
+  }
+
+  function norm(s) {
+    return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  }
+
+  function filtered() {
+    var q = norm(list.q).trim();
+    var rows = list.all.slice().sort(function (a, b) { return norm(a.razonSocial) < norm(b.razonSocial) ? -1 : 1; });
+    if (!q) return rows;
+    return rows.filter(function (c) {
+      return [c.razonSocial, c.numeroIdentificacion, c.ciudad, c.departamento, c.telefono].some(function (v) { return norm(v).indexOf(q) !== -1; });
+    });
+  }
+
+  function renderList() {
+    var rows = filtered();
+    var totalPages = Math.max(1, Math.ceil(rows.length / list.pageSize));
+    if (list.page > totalPages) list.page = totalPages;
+    var start = (list.page - 1) * list.pageSize;
+    var page = rows.slice(start, start + list.pageSize);
+
+    $('cli-tbody').innerHTML = page.length ? page.map(rowHtml).join('') :
+      '<tr><td colspan="8" class="empty-state">' + (list.all.length ? 'No hay clientes que coincidan con la búsqueda.' : 'No hay clientes registrados todavía.') + '</td></tr>';
+
+    var end = Math.min(start + list.pageSize, rows.length);
+    $('cli-page-info').textContent = rows.length ? ('Mostrando ' + (start + 1) + '–' + end + ' de ' + rows.length) : 'Sin resultados';
+    $('cli-prev').disabled = list.page <= 1;
+    $('cli-next').disabled = end >= rows.length;
+  }
+
+  function rowHtml(c) {
+    var id = esc(c.idCliente);
+    var acciones = list.confirmDeleteId === c.idCliente
+      ? confirmHtml('cliente', c.idCliente)
+      : '<div class="picker-row">' +
+        '<button type="button" class="btn btn-sm btn-ghost-primary" data-action="ver" data-id="' + id + '">Ver</button>' +
+        '<button type="button" class="btn btn-sm btn-icon-edit" data-action="editar" data-id="' + id + '" title="Editar cliente">' + EDIT_SVG + '</button>' +
+        '<button type="button" class="btn btn-sm btn-icon-delete" data-action="borrar" data-id="' + id + '"' +
+        (c.numCotizaciones ? ' disabled title="Tiene cotizaciones: no se puede eliminar"' : ' title="Eliminar cliente"') + '>' + TRASH_SVG + '</button>' +
+        '</div>';
+    return '<tr class="gestion-row" data-row="' + id + '">' +
+      '<td><strong>' + guion(c.razonSocial) + '</strong>' + (c.activo ? '' : ' <span class="badge badge-neutral">Inactivo</span>') + '</td>' +
+      '<td class="cell-mono">' + esc(joinNonEmpty([c.tipoIdentificacion, c.numeroIdentificacion], ' ')) + '</td>' +
+      '<td class="cell-muted">' + guion(c.ciudad) + '</td>' +
+      '<td class="cell-muted">' + guion(c.telefono) + '</td>' +
+      '<td>' + (c.numContactos || 0) + '</td>' +
+      '<td>' + (c.numEstablecimientos || 0) + '</td>' +
+      '<td>' + (c.numCotizaciones || 0) + '</td>' +
+      '<td>' + acciones + '</td>' +
+      '</tr>';
+  }
+
+  function confirmHtml(tipo, id) {
+    return '<div class="picker-row">' +
+      '<span class="cell-muted">¿Eliminar?</span>' +
+      '<button type="button" class="btn btn-sm btn-danger" data-action="confirm-yes" data-tipo="' + tipo + '" data-id="' + esc(id) + '">Sí</button>' +
+      '<button type="button" class="btn btn-sm btn-ghost" data-action="confirm-no" data-tipo="' + tipo + '" data-id="' + esc(id) + '">Cancelar</button>' +
+      '</div>';
+  }
+
+  function joinNonEmpty(parts, sep) {
+    return parts.map(function (p) { return String(p == null ? '' : p).trim(); }).filter(function (p) { return p; }).join(sep);
+  }
+
+  // =====================================================================
+  // Detalle
+  // =====================================================================
+
+  function showList() {
+    det.id = null;
+    det.data = null;
+    det.confirm = null;
+    $('cli-detail-wrap').hidden = true;
+    $('cli-list-wrap').hidden = false;
+    if (list.stale) fetchList({ silent: true });
+  }
+
+  function setDetailBusy(busy) {
+    $('cli-detail-loading').hidden = !busy;
+    $('cli-detail-content').hidden = busy;
+  }
+
+  /** Abre el detalle de un cliente (también usable desde otras vistas: KGP.clientes.openDetail). */
+  KGP.clientes.openDetail = function (idCliente) {
+    if (KGP.state.view !== 'clientes') KGP.nav('clientes');
+    wireEvents();
+    det.id = idCliente;
+    det.confirm = null;
+    $('cli-list-wrap').hidden = true;
+    $('cli-detail-wrap').hidden = false;
+    setDetailBusy(true);
+    return loadDetail().then(function (ok) {
+      if (ok) setDetailBusy(false);
+      else showList();
+    });
+  };
+
+  /** Trae el detalle fresco. Devuelve true si se pudo pintar. */
+  function loadDetail() {
+    var id = det.id;
+    return KGP.apiCall('api_getClienteGestion', [id], { timeoutMs: 25000 }).then(function (data) {
+      if (det.id !== id) return false;
+      det.data = data;
+      renderDetail();
+      return true;
+    }).catch(function (err) {
+      KGP.toast('No se pudo cargar el cliente: ' + KGP.friendlyError(err), 'error');
+      return false;
+    });
+  }
+
+  function renderDetail() {
+    var d = det.data;
+    var c = d.cliente;
+    $('cli-det-nombre').textContent = c.razonSocial || '—';
+    $('cli-det-ident').textContent = joinNonEmpty([c.tipoIdentificacion, c.numeroIdentificacion], ' ') || '—';
+    $('cli-det-inactivo').hidden = c.activo !== false;
+
+    var datos = [
+      ['Dirección', c.direccion],
+      ['Ciudad / Depto. / País', joinNonEmpty([c.ciudad, c.departamento, c.pais], ', ')],
+      ['Teléfono', c.telefono],
+      ['Código CIIU', c.codigoCiiu],
+      ['Actividad principal', c.actividadPrincipal]
+    ];
+    $('cli-det-datos').innerHTML = datos.map(function (x) {
+      return '<div class="resumen-meta-item"><span class="meta-label">' + esc(x[0]) + '</span><span class="meta-value">' + guion(x[1]) + '</span></div>';
+    }).join('');
+
+    var accionesCliente = det.confirm && det.confirm.tipo === 'cliente'
+      ? confirmHtml('cliente', c.idCliente)
+      : '<button type="button" class="btn btn-sm btn-ghost-primary" data-action="editar-cliente">Editar cliente</button>' +
+        '<button type="button" class="btn btn-sm btn-ghost" data-action="borrar-cliente"' +
+        (d.cotizaciones.length ? ' disabled title="Tiene cotizaciones: no se puede eliminar"' : '') + '>Eliminar cliente</button>';
+    $('cli-detail-actions').innerHTML = accionesCliente;
+
+    renderContactos();
+    renderEstablecimientos();
+    renderCotizaciones();
+  }
+
+  function usos(campo, id) {
+    return det.data.cotizaciones.filter(function (q) { return q[campo] === id; }).length;
+  }
+
+  function nombreEstablecimiento(idEst) {
+    var e = det.data.establecimientos.filter(function (x) { return x.idEstablecimiento === idEst; })[0];
+    return e ? e.nombre : '';
+  }
+
+  function encargadoDe(idEst) {
+    return det.data.contactos.filter(function (x) { return x.idEstablecimiento === idEst; })[0] || null;
+  }
+
+  function accionesFila(tipo, id, nUsos) {
+    if (det.confirm && det.confirm.tipo === tipo && det.confirm.id === id) return confirmHtml(tipo, id);
+    var titulo = tipo === 'contacto' ? 'contacto' : 'establecimiento';
+    return '<div class="picker-row">' +
+      '<button type="button" class="btn btn-sm btn-icon-edit" data-action="editar-' + tipo + '" data-id="' + esc(id) + '" title="Editar ' + titulo + '">' + EDIT_SVG + '</button>' +
+      '<button type="button" class="btn btn-sm btn-icon-delete" data-action="borrar-' + tipo + '" data-id="' + esc(id) + '"' +
+      (nUsos ? ' disabled title="Lo usan cotizaciones: no se puede eliminar"' : ' title="Eliminar ' + titulo + '"') + '>' + TRASH_SVG + '</button>' +
+      '</div>';
+  }
+
+  function renderContactos() {
+    var lista = det.data.contactos;
+    $('cli-con-count').textContent = '(' + lista.length + ')';
+    $('cli-con-tbody').innerHTML = lista.length ? lista.map(function (x) {
+      var n = usos('idSolicitante', x.idContacto);
+      return '<tr>' +
+        '<td><strong>' + guion(x.nombre) + '</strong></td>' +
+        '<td>' + guion(x.cargo) + '</td>' +
+        '<td class="cell-muted">' + guion(x.telefono) + '</td>' +
+        '<td class="cell-muted">' + guion(x.correo) + '</td>' +
+        '<td class="cell-muted">' + guion(x.idEstablecimiento ? nombreEstablecimiento(x.idEstablecimiento) : '') + '</td>' +
+        '<td>' + n + '</td>' +
+        '<td>' + accionesFila('contacto', x.idContacto, n) + '</td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">Este cliente no tiene contactos registrados.</td></tr>';
+  }
+
+  function renderEstablecimientos() {
+    var lista = det.data.establecimientos;
+    $('cli-est-count').textContent = '(' + lista.length + ')';
+    $('cli-est-tbody').innerHTML = lista.length ? lista.map(function (x) {
+      var n = usos('idEstablecimiento', x.idEstablecimiento);
+      var enc = encargadoDe(x.idEstablecimiento);
+      // Encargado: desplegable con los contactos del cliente (se guarda al instante).
+      var opciones = '<option value="">— Sin encargado —</option>' + det.data.contactos.map(function (cn) {
+        return '<option value="' + esc(cn.idContacto) + '"' + (enc && enc.idContacto === cn.idContacto ? ' selected' : '') + '>' + esc(cn.nombre) + '</option>';
+      }).join('');
+      return '<tr>' +
+        '<td><strong>' + guion(x.nombre) + '</strong></td>' +
+        '<td class="cell-muted">' + guion(x.direccion) + '</td>' +
+        '<td class="cell-muted">' + guion(joinNonEmpty([x.ciudad, x.departamento, x.pais], ', ')) + '</td>' +
+        '<td><select data-action="encargado" data-id="' + esc(x.idEstablecimiento) + '"' + (det.data.contactos.length ? '' : ' disabled') + '>' + opciones + '</select></td>' +
+        '<td>' + n + '</td>' +
+        '<td>' + accionesFila('establecimiento', x.idEstablecimiento, n) + '</td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="6" class="empty-state">Este cliente no tiene establecimientos registrados.</td></tr>';
+  }
+
+  /** Misma regla que estadoBadgeClass de JsDashboard/JsGestion (duplicada a propósito, CLAUDE.md §2.1). */
+  function estadoBadgeClass(estado) {
+    if (estado === 'Aprobada' || estado === 'Aprobado') return 'badge-aprobado';
+    if (estado === 'Rechazada' || estado === 'Rechazado') return 'badge-rechazado';
+    return 'badge-revision';
+  }
+
+  function renderCotizaciones() {
+    var lista = det.data.cotizaciones;
+    $('cli-cot-count').textContent = '(' + lista.length + ')';
+    $('cli-cot-tbody').innerHTML = lista.length ? lista.map(function (q) {
+      return '<tr>' +
+        '<td class="cell-mono">' + guion(q.codigo) + '</td>' +
+        '<td class="cell-muted">' + guion(q.fechaElaboracion) + '</td>' +
+        '<td><span class="badge ' + estadoBadgeClass(q.estado) + '">' + guion(q.estado) + '</span></td>' +
+        '<td>' + (q.total === '' || q.total == null ? '—' : esc(KGP.ui.formatMoney(q.total))) + '</td>' +
+        '<td><button type="button" class="btn btn-sm btn-ghost-primary" data-action="gestionar" data-id="' + esc(q.idCotizacion) + '">Gestionar →</button></td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="5" class="empty-state">Este cliente todavía no tiene cotizaciones.</td></tr>';
+  }
+
+  // =====================================================================
+  // Escrituras
+  // =====================================================================
+
+  /** Tras guardar/borrar: listado viejo, desplegables de otras vistas al día, detalle fresco. */
+  function despuesDeEscribir() {
+    list.stale = true;
+    KGP.catalog.load(true).catch(function () { /* no crítico */ });
+    if (det.id) return loadDetail();
+    return fetchList({ silent: true });
+  }
+
+  function fallo(que) {
+    return function (err) {
+      KGP.toast('No se pudo ' + que + ': ' + KGP.friendlyError(err), 'error', 7000);
+      throw err;
+    };
+  }
+
+  function nuevoCliente() {
+    KGP.entityModal.open({
+      type: 'cliente',
+      mode: 'create',
+      onSave: function (datos) {
+        return KGP.apiCall('api_createCliente', [datos]).then(function (r) {
+          KGP.toast('Cliente "' + r.razonSocial + '" creado.', 'success');
+          despuesDeEscribir();
+        }).catch(fallo('crear el cliente'));
+      }
+    });
+  }
+
+  function editarCliente(cliente) {
+    if (!cliente) return;
+    KGP.entityModal.open({
+      type: 'cliente',
+      mode: 'edit',
+      editId: cliente.idCliente,
+      initial: cliente,
+      onSave: function (datos) {
+        return KGP.apiCall('api_updateCliente', [cliente.idCliente, datos]).then(function () {
+          KGP.toast('Cliente actualizado.', 'success');
+          despuesDeEscribir();
+        }).catch(fallo('actualizar el cliente'));
+      }
+    });
+  }
+
+  function borrarCliente(idCliente) {
+    return KGP.apiCall('api_deleteCliente', [idCliente]).then(function () {
+      KGP.toast('Cliente eliminado.', 'success');
+      list.all = list.all.filter(function (c) { return c.idCliente !== idCliente; });
+      list.confirmDeleteId = null;
+      list.stale = true;
+      KGP.catalog.load(true).catch(function () { /* no crítico */ });
+      if (det.id === idCliente) showList();
+      else renderList();
+    }).catch(function (err) {
+      KGP.toast(KGP.friendlyError(err), 'error', 8000);
+      list.confirmDeleteId = null;
+      det.confirm = null;
+      if (det.data) renderDetail(); else renderList();
+    });
+  }
+
+  function editarContacto(id) {
+    var es = !id;
+    var x = es ? null : det.data.contactos.filter(function (c) { return c.idContacto === id; })[0];
+    if (!es && !x) return;
+    KGP.entityModal.open({
+      type: 'contacto',
+      target: 'solicitante',
+      mode: es ? 'create' : 'edit',
+      editId: id,
+      initial: x,
+      onSave: function (datos) {
+        var call = es ? KGP.apiCall('api_createContacto', [det.id, datos]) : KGP.apiCall('api_updateContacto', [id, datos]);
+        return call.then(function () {
+          KGP.toast(es ? 'Contacto agregado.' : 'Contacto actualizado.', 'success');
+          despuesDeEscribir();
+        }).catch(fallo(es ? 'agregar el contacto' : 'actualizar el contacto'));
+      }
+    });
+  }
+
+  function editarEstablecimiento(id) {
+    var es = !id;
+    var x = es ? null : det.data.establecimientos.filter(function (e) { return e.idEstablecimiento === id; })[0];
+    if (!es && !x) return;
+    KGP.entityModal.open({
+      type: 'establecimiento',
+      mode: es ? 'create' : 'edit',
+      editId: id,
+      initial: x,
+      onSave: function (datos) {
+        var call = es ? KGP.apiCall('api_createEstablecimiento', [det.id, datos, '']) : KGP.apiCall('api_updateEstablecimiento', [id, datos]);
+        return call.then(function () {
+          KGP.toast(es ? 'Establecimiento agregado.' : 'Establecimiento actualizado.', 'success');
+          despuesDeEscribir();
+        }).catch(fallo(es ? 'agregar el establecimiento' : 'actualizar el establecimiento'));
+      }
+    });
+  }
+
+  function borrar(tipo, id) {
+    var api = tipo === 'contacto' ? 'api_deleteContacto' : 'api_deleteEstablecimiento';
+    KGP.apiCall(api, [id]).then(function () {
+      KGP.toast((tipo === 'contacto' ? 'Contacto' : 'Establecimiento') + ' eliminado.', 'success');
+      det.confirm = null;
+      despuesDeEscribir();
+    }).catch(function (err) {
+      KGP.toast(KGP.friendlyError(err), 'error', 8000);
+      det.confirm = null;
+      renderDetail();
+    });
+  }
+
+  function cambiarEncargado(sel) {
+    var idEst = sel.getAttribute('data-id');
+    sel.disabled = true;
+    KGP.apiCall('api_setEncargadoEstablecimiento', [idEst, sel.value]).then(function () {
+      KGP.toast('Encargado actualizado.', 'success');
+      despuesDeEscribir();
+    }).catch(function (err) {
+      KGP.toast('No se pudo cambiar el encargado: ' + KGP.friendlyError(err), 'error', 7000);
+      renderDetail(); // vuelve a mostrar el encargado real
+    });
+  }
+
+  // =====================================================================
+  // Wiring
+  // =====================================================================
+
+  function debounce(fn, ms) {
+    var t;
+    return function () {
+      var args = arguments;
+      clearTimeout(t);
+      t = setTimeout(function () { fn.apply(null, args); }, ms);
+    };
+  }
+
+  function findCliente(id) {
+    return list.all.filter(function (c) { return c.idCliente === id; })[0] || null;
+  }
+
+  function wireEvents() {
+    if (eventsWired) return;
+    eventsWired = true;
+
+    $('cli-search').addEventListener('input', debounce(function (e) {
+      list.q = e.target.value;
+      list.page = 1;
+      renderList();
+    }, 250));
+    $('cli-page-size').addEventListener('change', function (e) {
+      list.pageSize = Number(e.target.value);
+      list.page = 1;
+      renderList();
+    });
+    $('cli-prev').addEventListener('click', function () { if (list.page > 1) { list.page--; renderList(); } });
+    $('cli-next').addEventListener('click', function () {
+      if (list.page * list.pageSize < filtered().length) { list.page++; renderList(); }
+    });
+    $('cli-refresh-btn').addEventListener('click', function () { fetchList({ silent: true }); });
+    $('cli-nuevo-btn').addEventListener('click', nuevoCliente);
+    $('cli-back-btn').addEventListener('click', showList);
+    $('cli-con-nuevo').addEventListener('click', function () { editarContacto(null); });
+    $('cli-est-nuevo').addEventListener('click', function () { editarEstablecimiento(null); });
+
+    // Listado: botones por fila; clic en el resto de la fila = ver detalle.
+    $('cli-tbody').addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-action]');
+      if (btn) {
+        var id = btn.getAttribute('data-id');
+        var a = btn.getAttribute('data-action');
+        if (a === 'ver') KGP.clientes.openDetail(id);
+        else if (a === 'editar') editarCliente(findCliente(id));
+        else if (a === 'borrar') { list.confirmDeleteId = id; renderList(); }
+        else if (a === 'confirm-no') { list.confirmDeleteId = null; renderList(); }
+        else if (a === 'confirm-yes') borrarCliente(id);
+        return;
+      }
+      var row = e.target.closest('[data-row]');
+      if (row) KGP.clientes.openDetail(row.getAttribute('data-row'));
+    });
+
+    // Detalle: todas las acciones por delegación.
+    $('cli-detail-content').addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-action]');
+      if (!btn || !det.data) return;
+      var a = btn.getAttribute('data-action');
+      var id = btn.getAttribute('data-id');
+      var tipo = btn.getAttribute('data-tipo');
+      if (a === 'editar-cliente') editarCliente(det.data.cliente);
+      else if (a === 'borrar-cliente') { det.confirm = { tipo: 'cliente', id: det.id }; renderDetail(); }
+      else if (a === 'editar-contacto') editarContacto(id);
+      else if (a === 'editar-establecimiento') editarEstablecimiento(id);
+      else if (a === 'borrar-contacto') { det.confirm = { tipo: 'contacto', id: id }; renderDetail(); }
+      else if (a === 'borrar-establecimiento') { det.confirm = { tipo: 'establecimiento', id: id }; renderDetail(); }
+      else if (a === 'confirm-no') { det.confirm = null; renderDetail(); }
+      else if (a === 'confirm-yes') {
+        if (tipo === 'cliente') borrarCliente(id);
+        else borrar(tipo, id);
+      }
+      else if (a === 'gestionar' && KGP.gestion.openDetail) KGP.gestion.openDetail(id);
+    });
+    $('cli-detail-content').addEventListener('change', function (e) {
+      var sel = e.target.closest('select[data-action="encargado"]');
+      if (sel) cambiarEncargado(sel);
+    });
+  }
+
+}(window.KGP));
+</script>

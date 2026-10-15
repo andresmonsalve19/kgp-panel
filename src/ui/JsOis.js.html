@@ -25,11 +25,11 @@ window.KGP = window.KGP || {};
 (function (KGP) {
   'use strict';
 
-  var ESTADO_EN_CURSO = 'En curso';      // = CFG().OIS_ESTADO_INICIAL / TAREA_ESTADO_INICIAL
-  var ESTADO_FINALIZADA = 'Finalizada';  // = CFG().OIS_ESTADO_FINALIZADA / TAREA_ESTADO_FINALIZADA
-  var ESTADO_VENCIDA = 'Vencida';        // = CFG().OIS_ESTADO_VENCIDA
-  var MAX_TAREAS = 20;                   // = CFG().LIMITS.MAX_TAREAS
-  var MAX_SERVICIOS = 10;                // = CFG().LIMITS.MAX_SERVICIOS
+  var ESTADO_EN_CURSO = 'En curso';      // = CFG_().OIS_ESTADO_INICIAL / TAREA_ESTADO_INICIAL
+  var ESTADO_FINALIZADA = 'Finalizada';  // = CFG_().OIS_ESTADO_FINALIZADA / TAREA_ESTADO_FINALIZADA
+  var ESTADO_VENCIDA = 'Vencida';        // = CFG_().OIS_ESTADO_VENCIDA
+  var MAX_TAREAS = KGP.cfg('MAX_TAREAS', 20);        // = CFG_().LIMITS.MAX_TAREAS (hoja CONFIG_GENERAL)
+  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10);  // = CFG_().LIMITS.MAX_SERVICIOS
 
   var listState = {
     page: 1,
@@ -61,6 +61,10 @@ window.KGP = window.KGP || {};
   };
 
   var pendingOpenId = null;
+  // Marcas de "dato viejo" que pone "Gestionar tareas" (KGP.ois.markStale)
+  // cuando crea/edita/finaliza/elimina una tarea de una OIS.
+  var listStale = false;
+  var staleDetailId = null;
   var servicioSeq = 0;
   var tareaSeq = 0;
   var eventsWired = false;
@@ -82,7 +86,21 @@ window.KGP = window.KGP || {};
       openDetail(id);
       return;
     }
-    if (listState.loaded) return;
+    // La OIS abierta cambió desde "Gestionar tareas": se recarga fresca. Si
+    // no, un "Guardar cambios" aquí reenviaría la lista de tareas vieja y
+    // borraría (o revertiría) lo que se hizo allá.
+    if (staleDetailId && staleDetailId === detail.idOis && !$('oi-detail-wrap').hidden) {
+      staleDetailId = null;
+      KGP.toast('Las tareas de esta OIS cambiaron en "Gestionar tareas": se recargó con los datos actuales.', 'warning', 6000);
+      openDetail(detail.idOis);
+      return;
+    }
+    staleDetailId = null;
+    if (listState.loaded) {
+      if (listStale) { listStale = false; fetchList({ silent: true }); }
+      return;
+    }
+    listStale = false;
 
     if (!listState.everLoaded) {
       listState.everLoaded = true;
@@ -111,6 +129,12 @@ window.KGP = window.KGP || {};
       pendingOpenId = idOis;
       KGP.nav('ois');
     }
+  };
+
+  /** Lo llama "Gestionar tareas" tras escribir una tarea de esta OIS: refrescar listado (y detalle si es esa misma) al volver. */
+  KGP.ois.markStale = function (idOis) {
+    listStale = true;
+    if (idOis && detail.idOis === idOis) staleDetailId = idOis;
   };
 
   // ---------------- Listado ----------------
@@ -242,7 +266,7 @@ window.KGP = window.KGP || {};
 
       detail.tiposServicio = cat.tiposServicio || [];
       detail.unspscMap = KGP.ui.buildUnspscMap(cat.catalogoPares || []);
-      detail.empleados = cat.empleados || [];
+      detail.empleados = KGP.ui.responsables(cat); // internos + terceros (popup de tarea)
       detail.ois = d.ois;
       detail.idCotizacion = d.ois.idCotizacion;
       detail.codigoCotizacion = d.ois.codigoCotizacion || d.cotizacion.codigo || '';
@@ -285,7 +309,7 @@ window.KGP = window.KGP || {};
     detail.entidadesEditadas = false;
     setDocButton(null, null);
     clearInvalid();
-    tareaModal.close();
+    KGP.tareaModal.close();
   }
 
   function setDetailBusy(busy, text) {
@@ -655,17 +679,13 @@ window.KGP = window.KGP || {};
 
   // ---------------- Tareas ----------------
 
-  /** "Cédula - Nombre" si el empleado tiene cédula registrada; si no, solo el nombre. */
-  function empleadoLabel(e) {
-    return (e.cedula ? e.cedula + ' - ' : '') + e.nombre + (e.cargo ? ' (' + e.cargo + ')' : '');
-  }
-
   function addTareaToDetail(t) {
     detail.tareas.push({
       localId: 'otar' + (++tareaSeq),
       idTarea: t.idTarea || null,
       tarea: t.tarea || '',
       idEmpleado: t.idEmpleado || '',
+      tipoResponsable: t.tipoResponsable || '', // INTERNO / TERCERO ('' = se deduce por el ID)
       responsable: t.responsable || '',
       fechaInicio: t.fechaInicio || '',
       fechaEntrega: t.fechaEntrega || '',
@@ -706,7 +726,7 @@ window.KGP = window.KGP || {};
           t.estado = t.estado === ESTADO_FINALIZADA ? ESTADO_EN_CURSO : ESTADO_FINALIZADA;
           renderTareasList();
         });
-        row.querySelector('[data-edit-tarea]').addEventListener('click', function () { tareaModal.open(t); });
+        row.querySelector('[data-edit-tarea]').addEventListener('click', function () { openTareaModal(t); });
         row.querySelector('[data-remove-tarea]').addEventListener('click', function () {
           detail.tareas = detail.tareas.filter(function (x) { return x.localId !== t.localId; });
           renderTareasList();
@@ -726,6 +746,7 @@ window.KGP = window.KGP || {};
         idTarea: t.idTarea || '',
         tarea: t.tarea,
         idEmpleado: t.idEmpleado,
+        tipoResponsable: t.tipoResponsable || '',
         fechaInicio: t.fechaInicio,
         fechaEntrega: t.fechaEntrega,
         estado: t.estado,
@@ -735,114 +756,24 @@ window.KGP = window.KGP || {};
   }
 
   /**
-   * Popup de agregar/editar una tarea. Solo toca detail.tareas en memoria
-   * (mismo contrato que KGP.servicioModal): nada llega a la BD hasta
-   * "Guardar cambios". OBSERVACION es acumulativa: las anteriores se muestran
-   * en solo lectura y lo escrito se agrega como una línea nueva.
+   * Abre el popup compartido de tarea (KGP.tareaModal, JsCore.js.html) y
+   * aplica el resultado sobre detail.tareas en memoria: nada llega a la BD
+   * hasta "Guardar cambios". El popup lo comparte con "Gestionar OIP".
    */
-  var tareaModal = (function () {
-    var state = { tarea: null, observacionPrevia: '' };
-
-    function fieldEl(key) { return document.querySelector('#tarea-modal-body .field[data-field="' + key + '"]'); }
-    function markInvalid(key) { var f = fieldEl(key); if (f) f.classList.add('invalid'); }
-    function clearInvalidModal() {
-      document.querySelectorAll('#tarea-modal-body .field.invalid').forEach(function (f) { f.classList.remove('invalid'); });
-    }
-
-    function syncIdEmpleado() {
-      $('tm-id-empleado').value = $('tm-responsable').value || '—';
-    }
-
-    function open(tarea) {
-      state.tarea = tarea || null;
-      clearInvalidModal();
-      $('tarea-modal-title').textContent = tarea ? 'Editar tarea' : 'Agregar tarea';
-
-      var sel = $('tm-responsable');
-      KGP.ui.rebuildSelect(sel, detail.empleados, function (e) { return e.idEmpleado; }, empleadoLabel, '— Selecciona el responsable —');
-      // Si el responsable guardado ya no está en PERSONAL_KGP, se conserva
-      // como opción para no perder el dato al editar otra cosa de la tarea.
-      if (tarea && tarea.idEmpleado && !sel.querySelector('option[value="' + tarea.idEmpleado + '"]')) {
-        KGP.ui.addOption(sel, tarea.idEmpleado, tarea.responsable || tarea.idEmpleado);
+  function openTareaModal(tarea) {
+    KGP.tareaModal.open({
+      empleados: detail.empleados,
+      initial: tarea || null,
+      onSave: function (datos) {
+        if (tarea) {
+          Object.assign(tarea, datos);
+        } else {
+          addTareaToDetail(Object.assign({ estado: ESTADO_EN_CURSO }, datos));
+        }
+        renderTareasList();
       }
-      sel.value = tarea ? tarea.idEmpleado : '';
-      syncIdEmpleado();
-
-      $('tm-tarea').value = tarea ? tarea.tarea : '';
-      $('tm-fecha-inicio').value = tarea ? tarea.fechaInicio : '';
-      $('tm-fecha-entrega').value = tarea ? tarea.fechaEntrega : '';
-      $('tm-obs-nueva').value = '';
-      state.observacionPrevia = tarea ? String(tarea.observacion || '') : '';
-      var box = $('tm-obs-historial');
-      var lines = state.observacionPrevia.split('\n').filter(function (l) { return l.trim(); });
-      box.hidden = !lines.length;
-      box.innerHTML = lines.map(function (l) { return '<div class="obs-item">' + KGP.escapeHtml(l) + '</div>'; }).join('');
-
-      $('tarea-modal-overlay').classList.add('open');
-      setTimeout(function () { $('tm-tarea').focus(); }, 50);
-    }
-
-    function close() {
-      var el = $('tarea-modal-overlay');
-      if (el) el.classList.remove('open');
-      state.tarea = null;
-    }
-
-    function save() {
-      clearInvalidModal();
-      var texto = $('tm-tarea').value.trim();
-      var idEmpleado = $('tm-responsable').value;
-      var inicio = $('tm-fecha-inicio').value;
-      var entrega = $('tm-fecha-entrega').value;
-      var ok = true;
-      if (!texto) { markInvalid('tarea'); ok = false; }
-      if (!idEmpleado) { markInvalid('responsable'); ok = false; }
-      if (!inicio) { markInvalid('fechaInicio'); ok = false; }
-      $('tm-fecha-entrega-err').textContent = 'Elige la fecha de entrega.';
-      if (!entrega) {
-        markInvalid('fechaEntrega'); ok = false;
-      } else if (inicio && entrega < inicio) {
-        $('tm-fecha-entrega-err').textContent = 'La fecha de entrega no puede ser anterior a la de inicio.';
-        markInvalid('fechaEntrega'); ok = false;
-      }
-      if (!ok) { KGP.toast('Revisa los campos marcados en rojo.', 'error'); return; }
-
-      var emp = detail.empleados.filter(function (e) { return e.idEmpleado === idEmpleado; })[0];
-      var nueva = $('tm-obs-nueva').value.trim();
-      var previa = state.observacionPrevia.trim();
-      var datos = {
-        tarea: texto,
-        idEmpleado: idEmpleado,
-        responsable: emp ? emp.nombre : ((state.tarea && state.tarea.responsable) || ''),
-        fechaInicio: inicio,
-        fechaEntrega: entrega,
-        observacion: nueva ? (previa ? previa + '\n' + nueva : nueva) : previa
-      };
-
-      if (state.tarea) {
-        Object.assign(state.tarea, datos);
-      } else {
-        addTareaToDetail(Object.assign({ estado: ESTADO_EN_CURSO }, datos));
-      }
-      close();
-      renderTareasList();
-    }
-
-    function wire() {
-      $('tarea-modal-close').addEventListener('click', close);
-      $('tarea-modal-cancel').addEventListener('click', close);
-      $('tarea-modal-save').addEventListener('click', save);
-      $('tm-responsable').addEventListener('change', syncIdEmpleado);
-      $('tarea-modal-overlay').addEventListener('click', function (e) {
-        if (e.target.id === 'tarea-modal-overlay') close();
-      });
-      document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape' && $('tarea-modal-overlay').classList.contains('open')) close();
-      });
-    }
-
-    return { open: open, close: close, wire: wire };
-  }());
+    });
+  }
 
   // ---------------- Resumen ----------------
 
@@ -898,7 +829,7 @@ window.KGP = window.KGP || {};
     clearInvalid();
     var hasError = false;
     var plazo = Number($('oi-plazo').value);
-    if (!plazo || plazo < 1 || plazo > 365) { markInvalid('plazo'); hasError = true; }
+    if (!plazo || plazo < 1 || plazo > KGP.cfg('MAX_PLAZO_DIAS', 365)) { markInvalid('plazo'); hasError = true; }
     if (!currentClienteId()) { markInvalid('cliente'); hasError = true; }
     if (!$('oi-solicitante-select').value) { markInvalid('solicitante'); hasError = true; }
     if (!$('oi-establecimiento-select').value) { markInvalid('establecimiento'); hasError = true; }
@@ -951,6 +882,7 @@ window.KGP = window.KGP || {};
 
     KGP.apiCall('api_updateOis', [idOis, payload]).then(function (res) {
       KGP.toast('OIS ' + res.codigo + ' actualizada.', 'success');
+      if (KGP.tareas.markStale) KGP.tareas.markStale(); // sus tareas también se ven en "Gestionar tareas"
       detail.entidadesEditadas = false;
       detail.ois.estado = res.estado;
       detail.ois.fechaVencimiento = res.fechaVencimiento;
@@ -1101,11 +1033,9 @@ window.KGP = window.KGP || {};
     });
     $('oi-add-tarea').addEventListener('click', function () {
       if (detail.tareas.length >= MAX_TAREAS) { KGP.toast('Ya alcanzaste el máximo de ' + MAX_TAREAS + ' tareas.', 'warning'); return; }
-      tareaModal.open(null);
+      openTareaModal(null);
     });
     $('oi-guardar-btn').addEventListener('click', handleGuardar);
-
-    tareaModal.wire();
   }
 
 }(window.KGP));

@@ -19,7 +19,7 @@
  * Excel.
  *
  * ESTADO no es un campo del formulario: la cotización nace "En revisión" y
- * los botones "Garantía aprobada/rechazada" del resumen lo cambian una sola
+ * los botones "cotización aprobada/rechazada" del resumen lo cambian una sola
  * vez, reutilizando ese mismo "Guardar cambios" con payload.estado (no hay
  * endpoint aparte, ver CLAUDE.md §2.1). En cualquier otro guardado,
  * payload.estado va vacío y el servidor conserva el estado actual.
@@ -52,10 +52,12 @@ window.KGP = window.KGP || {};
     elaboradoPorNombre: '',
     cargoElaborador: '',
     revisadoAprobadoPorNombre: '',
-    ois: null // {idOis, codigo} si la cotización ya se aprobó con "Crear OIS" (botón "Ver OIS")
+    ois: null, // {idOis, codigo} si la cotización se aprobó creando una OIS (botón "Ver OIS")
+    oip: null  // {idOip, codigo} si se aprobó creando una OIP (botón "Ver OIP"). Nunca las dos a la vez.
   };
 
-  var IVA_TASA = 0.19; // = CFG().IVA_TASA; el servidor recalcula y es la fuente de verdad al guardar
+  var IVA_TASA = KGP.cfg('IVA_TASA', 0.19); // = CFG_().IVA_TASA (hoja CONFIG_GENERAL); el servidor recalcula y es la fuente de verdad al guardar
+  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10); // = CFG_().LIMITS.MAX_SERVICIOS
   var ESTADO_INICIAL = 'En revisión';
   var ESTADO_APROBADA = 'Aprobada';
   var ESTADO_RECHAZADA = 'Rechazada';
@@ -290,7 +292,8 @@ window.KGP = window.KGP || {};
       detail.cargoElaborador = cot.cotizacion.cargoElaborador || '';
       detail.revisadoAprobadoPorNombre = cot.cotizacion.revisadoAprobadoPorNombre || '';
       detail.ois = cot.cotizacion.ois || null;
-      setOisButton();
+      detail.oip = cot.cotizacion.oip || null;
+      setOrdenButtons();
       detail.totalesGuardados = {
         subtotal: cot.cotizacion.subtotal,
         iva: cot.cotizacion.iva,
@@ -334,7 +337,8 @@ window.KGP = window.KGP || {};
     detail.cargoElaborador = '';
     detail.revisadoAprobadoPorNombre = '';
     detail.ois = null;
-    setOisButton();
+    detail.oip = null;
+    setOrdenButtons();
     closeAprobarModal();
     document.getElementById('ge-asesor-select').innerHTML = '<option value="">— Sin asignar —</option>';
     showGarantiaConfirm(null);
@@ -700,8 +704,8 @@ window.KGP = window.KGP || {};
   }
 
   function addServicioBlock() {
-    if (detail.servicios.length >= 10) {
-      KGP.toast('Ya alcanzaste el máximo de 10 servicios.', 'warning');
+    if (detail.servicios.length >= MAX_SERVICIOS) {
+      KGP.toast('Ya alcanzaste el máximo de ' + MAX_SERVICIOS + ' servicios.', 'warning');
       return;
     }
     openServicioModal(null);
@@ -744,8 +748,8 @@ window.KGP = window.KGP || {};
       }
       list.appendChild(frag);
     });
-    document.getElementById('ge-servicios-count').textContent = '(' + detail.servicios.length + '/10)';
-    document.getElementById('ge-add-servicio').disabled = detail.servicios.length >= 10;
+    document.getElementById('ge-servicios-count').textContent = '(' + detail.servicios.length + '/' + MAX_SERVICIOS + ')';
+    document.getElementById('ge-add-servicio').disabled = detail.servicios.length >= MAX_SERVICIOS;
     document.getElementById('ge-add-servicio').hidden = locked;
     renderResumen();
   }
@@ -803,7 +807,7 @@ window.KGP = window.KGP || {};
     badge.textContent = estado;
     document.getElementById('ge-garantia-row').hidden = estado !== ESTADO_INICIAL;
 
-    // "Aprobado por" / "Rechazado por": visible siempre que la garantía ya
+    // "Aprobado por" / "Rechazado por": visible siempre que la cotización ya
     // se decidió (fuera de ESTADO_INICIAL), aunque no se haya podido resolver
     // el empleado (correo del usuario activo sin match en PERSONAL_KGP) —
     // mismo criterio que "Elaborado por": mostrar "—" en vez de ocultar la
@@ -818,9 +822,9 @@ window.KGP = window.KGP || {};
     }
   }
 
-  // ---------------- Bloqueo de edición (garantía ya decidida) ----------------
+  // ---------------- Bloqueo de edición (cotización ya decidida) ----------------
 
-  /** true una vez la garantía se decidió (Aprobada/Rechazada): la cotización pasa a ser de solo lectura. */
+  /** true una vez la cotización se decidió (Aprobada/Rechazada): la cotización pasa a ser de solo lectura. */
   function isLocked() {
     var estado = detail.estado || ESTADO_INICIAL;
     return estado !== ESTADO_INICIAL;
@@ -831,7 +835,7 @@ window.KGP = window.KGP || {};
    * ESTADO_INICIAL: a partir de ahí es de solo lectura, ni siquiera el
    * asesor comercial o el tiempo de entrega se pueden tocar. Se llama al
    * terminar de cargar el detalle y otra vez justo después de guardar una
-   * decisión de garantía (para que el formulario se bloquee al instante,
+   * decisión de cotización (para que el formulario se bloquee al instante,
    * sin esperar a recargar). El servidor tiene la misma restricción
    * (qs_updateQuotation responde CONFLICT), esto es solo la experiencia de
    * usuario — nunca la única barrera. Los servicios se bloquean aparte, en
@@ -857,11 +861,11 @@ window.KGP = window.KGP || {};
     // Solo el botón, no toda la tarjeta: #ge-doc-status vive en la misma
     // tarjeta (ge-guardar-card) y debe seguir visible — es donde se muestra
     // el resultado de la regeneración del documento que dispara la propia
-    // decisión de garantía (ver handleGuardar).
+    // decisión de cotización (ver handleGuardar).
     document.getElementById('ge-guardar-btn').hidden = locked;
   }
 
-  // ---------------- Decisión de garantía ----------------
+  // ---------------- Decisión de cotización ----------------
 
   var garantiaPendiente = null; // estado elegido que espera confirmación
 
@@ -872,7 +876,7 @@ window.KGP = window.KGP || {};
     document.getElementById('ge-garantia-confirm').hidden = !estado;
     if (estado) {
       document.getElementById('ge-garantia-confirm-text').textContent =
-        (estado === ESTADO_APROBADA ? '¿Marcar la garantía como APROBADA?' : '¿Marcar la garantía como RECHAZADA?') +
+        (estado === ESTADO_APROBADA ? '¿Marcar la cotización como APROBADA?' : '¿Marcar la cotización como RECHAZADA?') +
         ' Esta decisión no se puede cambiar después. También se guardarán los demás cambios del formulario.';
     }
   }
@@ -893,7 +897,7 @@ window.KGP = window.KGP || {};
     clearInvalid();
     var hasError = false;
     var plazo = Number(document.getElementById('ge-plazo').value);
-    if (!plazo || plazo < 1) { markInvalid('plazo'); hasError = true; }
+    if (!plazo || plazo < 1 || plazo > KGP.cfg('MAX_PLAZO_DIAS', 365)) { markInvalid('plazo'); hasError = true; }
     if (!document.getElementById('ge-descripcion').value.trim()) { markInvalid('descripcion'); hasError = true; }
     if (!currentClienteId()) { markInvalid('cliente'); hasError = true; }
     if (!document.getElementById('ge-solicitante-select').value) { markInvalid('solicitante'); hasError = true; }
@@ -914,7 +918,7 @@ window.KGP = window.KGP || {};
       var link = document.createElement('div');
       link.style.marginTop = '8px';
       link.style.textAlign = 'center';
-      link.innerHTML = '<a class="link" href="' + url + '" target="_blank" rel="noopener">Abrir documento actualizado ↗</a>';
+      link.innerHTML = '<a class="link" href="' + KGP.escapeHtml(url) + '" target="_blank" rel="noopener">Abrir documento actualizado ↗</a>';
       el.appendChild(link);
     }
     if (retryFn) {
@@ -951,6 +955,21 @@ window.KGP = window.KGP || {};
       KGP.toast('Agrega al menos 1 servicio.', 'error');
       return null;
     }
+    // Decidir la cotización (aprobar/rechazar) exige tarifas en todos los
+    // servicios, tiempo de entrega y asesor comercial. Mismo chequeo que
+    // qs_applyQuotationUpdate_ (el servidor es quien manda).
+    if (estado) {
+      var faltantes = [];
+      var sinTarifa = servicios.some(function (s) { return s.tarifa === '' || s.tarifa == null; });
+      if (sinTarifa) faltantes.push('las tarifas de todos los servicios');
+      if (!document.getElementById('ge-tiempo-entrega').value.trim()) { markInvalid('tiempoEntrega'); faltantes.push('el tiempo de entrega'); }
+      if (!document.getElementById('ge-asesor-select').value) { markInvalid('asesorComercial'); faltantes.push('el asesor comercial'); }
+      if (faltantes.length) {
+        KGP.toast('Antes de aprobar o rechazar la cotización debes diligenciar: ' + faltantes.join(', ') + '.', 'error', 8000);
+        showGarantiaConfirm(null);
+        return null;
+      }
+    }
     return {
       plazo: Number(document.getElementById('ge-plazo').value),
       descripcion: document.getElementById('ge-descripcion').value,
@@ -974,7 +993,7 @@ window.KGP = window.KGP || {};
 
     KGP.apiCall('api_updateQuotation', [idCotizacion, payload]).then(function (res) {
       if (opts.estado) {
-        KGP.toast('Cotización ' + res.codigo + ': garantía ' + (res.estado === ESTADO_APROBADA ? 'aprobada' : 'rechazada') + '.', 'success');
+        KGP.toast('Cotización ' + res.codigo + ': cotización ' + (res.estado === ESTADO_APROBADA ? 'aprobada' : 'rechazada') + '.', 'success');
       } else {
         KGP.toast('Cotización ' + res.codigo + ' actualizada.', 'success');
       }
@@ -983,7 +1002,7 @@ window.KGP = window.KGP || {};
       detail.revisadoAprobadoPorNombre = res.revisadoAprobadoPorNombre || detail.revisadoAprobadoPorNombre;
       showGarantiaConfirm(null);
       recomputeVencimiento(); // también repinta el resumen
-      // Si esto fue una decisión de garantía, detail.estado acaba de pasar a
+      // Si esto fue una decisión de cotización, detail.estado acaba de pasar a
       // Aprobada/Rechazada: bloquear el formulario al instante, sin esperar
       // a que el usuario recargue. renderServiciosList oculta las acciones
       // de cada fila de servicio y el botón "Agregar servicio".
@@ -1008,17 +1027,16 @@ window.KGP = window.KGP || {};
     });
   }
 
-  // ---------------- Aprobar garantía -> crear OIS (popup) ----------------
+  // ---------------- Aprobar cotización -> crear OIS u OIP (popup) ----------------
 
   /**
-   * "Garantía aprobada" ya no confirma en línea: abre el popup
+   * "cotización aprobada" ya no confirma en línea: abre el popup
    * #aprobar-modal-overlay (OIS / OIP / Cancelar aprobación). Se valida el
    * formulario ANTES de abrirlo, para no preguntar por la orden si igual no
    * se va a poder guardar.
    */
   function openAprobarModal() {
     if (!buildPayload(ESTADO_APROBADA)) return;
-    document.getElementById('aprobar-oip-note').hidden = true;
     document.getElementById('aprobar-modal-overlay').classList.add('open');
   }
 
@@ -1041,17 +1059,17 @@ window.KGP = window.KGP || {};
 
     var idCotizacion = detail.idCotizacion;
     var requestId = KGP.uuid();
-    setDetailBusy(true, 'Aprobando la garantía y creando la OIS…');
+    setDetailBusy(true, 'Aprobando la cotización y creando la OIS…');
 
     KGP.apiCall('api_aprobarConOis', [idCotizacion, payload, requestId], { retryOn: ['BUSY', 'TRANSPORT', 'TIMEOUT'] }).then(function (res) {
-      KGP.toast('Garantía aprobada. OIS ' + res.codigoOis + ' creada.', 'success', 6000);
+      KGP.toast('cotización aprobada. OIS ' + res.codigoOis + ' creada.', 'success', 6000);
       detail.estado = ESTADO_APROBADA;
       detail.ois = { idOis: res.idOis, codigo: res.codigoOis };
       if (res.cotizacion) {
         detail.totalesGuardados = { subtotal: res.cotizacion.subtotal, iva: res.cotizacion.iva, total: res.cotizacion.total };
         detail.revisadoAprobadoPorNombre = res.cotizacion.revisadoAprobadoPorNombre || detail.revisadoAprobadoPorNombre;
       }
-      setOisButton();
+      setOrdenButtons();
       recomputeVencimiento();
       applyLockState();
       renderServiciosList();
@@ -1074,19 +1092,82 @@ window.KGP = window.KGP || {};
       if (err.code === 'VALIDATION' && Array.isArray(err.details) && err.details.length) {
         KGP.toast(err.details.slice(0, 3).join(' · '), 'error', 8000);
       } else {
-        KGP.toast('No se pudo aprobar la garantía: ' + KGP.friendlyError(err), 'error', 7000);
+        KGP.toast('No se pudo aprobar la cotización: ' + KGP.friendlyError(err), 'error', 7000);
       }
     }).finally(function () {
       setDetailBusy(false);
     });
   }
 
-  /** Botón "Ver OIS" del encabezado del detalle: visible solo si esta cotización ya tiene OIS. */
-  function setOisButton() {
-    var btn = document.getElementById('ge-ver-ois-btn');
-    if (!btn) return;
-    btn.hidden = !detail.ois;
-    btn.textContent = detail.ois ? ('Ver OIS ' + detail.ois.codigo) : 'Ver OIS';
+  /**
+   * Mismo flujo que handleAprobarConOis pero creando una OIP
+   * (api_aprobarConOip). La OIP nace con plazo de 365 días (el servidor lo
+   * fija, no se hereda el de la cotización) y su documento se genera después,
+   * fuera del lock.
+   */
+  function handleAprobarConOip() {
+    var payload = buildPayload(ESTADO_APROBADA);
+    closeAprobarModal();
+    if (!payload) return;
+
+    var idCotizacion = detail.idCotizacion;
+    var requestId = KGP.uuid();
+    setDetailBusy(true, 'Aprobando la cotización y creando la OIP…');
+
+    KGP.apiCall('api_aprobarConOip', [idCotizacion, payload, requestId], { retryOn: ['BUSY', 'TRANSPORT', 'TIMEOUT'] }).then(function (res) {
+      KGP.toast('cotización aprobada. OIP ' + res.codigoOip + ' creada.', 'success', 6000);
+      detail.estado = ESTADO_APROBADA;
+      detail.oip = { idOip: res.idOip, codigo: res.codigoOip };
+      if (res.cotizacion) {
+        detail.totalesGuardados = { subtotal: res.cotizacion.subtotal, iva: res.cotizacion.iva, total: res.cotizacion.total };
+        detail.revisadoAprobadoPorNombre = res.cotizacion.revisadoAprobadoPorNombre || detail.revisadoAprobadoPorNombre;
+      }
+      setOrdenButtons();
+      recomputeVencimiento();
+      applyLockState();
+      renderServiciosList();
+
+      return KGP.apiCall('api_getCotizacion', [idCotizacion]).then(function (cot) {
+        syncServicioIds(cot.servicios || []);
+      }).catch(function () { /* no crítico */ }).then(function () {
+        setDetailBusy(true, 'Actualizando el documento de la cotización…');
+        return regenerarDoc(idCotizacion);
+      }).then(function () {
+        setDetailBusy(true, 'Generando el documento de la OIP…');
+        return KGP.apiCall('api_generateOipDocument', [res.idOip, requestId]).then(function () {
+          KGP.toast('Documento de la OIP ' + res.codigoOip + ' generado.', 'success');
+        }).catch(function (err) {
+          // No bloquea: la OIP ya existe y "Gestionar OIP" permite reintentar.
+          KGP.toast('La OIP se creó, pero su documento falló: ' + KGP.friendlyError(err) + ' Puedes reintentarlo desde Gestionar OIP.', 'error', 9000);
+        });
+      });
+    }).catch(function (err) {
+      if (err.code === 'VALIDATION' && Array.isArray(err.details) && err.details.length) {
+        KGP.toast(err.details.slice(0, 3).join(' · '), 'error', 8000);
+      } else {
+        KGP.toast('No se pudo aprobar la cotización: ' + KGP.friendlyError(err), 'error', 7000);
+      }
+    }).finally(function () {
+      setDetailBusy(false);
+    });
+  }
+
+  /**
+   * Botones "Ver OIS" / "Ver OIP" del encabezado del detalle: se muestra el
+   * que corresponda a la orden que esta cotización ya tenga. Nunca los dos
+   * (la orden es una elección única al aprobar).
+   */
+  function setOrdenButtons() {
+    var btnOis = document.getElementById('ge-ver-ois-btn');
+    if (btnOis) {
+      btnOis.hidden = !detail.ois;
+      btnOis.textContent = detail.ois ? ('Ver OIS ' + detail.ois.codigo) : 'Ver OIS';
+    }
+    var btnOip = document.getElementById('ge-ver-oip-btn');
+    if (btnOip) {
+      btnOip.hidden = !detail.oip;
+      btnOip.textContent = detail.oip ? ('Ver OIP ' + detail.oip.codigo) : 'Ver OIP';
+    }
   }
 
   function regenerarDoc(idCotizacion) {
@@ -1209,9 +1290,7 @@ window.KGP = window.KGP || {};
     // mantiene la confirmación en línea de siempre.
     document.getElementById('ge-garantia-aprobar').addEventListener('click', openAprobarModal);
     document.getElementById('aprobar-ois-btn').addEventListener('click', handleAprobarConOis);
-    document.getElementById('aprobar-oip-btn').addEventListener('click', function () {
-      document.getElementById('aprobar-oip-note').hidden = false;
-    });
+    document.getElementById('aprobar-oip-btn').addEventListener('click', handleAprobarConOip);
     document.getElementById('aprobar-modal-cancel').addEventListener('click', closeAprobarModal);
     document.getElementById('aprobar-modal-close').addEventListener('click', closeAprobarModal);
     document.getElementById('aprobar-modal-overlay').addEventListener('click', function (e) {
@@ -1222,6 +1301,9 @@ window.KGP = window.KGP || {};
     });
     document.getElementById('ge-ver-ois-btn').addEventListener('click', function () {
       if (detail.ois && KGP.ois && KGP.ois.openDetail) KGP.ois.openDetail(detail.ois.idOis);
+    });
+    document.getElementById('ge-ver-oip-btn').addEventListener('click', function () {
+      if (detail.oip && KGP.oip && KGP.oip.openDetail) KGP.oip.openDetail(detail.oip.idOip);
     });
     document.getElementById('ge-garantia-rechazar').addEventListener('click', function () { showGarantiaConfirm(ESTADO_RECHAZADA); });
     document.getElementById('ge-garantia-no').addEventListener('click', function () { showGarantiaConfirm(null); });

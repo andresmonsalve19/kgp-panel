@@ -6,10 +6,15 @@
      paginación en el cliente (ningún filtro ni cambio de página cuesta un
      round-trip). Ver ds_getSnapshot_ en 32_DashboardService.js. -->
 <section class="view" id="view-dashboard">
+  <!-- La cabecera tiene un juego de resumen/"Actualizar" por módulo
+       (dash-* = cotizaciones, dord-* = OIS/OIP): cada módulo pinta y refresca
+       solo lo suyo, y el selector de abajo muestra el que corresponde. Así el
+       polling de cotizaciones nunca pisa el resumen de las órdenes. -->
   <div class="page-header">
     <div>
-      <h1>Dashboard de cotizaciones</h1>
+      <h1 id="dash-title">Dashboard de cotizaciones</h1>
       <div class="desc" id="dash-summary">Seguimiento en tiempo real.</div>
+      <div class="desc" id="dord-summary" hidden></div>
     </div>
     <div class="dash-header-actions">
       <span class="dash-updated" id="dash-updated"></span>
@@ -17,8 +22,25 @@
         <span id="dash-refresh-spinner" style="display:none;" class="spinner dark"></span>
         Actualizar
       </button>
+      <span class="dash-updated" id="dord-updated" hidden></span>
+      <button type="button" class="btn btn-sm" id="dord-refresh" hidden>
+        <span id="dord-refresh-spinner" style="display:none;" class="spinner dark"></span>
+        Actualizar
+      </button>
     </div>
   </div>
+
+  <!-- Qué se analiza: cotizaciones, OIS u OIP (JsDashboardOrdenes.js.html,
+       recordado por navegador). Cambiar de pestaña no cuesta round-trips: el
+       snapshot de órdenes trae OIS y OIP juntas. -->
+  <div class="dash-modulos" id="dash-modulos" role="tablist" aria-label="Qué quieres analizar">
+    <button type="button" class="dash-modulo is-active" role="tab" aria-selected="true" data-modulo="cot">Cotizaciones</button>
+    <button type="button" class="dash-modulo" role="tab" aria-selected="false" data-modulo="OIS">OIS <span class="dash-modulo-sub">Órdenes internas de servicio</span></button>
+    <button type="button" class="dash-modulo" role="tab" aria-selected="false" data-modulo="OIP">OIP <span class="dash-modulo-sub">Órdenes internas de proyectos</span></button>
+  </div>
+
+  <!-- ================= Módulo: cotizaciones (JsDashboard.js.html) ================= -->
+  <div id="dash-cot-panel">
 
   <!-- Bloquea todo el dashboard (KPIs, gráficas, tabla) hasta que llega el
        primer snapshot de la sesión — mismo patrón que el detalle de
@@ -157,5 +179,145 @@
        (el año filtrado). Cada tarjeta es un atajo al subconjunto afectado. -->
   <div class="calidad-grid" id="dash-calidad"></div>
 
+  </div>
+  </div>
+
+  <!-- ================= Módulo: OIS / OIP (JsDashboardOrdenes.js.html) =================
+       Un solo panel para los dos tipos de orden (tienen la misma forma): el
+       tipo activo decide qué órdenes entran y qué tarjetas se muestran (la
+       facturación solo existe en la OIP). -->
+  <div id="dord-panel" hidden>
+    <div id="dord-loading" class="detail-loading">
+      <span class="spinner-lg"></span>
+      <div class="page-loader-text">Cargando órdenes…</div>
+    </div>
+
+    <div id="dord-content" hidden>
+      <div class="warn-banner" id="dord-banner" hidden></div>
+
+      <div class="kpi-grid dash-kpis" id="dord-kpis"></div>
+
+      <div class="dash-charts">
+        <div class="card chart-card">
+          <div class="section-title-row">
+            <div class="section-title">Distribución por estado</div>
+            <span class="chart-meta" id="dord-donut-meta"></span>
+          </div>
+          <div class="donut-wrap">
+            <div class="donut" id="dord-donut">
+              <div class="donut-hole">
+                <span class="donut-value" id="dord-donut-total">0</span>
+                <span class="donut-caption">órdenes</span>
+              </div>
+            </div>
+            <ul class="chart-legend" id="dord-donut-legend"></ul>
+          </div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="section-title-row">
+            <div class="section-title">Órdenes creadas</div>
+            <span class="chart-meta">por mes</span>
+          </div>
+          <div class="bars-chart" id="dord-bars"></div>
+          <ul class="chart-legend chart-legend-inline">
+            <li><span class="legend-dot legend-dot-decidida"></span>Finalizadas</li>
+            <li><span class="legend-dot legend-dot-revision"></span>Abiertas</li>
+          </ul>
+        </div>
+
+        <div class="card chart-card">
+          <div class="section-title-row">
+            <div class="section-title">Ventana de vigencia</div>
+            <span class="chart-meta">días a vencimiento · sin finalizar</span>
+          </div>
+          <div class="hbar-list" id="dord-vigencia"></div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="section-title-row">
+            <div class="section-title">Tareas pendientes por responsable</div>
+            <span class="chart-meta" id="dord-carga-meta"></span>
+          </div>
+          <div class="hbar-list hbar-list-labeled" id="dord-carga"></div>
+        </div>
+
+        <!-- Solo OIP: la OIS no factura por mes. -->
+        <div class="card chart-card" id="dord-fact-card" hidden>
+          <div class="section-title-row">
+            <div class="section-title">Facturación por mes</div>
+            <span class="chart-meta" id="dord-fact-meta"></span>
+          </div>
+          <div class="bars-chart" id="dord-fact"></div>
+          <ul class="chart-legend chart-legend-inline">
+            <li><span class="legend-dot legend-dot-decidida"></span>Facturado</li>
+            <li><span class="legend-dot legend-dot-revision"></span>Pendiente de facturar</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="filters-row">
+          <input type="text" class="search-input" id="dord-search" placeholder="Buscar por código, cotización, cliente o responsable…" aria-label="Buscar órdenes">
+          <select id="dord-filter-anio" title="Año de elaboración" aria-label="Año de elaboración">
+            <option value="">Todos los años</option>
+          </select>
+          <select id="dord-filter-cliente" title="Cliente" aria-label="Cliente">
+            <option value="">Todos los clientes</option>
+          </select>
+          <select id="dord-filter-estado" title="Estado" aria-label="Estado">
+            <option value="">Todos los estados</option>
+          </select>
+          <select id="dord-sort-by" title="Ordenar por" aria-label="Ordenar por">
+            <option value="codigo">Ordenar por código</option>
+            <option value="cliente">Ordenar por cliente</option>
+            <option value="fechaElaboracion">Ordenar por elaboración</option>
+            <option value="fechaVencimiento">Ordenar por vencimiento</option>
+            <option value="diasRestantes">Ordenar por días restantes</option>
+            <option value="avance">Ordenar por avance de tareas</option>
+            <option value="tareasVencidas">Ordenar por tareas vencidas</option>
+            <option value="estado">Ordenar por estado</option>
+          </select>
+          <button type="button" class="btn btn-sm" id="dord-sort-dir" title="Cambiar orden ascendente/descendente">↑ Ascendente</button>
+          <select id="dord-page-size" title="Resultados por página" aria-label="Resultados por página">
+            <option value="20">20 / página</option>
+            <option value="50">50 / página</option>
+            <option value="100">100 / página</option>
+          </select>
+          <button type="button" class="btn btn-sm btn-ghost" id="dord-reset">Limpiar</button>
+        </div>
+
+        <div class="filter-chips" id="dord-chips" hidden></div>
+
+        <div class="table-wrap">
+          <table class="data-table data-table-expandable">
+            <thead>
+              <tr>
+                <th>Código</th>
+                <th>Cliente</th>
+                <th>Elaboración</th>
+                <th>Vencimiento</th>
+                <th>Días</th>
+                <th>Tareas</th>
+                <th>Estado</th>
+                <th>Documento</th>
+                <th><span class="sr-only">Acciones</span></th>
+              </tr>
+            </thead>
+            <tbody id="dord-tbody">
+              <tr><td colspan="9" class="empty-state">Cargando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination-row">
+          <span id="dord-page-info">—</span>
+          <div style="display:flex; gap:8px;">
+            <button type="button" class="btn btn-sm" id="dord-prev">← Anterior</button>
+            <button type="button" class="btn btn-sm" id="dord-next">Siguiente →</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>

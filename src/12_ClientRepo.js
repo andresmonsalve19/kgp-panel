@@ -8,12 +8,14 @@
 
 // ---------- CLIENTES ----------
 
+/** CLIENTES leída (memo) y con sus columnas requeridas verificadas. */
 function cli_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.CLIENTES);
-  repo_requireCols_(t.hmap, CFG().TABS.CLIENTES, SCHEMA().CLIENTES.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.CLIENTES);
+  repo_requireCols_(t.hmap, CFG_().TABS.CLIENTES, SCHEMA_().CLIENTES.required);
   return t;
 }
 
+/** Fila cruda de CLIENTES -> objeto de dominio. */
 function cli_rowToObj_(row) {
   return {
     idCliente: row[normText_('ID CLIENTE')],
@@ -49,10 +51,11 @@ function cli_listClientes_() {
       };
     });
 
-  cachePutJson_(key, list, CFG().CACHE_TTL.CLIENTES_S);
+  cachePutJson_(key, list, CFG_().CACHE_TTL.CLIENTES_S);
   return list;
 }
 
+/** Un cliente por ID CLIENTE, o null. */
 function cli_getCliente_(idCliente) {
   var table = cli_table_();
   var match = repo_findRowByCol_(table, 'ID CLIENTE', idCliente);
@@ -77,8 +80,8 @@ function cli_findByNumeroIdentificacion_(numero) {
  * Devuelve el idCliente generado.
  */
 function cli_createCliente_(datos) {
-  var idCliente = id_new_('CLI');
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.CLIENTES, [{
+  var idCliente = id_new_(CFG_().ID_PREFIJO_CLIENTE);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.CLIENTES, [{
     'ID CLIENTE': idCliente,
     'RAZON SOCIAL': cleanText_(datos.razonSocial),
     'TIPO IDENTIFICACION': cleanText_(datos.tipoIdentificacion),
@@ -104,7 +107,7 @@ function cli_updateCliente_(idCliente, datos) {
   var table = cli_table_();
   var match = repo_findRowByCol_(table, 'ID CLIENTE', idCliente);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el cliente ' + idCliente + '.');
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.CLIENTES, match.rowIndex, {
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.CLIENTES, match.rowIndex, {
     'RAZON SOCIAL': cleanText_(datos.razonSocial),
     'TIPO IDENTIFICACION': cleanText_(datos.tipoIdentificacion),
     'NUMERO IDENTIFICACION': cleanText_(datos.numeroIdentificacion),
@@ -120,12 +123,14 @@ function cli_updateCliente_(idCliente, datos) {
 
 // ---------- CONTACTOS_CLIENTES ----------
 
+/** CONTACTOS_CLIENTES leída (memo) y con sus columnas requeridas verificadas. */
 function con_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.CONTACTOS);
-  repo_requireCols_(t.hmap, CFG().TABS.CONTACTOS, SCHEMA().CONTACTOS_CLIENTES.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.CONTACTOS);
+  repo_requireCols_(t.hmap, CFG_().TABS.CONTACTOS, SCHEMA_().CONTACTOS_CLIENTES.required);
   return t;
 }
 
+/** Fila cruda de CONTACTOS_CLIENTES -> objeto de dominio. */
 function con_rowToObj_(row) {
   return {
     idContacto: row[normText_('ID CONTACTO')],
@@ -146,6 +151,7 @@ function con_listByCliente_(idCliente) {
   return matches.map(function (m) { return con_rowToObj_(m.obj); });
 }
 
+/** Un contacto por ID CONTACTO, o null. */
 function con_getContacto_(idContacto) {
   var table = con_table_();
   var match = repo_findRowByCol_(table, 'ID CONTACTO', idContacto);
@@ -161,8 +167,8 @@ function con_getContacto_(idContacto) {
  * Devuelve el idContacto generado.
  */
 function con_createContacto_(idCliente, datos) {
-  var idContacto = id_new_('CON');
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.CONTACTOS, [{
+  var idContacto = id_new_(CFG_().ID_PREFIJO_CONTACTO);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.CONTACTOS, [{
     'ID CONTACTO': idContacto,
     'ID CLIENTE': idCliente,
     'NOMBRE': cleanText_(datos.nombre),
@@ -179,7 +185,7 @@ function con_setEstablecimiento_(idContacto, idEstablecimiento) {
   var table = con_table_();
   var match = repo_findRowByCol_(table, 'ID CONTACTO', idContacto);
   if (!match) return;
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.CONTACTOS, match.rowIndex, { 'ID ESTABLECIMIENTO': idEstablecimiento || '' });
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.CONTACTOS, match.rowIndex, { 'ID ESTABLECIMIENTO': idEstablecimiento || '' });
 }
 
 /**
@@ -200,7 +206,7 @@ function con_updateContacto_(idContacto, datos) {
   var table = con_table_();
   var match = repo_findRowByCol_(table, 'ID CONTACTO', idContacto);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el contacto ' + idContacto + '.');
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.CONTACTOS, match.rowIndex, {
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.CONTACTOS, match.rowIndex, {
     'NOMBRE': cleanText_(datos.nombre),
     'TELEFONO': cleanText_(datos.telefono),
     'CORREO': cleanText_(datos.correo),
@@ -210,12 +216,14 @@ function con_updateContacto_(idContacto, datos) {
 
 // ---------- ESTABLECIMIENTOS_CLIENTES ----------
 
+/** ESTABLECIMIENTOS_CLIENTES leída (memo) y con sus columnas requeridas verificadas. */
 function est_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.ESTABLECIMIENTOS);
-  repo_requireCols_(t.hmap, CFG().TABS.ESTABLECIMIENTOS, SCHEMA().ESTABLECIMIENTOS_CLIENTES.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.ESTABLECIMIENTOS);
+  repo_requireCols_(t.hmap, CFG_().TABS.ESTABLECIMIENTOS, SCHEMA_().ESTABLECIMIENTOS_CLIENTES.required);
   return t;
 }
 
+/** Fila cruda de ESTABLECIMIENTOS_CLIENTES -> objeto de dominio. */
 function est_rowToObj_(row) {
   return {
     idEstablecimiento: row[normText_('ID ESTABLECIMIENTO')],
@@ -235,6 +243,7 @@ function est_listByCliente_(idCliente) {
   return matches.map(function (m) { return est_rowToObj_(m.obj); });
 }
 
+/** Un establecimiento por ID ESTABLECIMIENTO, o null. */
 function est_getEstablecimiento_(idEstablecimiento) {
   var table = est_table_();
   var match = repo_findRowByCol_(table, 'ID ESTABLECIMIENTO', idEstablecimiento);
@@ -249,8 +258,8 @@ function est_getEstablecimiento_(idEstablecimiento) {
  * Devuelve el idEstablecimiento generado.
  */
 function est_createEstablecimiento_(idCliente, datos) {
-  var idEstablecimiento = id_new_('EST');
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.ESTABLECIMIENTOS, [{
+  var idEstablecimiento = id_new_(CFG_().ID_PREFIJO_ESTABLECIMIENTO);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.ESTABLECIMIENTOS, [{
     'ID ESTABLECIMIENTO': idEstablecimiento,
     'ID CLIENTE': idCliente,
     'NOMBRE': cleanText_(datos.nombre),
@@ -267,7 +276,7 @@ function est_updateEstablecimiento_(idEstablecimiento, datos) {
   var table = est_table_();
   var match = repo_findRowByCol_(table, 'ID ESTABLECIMIENTO', idEstablecimiento);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el establecimiento ' + idEstablecimiento + '.');
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.ESTABLECIMIENTOS, match.rowIndex, {
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.ESTABLECIMIENTOS, match.rowIndex, {
     'NOMBRE': cleanText_(datos.nombre),
     'DIRECCION': cleanText_(datos.direccion),
     'CIUDAD': cleanText_(datos.ciudad),
@@ -292,6 +301,6 @@ function cli_getDetalleCompleto_(idCliente) {
     establecimientos: est_listByCliente_(idCliente)
   };
 
-  cachePutJson_(key, detalle, CFG().CACHE_TTL.CLIENTES_S);
+  cachePutJson_(key, detalle, CFG_().CACHE_TTL.CLIENTES_S);
   return detalle;
 }

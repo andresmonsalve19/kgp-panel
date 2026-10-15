@@ -1,48 +1,103 @@
 /**
- * Repo de PERSONAL_KGP (gestión de empleados). Tabla independiente, sin FKs
- * hacia otras hojas: a diferencia de CLIENTES/CONTACTOS/ESTABLECIMIENTOS,
- * "Gestión de empleados" no participa del flujo de cotización, así que este
- * repo no lo llama ninguna orquestación de 30_QuoteService.js.
+ * Repo de PERSONAL_KGP (empleados internos) y PERSONAL_TERCEROS (terceros /
+ * independientes). Las dos hojas tienen EXACTAMENTE las mismas columnas, así
+ * que todo este archivo es común: el parámetro `tipo` (CFG_().TIPO_RESPONSABLE_
+ * INTERNO / _TERCERO) elige la hoja. Sin `tipo` = interno (comportamiento de
+ * siempre: ELABORADO POR, asesor comercial, etc. son solo internos).
+ *
+ * Tabla independiente, sin FKs hacia otras hojas: "Gestión de empleados" no
+ * participa del flujo de cotización.
  */
 
-function emp_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.PERSONAL);
-  repo_requireCols_(t.hmap, CFG().TABS.PERSONAL, SCHEMA().PERSONAL_KGP.required);
+/** Tipo normalizado: TERCERO si así se pide, INTERNO en cualquier otro caso. */
+function emp_tipo_(tipo) {
+  var cfg = CFG_();
+  return String(tipo || '').trim().toUpperCase() === cfg.TIPO_RESPONSABLE_TERCERO
+    ? cfg.TIPO_RESPONSABLE_TERCERO
+    : cfg.TIPO_RESPONSABLE_INTERNO;
+}
+
+/** {tab, schema, prefijo} de la hoja de un tipo de empleado. */
+function emp_hoja_(tipo) {
+  var cfg = CFG_();
+  if (emp_tipo_(tipo) === cfg.TIPO_RESPONSABLE_TERCERO) {
+    return { tab: cfg.TABS.PERSONAL_TERCEROS, schema: SCHEMA_().PERSONAL_TERCEROS, prefijo: cfg.ID_PREFIJO_TERCERO };
+  }
+  return { tab: cfg.TABS.PERSONAL, schema: SCHEMA_().PERSONAL_KGP, prefijo: cfg.ID_PREFIJO_EMPLEADO };
+}
+
+/** Hoja de personal del tipo pedido, leída (memo) y con sus columnas requeridas verificadas. */
+function emp_table_(tipo) {
+  var h = emp_hoja_(tipo);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, h.tab);
+  repo_requireCols_(t.hmap, h.tab, h.schema.required);
   return t;
 }
 
-function emp_rowToObj_(row) {
+/**
+ * Fila cruda de personal -> objeto de dominio.
+ * @param {!Object} row
+ * @param {string=} tipo Ya normalizado por quien llama; sin él, interno.
+ */
+function emp_rowToObj_(row, tipo) {
   return {
     idEmpleado: row[normText_('ID EMPLEADO')],
     nombre: row[normText_('NOMBRE')],
     correo: row[normText_('CORREO')],
     telefono: row[normText_('TELEFONO')],
     cargo: row[normText_('CARGO')],
-    // Opcional (no está en SCHEMA().PERSONAL_KGP.required): se usa para la
-    // etiqueta "Cédula - Nombre" del responsable de una tarea de OIS. Sin la
+    // Opcional (no está en SCHEMA_().PERSONAL_KGP.required): se usa para la
+    // etiqueta "Cédula - Nombre" del responsable de una tarea. Sin la
     // columna, la etiqueta muestra solo el nombre.
-    cedula: row[normText_('CEDULA')] || ''
+    cedula: row[normText_('CEDULA')] || '',
+    // `tipo` ya normalizado por quien llama (emp_listEmpleados_); sin él, interno.
+    tipoResponsable: tipo || CFG_().TIPO_RESPONSABLE_INTERNO
   };
 }
 
-/** Listado completo para la vista de gestión. Cacheado por dataVersion (mismo patrón que cli_listClientes_). */
-function emp_listEmpleados_() {
-  var v = dataVersion_();
-  var key = 'emp:list:v' + v;
+/** Listado completo de un tipo (vista de gestión, desplegables). Cacheado por dataVersion (mismo patrón que cli_listClientes_). */
+function emp_listEmpleados_(tipo) {
+  tipo = emp_tipo_(tipo);
+  var key = 'emp:list:' + tipo + ':v' + dataVersion_();
   var cached = cacheGetJson_(key);
   if (cached) return cached;
 
-  var table = emp_table_();
-  var list = table.rows.map(emp_rowToObj_);
-
-  cachePutJson_(key, list, CFG().CACHE_TTL.EMPLEADOS_S);
+  var list = emp_table_(tipo).rows.map(function (r) { return emp_rowToObj_(r, tipo); });
+  cachePutJson_(key, list, CFG_().CACHE_TTL.EMPLEADOS_S);
   return list;
 }
 
+/**
+ * Internos + terceros, cada uno con su tipoResponsable: los candidatos a
+ * responsable de una tarea. Si la hoja de terceros todavía no existe o le
+ * faltan columnas, se devuelven solo los internos (no rompe las tareas).
+ */
+function emp_listResponsables_() {
+  var cfg = CFG_();
+  var terceros = [];
+  try { terceros = emp_listEmpleados_(cfg.TIPO_RESPONSABLE_TERCERO); } catch (e) { terceros = []; }
+  return emp_listEmpleados_(cfg.TIPO_RESPONSABLE_INTERNO).concat(terceros);
+}
+
+/**
+ * Busca un responsable en la lista de emp_listResponsables_: por tipo + ID si
+ * llega el tipo; si no (tareas antiguas o sin la columna TIPO RESPONSABLE),
+ * por ID en cualquiera de las dos hojas. null si no existe.
+ */
+function emp_buscarResponsable_(responsables, idEmpleado, tipo) {
+  idEmpleado = String(idEmpleado || '').trim();
+  if (!idEmpleado) return null;
+  var conTipo = tipo ? emp_tipo_(tipo) : '';
+  return (responsables || []).filter(function (e) {
+    return String(e.idEmpleado) === idEmpleado && (!conTipo || e.tipoResponsable === conTipo);
+  })[0] || null;
+}
+
 /** datos: {nombre, correo, telefono, cargo}. Devuelve el idEmpleado generado. */
-function emp_createEmpleado_(datos) {
-  var idEmpleado = id_new_('EMP');
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.PERSONAL, [{
+function emp_createEmpleado_(datos, tipo) {
+  var h = emp_hoja_(tipo);
+  var idEmpleado = id_new_(h.prefijo);
+  repo_appendRows_(CFG_().DB_SHEET_ID, h.tab, [{
     'ID EMPLEADO': idEmpleado,
     'NOMBRE': cleanText_(datos.nombre),
     'CORREO': cleanText_(datos.correo),
@@ -53,11 +108,11 @@ function emp_createEmpleado_(datos) {
 }
 
 /** Edita un empleado existente. datos: {nombre, correo, telefono, cargo}. */
-function emp_updateEmpleado_(idEmpleado, datos) {
-  var table = emp_table_();
-  var match = repo_findRowByCol_(table, 'ID EMPLEADO', idEmpleado);
+function emp_updateEmpleado_(idEmpleado, datos, tipo) {
+  var h = emp_hoja_(tipo);
+  var match = repo_findRowByCol_(emp_table_(tipo), 'ID EMPLEADO', idEmpleado);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el empleado ' + idEmpleado + '.');
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.PERSONAL, match.rowIndex, {
+  repo_updateCells_(CFG_().DB_SHEET_ID, h.tab, match.rowIndex, {
     'NOMBRE': cleanText_(datos.nombre),
     'CORREO': cleanText_(datos.correo),
     'TELEFONO': cleanText_(datos.telefono),
@@ -66,14 +121,14 @@ function emp_updateEmpleado_(idEmpleado, datos) {
 }
 
 /** Elimina físicamente un empleado. */
-function emp_deleteEmpleado_(idEmpleado) {
-  var table = emp_table_();
-  var match = repo_findRowByCol_(table, 'ID EMPLEADO', idEmpleado);
+function emp_deleteEmpleado_(idEmpleado, tipo) {
+  var h = emp_hoja_(tipo);
+  var match = repo_findRowByCol_(emp_table_(tipo), 'ID EMPLEADO', idEmpleado);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el empleado ' + idEmpleado + '.');
-  repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.PERSONAL, [match.rowIndex]);
+  repo_deleteRows_(CFG_().DB_SHEET_ID, h.tab, [match.rowIndex]);
 }
 
-/** Un empleado por ID EMPLEADO, o null. Usado para resolver ELABORADO POR / REVISADO Y APROBADO POR / ASESOR COMERCIAL al leer una cotización. */
+/** Un empleado INTERNO por ID EMPLEADO, o null. Usado para resolver ELABORADO POR / REVISADO Y APROBADO POR / ASESOR COMERCIAL al leer una cotización. */
 function emp_getEmpleado_(idEmpleado) {
   idEmpleado = String(idEmpleado || '').trim();
   if (!idEmpleado) return null;
@@ -82,13 +137,13 @@ function emp_getEmpleado_(idEmpleado) {
 }
 
 /**
- * Un empleado por CORREO (comparación insensible a mayúsculas/espacios,
- * a diferencia de repo_findRowByCol_ que compara exacto) — el correo del
- * usuario activo (Session.getActiveUser().getEmail()) puede no coincidir
- * carácter a carácter con lo digitado en PERSONAL_KGP. Usado para resolver
- * ELABORADO POR/CARGO al crear una cotización y REVISADO Y APROBADO POR al
- * decidir la garantía (30_QuoteService.js). Devuelve null si no hay match
- * (no crítico: esas columnas simplemente quedan vacías).
+ * Un empleado INTERNO por CORREO (comparación insensible a mayúsculas/
+ * espacios, a diferencia de repo_findRowByCol_ que compara exacto) — el
+ * correo del usuario activo (Session.getActiveUser().getEmail()) puede no
+ * coincidir carácter a carácter con lo digitado en PERSONAL_KGP. Usado para
+ * resolver ELABORADO POR/CARGO al crear una cotización y REVISADO Y APROBADO
+ * POR al decidir la cotización (30_QuoteService.js). Devuelve null si no hay
+ * match (no crítico: esas columnas simplemente quedan vacías).
  */
 function emp_findByCorreo_(correo) {
   var wanted = normText_(correo);

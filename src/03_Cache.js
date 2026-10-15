@@ -14,46 +14,43 @@
 var CACHE_CHUNK_SIZE_ = 90000; // caracteres, margen bajo el límite de 100KB de CacheService
 var DATA_VERSION_PROP_ = 'DATA_VERSION';
 
+/** CacheService del script (compartido por todos los usuarios). */
 function cache_() {
   return CacheService.getScriptCache();
 }
 
 /**
  * Guarda un valor JSON-serializable bajo `key`, partiéndolo en chunks si
- * hace falta. Devuelve true si se pudo verificar la escritura completa.
+ * hace falta (un índice {__chunks: n} en `key` y los trozos en `key:0..n-1`).
+ *
+ * No relee lo escrito: si CacheService descarta algo (cuota, tamaño), la
+ * próxima lectura simplemente es un cache miss (cacheGetJson_ devuelve null
+ * con cualquier trozo faltante) y se recalcula desde la hoja. Un error de
+ * CacheService nunca debe tumbar la operación que quería cachear.
+ *
+ * @param {string} key
+ * @param {*} value JSON-serializable.
+ * @param {number} ttlSeconds Máximo 21600 (6 h).
  */
 function cachePutJson_(key, value, ttlSeconds) {
-  var json = JSON.stringify(value);
-  var cache = cache_();
-
-  if (json.length <= CACHE_CHUNK_SIZE_) {
-    cache.put(key, json, ttlSeconds);
-    return cache.get(key) === json;
-  }
-
-  var chunks = [];
-  for (var i = 0; i < json.length; i += CACHE_CHUNK_SIZE_) {
-    chunks.push(json.slice(i, i + CACHE_CHUNK_SIZE_));
-  }
-
-  var map = {};
-  map[key] = JSON.stringify({ __chunks: chunks.length });
-  for (var c = 0; c < chunks.length; c++) {
-    map[key + ':' + c] = chunks[c];
-  }
-  cache.putAll(map, ttlSeconds);
-
-  // Verificación: releer el índice y el primer/último chunk.
-  var idxRaw = cache.get(key);
-  if (!idxRaw) return false;
   try {
-    var idx = JSON.parse(idxRaw);
-    if (!idx || idx.__chunks !== chunks.length) return false;
+    var json = JSON.stringify(value);
+    var cache = cache_();
+    if (json.length <= CACHE_CHUNK_SIZE_) {
+      cache.put(key, json, ttlSeconds);
+      return;
+    }
+    var map = {};
+    var n = 0;
+    for (var i = 0; i < json.length; i += CACHE_CHUNK_SIZE_) {
+      map[key + ':' + n] = json.slice(i, i + CACHE_CHUNK_SIZE_);
+      n++;
+    }
+    map[key] = JSON.stringify({ __chunks: n });
+    cache.putAll(map, ttlSeconds);
   } catch (e) {
-    return false;
+    Logger.log('cachePutJson_(' + key + '): ' + errMsg_(e));
   }
-  return cache.get(key + ':0') === chunks[0] &&
-    cache.get(key + ':' + (chunks.length - 1)) === chunks[chunks.length - 1];
 }
 
 /**
@@ -62,7 +59,8 @@ function cachePutJson_(key, value, ttlSeconds) {
  */
 function cacheGetJson_(key) {
   var cache = cache_();
-  var raw = cache.get(key);
+  var raw;
+  try { raw = cache.get(key); } catch (eGet) { return null; } // CacheService caído = cache miss
   if (raw == null) return null;
 
   var parsed;

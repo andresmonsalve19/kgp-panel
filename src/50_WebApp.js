@@ -2,12 +2,25 @@
  * Punto de entrada de la Web App: doGet, include, y todas las funciones
  * api_* expuestas a google.script.run desde ui/*.html.
  *
- * doGet solo sirve el shell (cero lectura de Sheets): los datos llegan vía
- * api_bootstrap() después del primer render, así el HTML pinta de
- * inmediato. Toda api_* devuelve {ok,data,error,meta} (ver 01_Result.js)
- * y nunca deja escapar una excepción cruda (safeCall_).
+ * doGet solo sirve el shell: los datos llegan vía api_bootstrap() después
+ * del primer render. La única lectura de Sheets de doGet es la de la
+ * configuración (hojas CONFIG_*, cfgs_refresh_), requisito explícito del
+ * usuario: se relee en cada carga de la página.
+ *
+ * Contrato: toda api_* devuelve {ok, data, error, meta} (01_Result.js) y nunca
+ * deja escapar una excepción cruda (safeCall_). Son la ÚNICA superficie que el
+ * navegador debería usar; las capas de abajo son privadas (terminan en "_") o
+ * repiten la misma validación, y las admin_* están protegidas
+ * (admin_soloEditor_, 51_Admin.js).
  */
 
+/**
+ * Sirve la página (shell + vistas). Invalida las cachés por versión (una
+ * recarga con F5 siempre ve la BD real, incluso tras editar el Sheet a mano)
+ * y relee la configuración.
+ * @param {Object} e Evento de doGet; e.parameter.v === 'dashboard' abre el Dashboard.
+ * @return {!Object} HtmlOutput.
+ */
 function doGet(e) {
   // Recargar/refrescar la página (F5) SIEMPRE pasa por acá — a diferencia
   // de las llamadas google.script.run que hace la SPA al navegar entre
@@ -17,19 +30,38 @@ function doGet(e) {
   // Dashboard) cuando el usuario pide explícitamente "ver todo de nuevo":
   // por ejemplo tras editar CLIENTES/CONTACTOS_CLIENTES/ESTABLECIMIENTOS_CLIENTES
   // a mano en el Sheet, que no pasa por safeCall_ y por lo tanto nunca
-  // llama bumpDataVersion_ por sí solo. Sigue sin leer Sheets (ver doc de
-  // arriba): bumpDataVersion_ es solo una escritura a ScriptProperties.
+  // llama bumpDataVersion_ por sí solo. bumpDataVersion_ es solo una
+  // escritura a ScriptProperties.
   bumpDataVersion_();
+
+  // Requisito del usuario: la configuración (hojas CONFIG_* del spreadsheet
+  // de catálogo, 06_ConfigSheet.js) se lee SIEMPRE al cargar la página. Una
+  // sola apertura del spreadsheet; el resultado queda en caché para todas las
+  // llamadas google.script.run de esta sesión. Si falla, se usa la copia
+  // anterior o los valores del código (nunca impide abrir la app).
+  cfgs_refresh_();
 
   var t = HtmlService.createTemplateFromFile('ui/Index');
   t.initialView = (e && e.parameter && e.parameter.v === 'dashboard') ? 'dashboard' : 'cotizacion';
+  // Parámetros que usa el navegador (IVA, límites, días de aviso...): van
+  // dentro del HTML, así el cliente no necesita otro round-trip para tenerlos.
+  var clientConfig = {};
+  try { clientConfig = cfgs_clientConfig_(); } catch (err) { clientConfig = {}; }
+  // JSON listo para un <script>: "<" escapado para que un texto de la config
+  // nunca pueda cerrar la etiqueta.
+  t.clientConfigJson = JSON.stringify(clientConfig).replace(/</g, '\\u003c');
   return t.evaluate()
     .setTitle('KGP Panel')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-/** Usado por las plantillas HTML: <?!= include('ui/Styles.css'); ?> */
+/**
+ * Contenido de otro archivo HTML del proyecto, para las plantillas:
+ * <?!= include('ui/Styles.css'); ?>
+ * @param {string} name Ruta sin extensión (p. ej. 'ui/JsCore.js').
+ * @return {string}
+ */
 function include(name) {
   return HtmlService.createHtmlOutputFromFile(name).getContent();
 }
@@ -38,7 +70,15 @@ function include(name) {
 // API — Formulario de cotización
 // ---------------------------------------------------------------------
 
-/** Datos iniciales para pintar el formulario: catálogo, clientes, estados, defaults. */
+/**
+ * Datos iniciales compartidos por todas las vistas (los cachea KGP.catalog en
+ * el navegador): catálogo de tipos de servicio, clientes, empleados internos
+ * y terceros, estados, valores por defecto y el próximo código (informativo).
+ * Cada bloque es independiente: si uno falla, llega vacío con un aviso en
+ * `warnings` en vez de tumbar la carga.
+ * @return {!Object} ok_({user, tiposServicio, catalogoPares, clientes,
+ *     empleados, terceros, estados, defaults, codigoTentativo, schemaOk, warnings})
+ */
 function api_bootstrap() {
   return safeCall_('api_bootstrap', function () {
     var user = '';
@@ -50,6 +90,7 @@ function api_bootstrap() {
     var catalogoPares = [];
     var clientes = [];
     var empleados = [];
+    var terceros = [];
     var codigoTentativo = null;
 
     try {
@@ -74,13 +115,20 @@ function api_bootstrap() {
       // No crítico: el desplegable de Asesor comercial queda vacío.
     }
     try {
+      // Terceros / independientes: solo para el responsable de las tareas de
+      // OIS/OIP (KGP.ui.responsables). El asesor comercial sigue siendo interno.
+      terceros = emp_listEmpleados_(CFG_().TIPO_RESPONSABLE_TERCERO);
+    } catch (e) {
+      // No crítico: sin la hoja PERSONAL_TERCEROS solo se ofrecen internos.
+    }
+    try {
       // Informativo únicamente (no reserva el consecutivo): se incluye aquí
       // para que la vista cargue en un solo round-trip en vez de dos.
       codigoTentativo = code_previewNext_(new Date());
     } catch (e) {
       // No crítico: el campo de código se queda en su valor por defecto.
     }
-    if (!CFG().TEMPLATE_SHEET_ID) {
+    if (!CFG_().TEMPLATE_SHEET_ID) {
       warnings.push('La plantilla del documento aún no se ha preparado (falta ejecutar admin_convertTemplate()). Podrás crear cotizaciones, pero no generar el documento hasta que esto se resuelva.');
     }
 
@@ -90,8 +138,9 @@ function api_bootstrap() {
       catalogoPares: catalogoPares,
       clientes: clientes,
       empleados: empleados,
-      estados: CFG().ESTADOS,
-      defaults: { plazo: 15, fechaElaboracion: toISODate_(new Date()), estado: CFG().ESTADO_INICIAL },
+      terceros: terceros,
+      estados: CFG_().ESTADOS,
+      defaults: { plazo: CFG_().COTIZACION_PLAZO_DEFAULT, fechaElaboracion: toISODate_(new Date()), estado: CFG_().ESTADO_INICIAL },
       codigoTentativo: codigoTentativo,
       schemaOk: schemaOk,
       warnings: warnings
@@ -130,19 +179,32 @@ function api_createQuotation(payload) {
   });
 }
 
-/** Fase 2: genera el documento .xlsx a partir de una cotización ya creada. */
+/**
+ * Fase 2: genera el documento .xlsx a partir de una cotización ya creada.
+ * Con requestId (solo la creación) envía además el correo "cotización
+ * creada" al creador, con el enlace al documento (39_NotifyService.js).
+ */
 function api_generateDocument(idCotizacion, requestId) {
   return safeCall_('api_generateDocument', function () {
     if (!idCotizacion) return fail_('VALIDATION', 'Falta idCotizacion.');
-    return doc_generateForQuotation_(idCotizacion, requestId);
+    var res = doc_generateForQuotation_(idCotizacion, requestId);
+    if (requestId) ntf_onDocumentoCotizacion_(idCotizacion, res, true);
+    return res;
   });
 }
 
-/** Reintenta la generación del documento de una cotización cuyo DOC ESTADO quedó en ERROR. */
+/**
+ * Reintenta la generación del documento de una cotización cuyo DOC ESTADO
+ * quedó en ERROR (y regenera tras "Guardar cambios"). Si el correo de
+ * "cotización creada" quedó pendiente porque el documento inicial falló,
+ * sale aquí en la primera regeneración exitosa.
+ */
 function api_regenerateDocument(idCotizacion) {
   return safeCall_('api_regenerateDocument', function () {
     if (!idCotizacion) return fail_('VALIDATION', 'Falta idCotizacion.');
-    return doc_regenerate_(idCotizacion);
+    var res = doc_regenerate_(idCotizacion);
+    ntf_onDocumentoCotizacion_(idCotizacion, res, false);
+    return res;
   });
 }
 
@@ -249,51 +311,226 @@ function api_updateOis(idOis, payload) {
   });
 }
 
-/** Genera el documento de la OIS (primera vez, con requestId para idempotencia). */
+/**
+ * Genera el documento de la OIS (primera vez, con requestId para
+ * idempotencia). Con requestId (flujo de aprobación) envía además el correo
+ * "cotización aprobada" al creador, con el código de la OIS y su enlace.
+ */
 function api_generateOisDocument(idOis, requestId) {
   return safeCall_('api_generateOisDocument', function () {
     if (!idOis) return fail_('VALIDATION', 'Falta idOis.');
-    return doc_generateForOis_(idOis, requestId || null);
+    var res = doc_generateForOis_(idOis, requestId || null);
+    if (requestId) ntf_onDocumentoOrden_('OIS', idOis, res, true);
+    return res;
   });
 }
 
-/** Regenera el documento de la OIS (tras "Guardar cambios" o para reintentar un DOC ESTADO = ERROR). */
+/** Regenera el documento de la OIS (tras "Guardar cambios" o para reintentar un DOC ESTADO = ERROR). Envía el correo de aprobación si quedó pendiente. */
 function api_regenerateOisDocument(idOis) {
   return safeCall_('api_regenerateOisDocument', function () {
     if (!idOis) return fail_('VALIDATION', 'Falta idOis.');
-    return doc_generateForOis_(idOis, null);
+    var res = doc_generateForOis_(idOis, null);
+    ntf_onDocumentoOrden_('OIS', idOis, res, false);
+    return res;
   });
 }
 
 // ---------------------------------------------------------------------
-// API — Gestión de empleados (PERSONAL_KGP)
+// API — OIP
 // ---------------------------------------------------------------------
 
-/** Listado completo de empleados para la vista de gestión. */
-function api_listEmpleados() {
+/**
+ * Popup "Garantía aprobada" -> "OIP": guarda la cotización como Aprobada y
+ * crea su OIP en una sola transacción (ver oip_aprobarConOip). No genera
+ * documentos: el cliente llama después api_regenerateDocument (cotización) y
+ * api_generateOipDocument (OIP).
+ */
+function api_aprobarConOip(idCotizacion, payload, requestId) {
+  return safeCall_('api_aprobarConOip', function () {
+    return oip_aprobarConOip(idCotizacion, payload, requestId);
+  });
+}
+
+/** Listado paginado/filtrado de "Gestionar OIP" (mismo contrato de params que api_listOis). */
+function api_listOip(params) {
+  return safeCall_('api_listOip', function () {
+    return oip_listOip(params || {});
+  });
+}
+
+/** Detalle de una OIP + tareas + facturación + todo el detalle de su cotización padre. */
+function api_getOip(idOip) {
+  return safeCall_('api_getOip', function () {
+    return oip_getOip(idOip);
+  });
+}
+
+/** "Guardar cambios" de Gestionar OIP (BD). Devuelve {cotizacionCambio} para decidir qué documentos regenerar. */
+function api_updateOip(idOip, payload) {
+  return safeCall_('api_updateOip', function () {
+    return oip_updateOip(idOip, payload);
+  });
+}
+
+/**
+ * Genera el documento de la OIP (primera vez, con requestId para
+ * idempotencia). Con requestId (flujo de aprobación) envía además el correo
+ * "cotización aprobada" al creador, con el código de la OIP y su enlace.
+ */
+function api_generateOipDocument(idOip, requestId) {
+  return safeCall_('api_generateOipDocument', function () {
+    if (!idOip) return fail_('VALIDATION', 'Falta idOip.');
+    var res = doc_generateForOip_(idOip, requestId || null);
+    if (requestId) ntf_onDocumentoOrden_('OIP', idOip, res, true);
+    return res;
+  });
+}
+
+/** Regenera el documento de la OIP (tras "Guardar cambios" o para reintentar un DOC ESTADO = ERROR). Envía el correo de aprobación si quedó pendiente. */
+function api_regenerateOipDocument(idOip) {
+  return safeCall_('api_regenerateOipDocument', function () {
+    if (!idOip) return fail_('VALIDATION', 'Falta idOip.');
+    var res = doc_generateForOip_(idOip, null);
+    ntf_onDocumentoOrden_('OIP', idOip, res, false);
+    return res;
+  });
+}
+
+/**
+ * Crea o edita una fila de facturación de la OIP. A diferencia de las tareas,
+ * se guarda de inmediato (no espera el "Guardar cambios" de la vista) y no
+ * regenera ningún documento: la facturación solo vive en la BD.
+ * idFacturacion vacío = crear.
+ */
+function api_saveOipFactura(idOip, idFacturacion, payload) {
+  return safeCall_('api_saveOipFactura', function () {
+    return oip_saveFactura(idOip, idFacturacion, payload);
+  });
+}
+
+/** Elimina una fila de facturación de la OIP. */
+function api_deleteOipFactura(idOip, idFacturacion) {
+  return safeCall_('api_deleteOipFactura', function () {
+    return oip_deleteFactura(idOip, idFacturacion);
+  });
+}
+
+// ---------------------------------------------------------------------
+// API — Gestionar tareas (TAREAS_OIS + TAREAS_OIP en una sola vista)
+// ---------------------------------------------------------------------
+
+/** Snapshot completo de "Gestionar tareas": tareas de OIS y OIP, órdenes, empleados y usuario activo (ver tg_snapshot). */
+function api_listTareas() {
+  return safeCall_('api_listTareas', function () {
+    return tg_snapshot();
+  });
+}
+
+/**
+ * Crea (payload.idTarea vacío) o edita UNA tarea de una OIS u OIP y la guarda
+ * de inmediato. No regenera el documento de la orden: el cliente llama
+ * después api_regenerateOisDocument / api_regenerateOipDocument.
+ */
+function api_saveTarea(payload) {
+  return safeCall_('api_saveTarea', function () {
+    return tg_saveTarea(payload);
+  });
+}
+
+/** Finaliza o reabre una tarea (solo la celda ESTADO) y recalcula el estado de su orden. */
+function api_setTareaEstado(tipo, idOrden, idTarea, estado) {
+  return safeCall_('api_setTareaEstado', function () {
+    return tg_setTareaEstado(tipo, idOrden, idTarea, estado);
+  });
+}
+
+/** Elimina una tarea de su orden y recalcula el estado de la orden. */
+function api_deleteTarea(tipo, idOrden, idTarea) {
+  return safeCall_('api_deleteTarea', function () {
+    return tg_deleteTarea(tipo, idOrden, idTarea);
+  });
+}
+
+// ---------------------------------------------------------------------
+// API — Gestión de clientes (40_ClienteService.js). Altas y ediciones usan
+// los endpoints de arriba (api_createCliente, api_updateCliente, ...).
+// ---------------------------------------------------------------------
+
+/** Todos los clientes con sus conteos de contactos, establecimientos y cotizaciones. */
+function api_listClientesGestion() {
+  return safeCall_('api_listClientesGestion', function () {
+    return clis_listGestion();
+  });
+}
+
+/** Detalle de un cliente: datos + contactos + establecimientos + historial de cotizaciones. */
+function api_getClienteGestion(idCliente) {
+  return safeCall_('api_getClienteGestion', function () {
+    return clis_getGestion(idCliente);
+  });
+}
+
+/** Borra un cliente (y sus contactos/establecimientos) si ninguna cotización lo usa. */
+function api_deleteCliente(idCliente) {
+  return safeCall_('api_deleteCliente', function () {
+    return clis_deleteCliente(idCliente);
+  });
+}
+
+/** Borra un contacto si ninguna cotización lo tiene como solicitante. */
+function api_deleteContacto(idContacto) {
+  return safeCall_('api_deleteContacto', function () {
+    return clis_deleteContacto(idContacto);
+  });
+}
+
+/** Borra un establecimiento si ninguna cotización lo usa. */
+function api_deleteEstablecimiento(idEstablecimiento) {
+  return safeCall_('api_deleteEstablecimiento', function () {
+    return clis_deleteEstablecimiento(idEstablecimiento);
+  });
+}
+
+/** Asigna (o quita, con idContacto vacío) el contacto encargado de un establecimiento. */
+function api_setEncargadoEstablecimiento(idEstablecimiento, idContacto) {
+  return safeCall_('api_setEncargadoEstablecimiento', function () {
+    return clis_setEncargado(idEstablecimiento, idContacto);
+  });
+}
+
+// ---------------------------------------------------------------------
+// API — Gestión de empleados (PERSONAL_KGP y PERSONAL_TERCEROS)
+// ---------------------------------------------------------------------
+
+/**
+ * Listado completo para la vista de gestión. tipo: CFG_().TIPO_RESPONSABLE_
+ * INTERNO (PERSONAL_KGP, por defecto) o _TERCERO (PERSONAL_TERCEROS). Lo mismo
+ * para create/update/delete de abajo.
+ */
+function api_listEmpleados(tipo) {
   return safeCall_('api_listEmpleados', function () {
-    return ok_(emp_listEmpleados_());
+    return ok_(emp_listEmpleados_(tipo));
   });
 }
 
-/** Alta de un empleado nuevo. */
-function api_createEmpleado(datos) {
+/** Alta de un empleado nuevo (interno o tercero). */
+function api_createEmpleado(datos, tipo) {
   return safeCall_('api_createEmpleado', function () {
-    return emps_createEmpleado(datos);
+    return emps_createEmpleado(datos, tipo);
   });
 }
 
-/** Edita un empleado ya existente. */
-function api_updateEmpleado(idEmpleado, datos) {
+/** Edita un empleado ya existente (interno o tercero). */
+function api_updateEmpleado(idEmpleado, datos, tipo) {
   return safeCall_('api_updateEmpleado', function () {
-    return emps_updateEmpleado(idEmpleado, datos);
+    return emps_updateEmpleado(idEmpleado, datos, tipo);
   });
 }
 
-/** Elimina un empleado. */
-function api_deleteEmpleado(idEmpleado) {
+/** Elimina un empleado (interno o tercero). */
+function api_deleteEmpleado(idEmpleado, tipo) {
   return safeCall_('api_deleteEmpleado', function () {
-    return emps_deleteEmpleado(idEmpleado);
+    return emps_deleteEmpleado(idEmpleado, tipo);
   });
 }
 
@@ -320,12 +557,14 @@ function api_getDashboardSnapshot(params) {
   });
 }
 
-// ---------------------------------------------------------------------
-// API — Diagnóstico (usable también desde la UI, además de admin_health() en el editor)
-// ---------------------------------------------------------------------
-
-function api_health() {
-  return safeCall_('api_health', function () {
-    return ok_(admin_health());
+/**
+ * Snapshot COMPLETO de OIS y OIP para las pestañas "OIS" / "OIP" del
+ * Dashboard (mismo protocolo de versión que api_getDashboardSnapshot; el
+ * token incluye la fecha de hoy porque el estado "Vencida" depende del día).
+ * params: {sinceVersion} — ver ds_getOrdenesSnapshot_.
+ */
+function api_getOrdenesDashboard(params) {
+  return safeCall_('api_getOrdenesDashboard', function () {
+    return ds_getOrdenesSnapshot_(params || {});
   });
 }

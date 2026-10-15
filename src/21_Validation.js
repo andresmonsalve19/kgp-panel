@@ -31,8 +31,8 @@ function validateCreatePayload_(payload) {
 
   // ---- plazo ----
   var plazo = Math.trunc(Number(payload.plazo));
-  if (!plazo || isNaN(plazo) || plazo < 1 || plazo > CFG().LIMITS.MAX_PLAZO_DIAS) {
-    err('plazo debe ser un entero entre 1 y ' + CFG().LIMITS.MAX_PLAZO_DIAS + ' días.');
+  if (!plazo || isNaN(plazo) || plazo < 1 || plazo > CFG_().LIMITS.MAX_PLAZO_DIAS) {
+    err('plazo debe ser un entero entre 1 y ' + CFG_().LIMITS.MAX_PLAZO_DIAS + ' días.');
   }
 
   // ---- descripción ----
@@ -96,10 +96,10 @@ function validateCreatePayload_(payload) {
   // ---- servicios ----
   var servicios = validateServiciosArray_(payload.servicios, errors);
 
-  // ESTADO: toda cotización nueva nace SIEMPRE en CFG().ESTADO_INICIAL; lo
+  // ESTADO: toda cotización nueva nace SIEMPRE en CFG_().ESTADO_INICIAL; lo
   // que mande el cliente se ignora. Solo cambia después, una vez, con los
-  // botones "Garantía aprobada/rechazada" de Gestionar cotización.
-  var estado = CFG().ESTADO_INICIAL;
+  // botones "Cotización aprobada/rechazada" de Gestionar cotización.
+  var estado = CFG_().ESTADO_INICIAL;
 
   if (errors.length) return { clean: null, errors: errors };
 
@@ -136,8 +136,8 @@ function validateServiciosArray_(serviciosRaw, errors) {
     errors.push('Debe incluir al menos 1 servicio.');
     return out;
   }
-  if (serviciosRaw.length > CFG().LIMITS.MAX_SERVICIOS) {
-    errors.push('No se permiten más de ' + CFG().LIMITS.MAX_SERVICIOS + ' servicios por cotización.');
+  if (serviciosRaw.length > CFG_().LIMITS.MAX_SERVICIOS) {
+    errors.push('No se permiten más de ' + CFG_().LIMITS.MAX_SERVICIOS + ' servicios por cotización.');
     return out;
   }
 
@@ -156,8 +156,8 @@ function validateServiciosArray_(serviciosRaw, errors) {
     if (!descripcionServicio) errors.push('servicios[' + idx + '].descripcion es obligatoria.');
 
     var actividadesRaw = Array.isArray(s && s.actividades) ? s.actividades : [];
-    if (actividadesRaw.length > CFG().LIMITS.MAX_ACTIVIDADES) {
-      errors.push('servicios[' + idx + '].actividades no puede tener más de ' + CFG().LIMITS.MAX_ACTIVIDADES + '.');
+    if (actividadesRaw.length > CFG_().LIMITS.MAX_ACTIVIDADES) {
+      errors.push('servicios[' + idx + '].actividades no puede tener más de ' + CFG_().LIMITS.MAX_ACTIVIDADES + '.');
     }
     var actividades = actividadesRaw
       .map(function (a) { return cleanText_(a); })
@@ -166,10 +166,10 @@ function validateServiciosArray_(serviciosRaw, errors) {
     // Tarifas (solo llegan desde Gestionar cotización; en creación vienen
     // vacías). TOTAL del servicio siempre se recalcula aquí, nunca se toma
     // del cliente. '' = sin dato (celda vacía).
-    var tarifa = validateEntero_(s && s.tarifa, 0, CFG().TARIFA_MAX);
-    if (tarifa === null) errors.push('servicios[' + idx + '].tarifa debe ser un número entero entre 0 y ' + CFG().TARIFA_MAX + '.');
-    var cantidad = validateEntero_(s && s.cantidad, 1, CFG().CANTIDAD_MAX);
-    if (cantidad === null) errors.push('servicios[' + idx + '].cantidad debe ser un número entero entre 1 y ' + CFG().CANTIDAD_MAX + '.');
+    var tarifa = validateEntero_(s && s.tarifa, 0, CFG_().TARIFA_MAX);
+    if (tarifa === null) errors.push('servicios[' + idx + '].tarifa debe ser un número entero entre 0 y ' + CFG_().TARIFA_MAX + '.');
+    var cantidad = validateEntero_(s && s.cantidad, 1, CFG_().CANTIDAD_MAX);
+    if (cantidad === null) errors.push('servicios[' + idx + '].cantidad debe ser un número entero entre 1 y ' + CFG_().CANTIDAD_MAX + '.');
     if (tarifa !== '' && tarifa !== null && cantidad === '') cantidad = 1;
     var total = (tarifa !== '' && tarifa !== null && cantidad !== '' && cantidad !== null) ? tarifa * cantidad : '';
     var observaciones = cleanMultiline_(s && s.observaciones);
@@ -218,8 +218,8 @@ function validateUpdatePayload_(payload) {
   }
 
   var plazo = Math.trunc(Number(payload.plazo));
-  if (!plazo || isNaN(plazo) || plazo < 1 || plazo > CFG().LIMITS.MAX_PLAZO_DIAS) {
-    err('plazo debe ser un entero entre 1 y ' + CFG().LIMITS.MAX_PLAZO_DIAS + ' días.');
+  if (!plazo || isNaN(plazo) || plazo < 1 || plazo > CFG_().LIMITS.MAX_PLAZO_DIAS) {
+    err('plazo debe ser un entero entre 1 y ' + CFG_().LIMITS.MAX_PLAZO_DIAS + ' días.');
   }
 
   var descripcion = cleanText_(payload.descripcion);
@@ -235,11 +235,11 @@ function validateUpdatePayload_(payload) {
   if (!idEstablecimiento) err('establecimiento es obligatorio.');
 
   // ESTADO es opcional: '' = conservar el actual. Si llega, solo puede ser la
-  // decisión de garantía (Aprobada/Rechazada); qs_updateQuotation verifica
+  // decisión de Cotización (Aprobada/Rechazada); qs_updateQuotation verifica
   // además que la cotización siga en ESTADO_INICIAL (la decisión es única).
   var estado = String(payload.estado || '').trim();
-  if (estado && estado !== CFG().ESTADO_APROBADA && estado !== CFG().ESTADO_RECHAZADA) {
-    err('estado inválido: "' + estado + '". Valores permitidos: ' + CFG().ESTADO_APROBADA + ', ' + CFG().ESTADO_RECHAZADA + '.');
+  if (estado && estado !== CFG_().ESTADO_APROBADA && estado !== CFG_().ESTADO_RECHAZADA) {
+    err('estado inválido: "' + estado + '". Valores permitidos: ' + CFG_().ESTADO_APROBADA + ', ' + CFG_().ESTADO_RECHAZADA + '.');
   }
 
   // ASESOR COMERCIAL: opcional, id de PERSONAL_KGP (desplegable en
@@ -270,6 +270,45 @@ function validateUpdatePayload_(payload) {
       servicios: servicios
     },
     errors: []
+  };
+}
+
+/**
+ * Valida y limpia UNA tarea de una orden (OIS/OIP). La comparten el "Guardar
+ * cambios" de Gestionar OIS/OIP (ord_validarPayload_, con el prefijo
+ * "tareas[N]: ") y "Gestionar tareas" (tg_validateTarea_, sin prefijo).
+ * RESPONSABLE y TIPO RESPONSABLE definitivos se resuelven después contra las
+ * hojas de personal (ord_resolverResponsables_).
+ *
+ * @param {*} t Tarea tal como llega del cliente.
+ * @param {function(string)} reportar Recibe cada error (en minúscula inicial).
+ * @return {{idTarea: ?string, tarea: string, idEmpleado: string,
+ *     tipoResponsable: string, fechaInicio: Date, fechaEntrega: Date,
+ *     estado: string, observacion: string}}
+ */
+function validateTarea_(t, reportar) {
+  var cfg = CFG_();
+  t = isPlainObject_(t) ? t : {};
+  var tarea = cleanText_(t.tarea);
+  if (!tarea) reportar('la tarea es obligatoria.');
+  var idEmpleado = String(t.idEmpleado || '').trim();
+  if (!idEmpleado) reportar('el responsable es obligatorio.');
+  var fechaInicio = parseISODate_(t.fechaInicio);
+  if (!fechaInicio) reportar('fecha de inicio inválida.');
+  var fechaEntrega = parseISODate_(t.fechaEntrega);
+  if (!fechaEntrega) reportar('fecha de entrega inválida.');
+  if (fechaInicio && fechaEntrega && fechaEntrega.getTime() < fechaInicio.getTime()) {
+    reportar('la fecha de entrega no puede ser anterior a la de inicio.');
+  }
+  return {
+    idTarea: String(t.idTarea || '').trim() || null,
+    tarea: tarea,
+    idEmpleado: idEmpleado,
+    tipoResponsable: String(t.tipoResponsable || '').trim(),
+    fechaInicio: fechaInicio,
+    fechaEntrega: fechaEntrega,
+    estado: t.estado === cfg.TAREA_ESTADO_FINALIZADA ? cfg.TAREA_ESTADO_FINALIZADA : cfg.TAREA_ESTADO_INICIAL,
+    observacion: cleanMultiline_(t.observacion)
   };
 }
 

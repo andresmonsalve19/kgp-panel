@@ -12,23 +12,40 @@ function stripAccents_(s) {
   return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+/** Caché de normText_ (vive solo durante la ejecución actual del script). */
+var NORM_TEXT_CACHE_ = null;
+var NORM_TEXT_CACHE_MAX_ = 20000;
+
 /**
  * Normaliza texto para comparar encabezados de columna de forma tolerante:
  * sin acentos, mayúsculas, espacios colapsados, sin espacios en los bordes.
  * "Fecha Elaboración " -> "FECHA ELABORACION"
+ *
+ * Memoizada: se llama con los mismos nombres de columna miles de veces por
+ * ejecución (una por campo y por fila en los *_rowToObj_), y normalize('NFD')
+ * + 3 regex no son gratis. Si la caché crece demasiado se reinicia.
+ *
+ * @param {*} s Texto (o valor de celda) a normalizar.
+ * @return {string}
  */
 function normText_(s) {
-  return stripAccents_(s)
-    .toUpperCase()
-    .replace(/\s+/g, ' ')
-    .trim();
+  var key = String(s == null ? '' : s);
+  var cache = NORM_TEXT_CACHE_ || (NORM_TEXT_CACHE_ = new Map());
+  var hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  var out = stripAccents_(key).toUpperCase().replace(/\s+/g, ' ').trim();
+  if (cache.size >= NORM_TEXT_CACHE_MAX_) cache.clear();
+  cache.set(key, out);
+  return out;
 }
 
+/** Entero con 2 dígitos: 7 -> "07". */
 function pad2_(n) {
   var v = Math.trunc(Math.abs(Number(n) || 0));
   return (v < 10 ? '0' : '') + v;
 }
 
+/** Entero con 3 dígitos: 7 -> "007" (consecutivos NNN). */
 function pad3_(n) {
   var v = Math.trunc(Math.abs(Number(n) || 0));
   if (v < 10) return '00' + v;
@@ -36,12 +53,12 @@ function pad3_(n) {
   return String(v);
 }
 
-/** Formatea una Date en la zona horaria de CFG().TZ. pattern estilo Utilities.formatDate. */
+/** Formatea una Date en la zona horaria de CFG_().TZ. pattern estilo Utilities.formatDate. */
 function fmtDate_(date, pattern) {
-  return Utilities.formatDate(date, CFG().TZ, pattern);
+  return Utilities.formatDate(date, CFG_().TZ, pattern);
 }
 
-/** Parsea una fecha ISO 'yyyy-MM-dd' a Date, en la zona horaria de CFG().TZ (mediodía para evitar bordes de DST). */
+/** Parsea una fecha ISO 'yyyy-MM-dd' a Date, en la zona horaria de CFG_().TZ (mediodía para evitar bordes de DST). */
 function parseISODate_(iso) {
   var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || '').trim());
   if (!m) return null;
@@ -51,7 +68,7 @@ function parseISODate_(iso) {
   return dt;
 }
 
-/** Devuelve 'yyyy-MM-dd' de una Date, en CFG().TZ. */
+/** Devuelve 'yyyy-MM-dd' de una Date, en CFG_().TZ. */
 function toISODate_(date) {
   return fmtDate_(date, 'yyyy-MM-dd');
 }
@@ -63,17 +80,17 @@ function addDays_(date, days) {
   return d;
 }
 
-/** Trunca un string a maxLen caracteres (por defecto CFG().LIMITS.CELL_MAX). */
+/** Trunca un string a maxLen caracteres (por defecto CFG_().LIMITS.CELL_MAX). */
 function truncate_(s, maxLen) {
   var str = String(s == null ? '' : s);
-  var limit = maxLen || CFG().LIMITS.CELL_MAX;
+  var limit = maxLen || CFG_().LIMITS.CELL_MAX;
   return str.length > limit ? str.slice(0, limit) : str;
 }
 
 /** trim + colapsar espacios internos + truncar a CELL_MAX. Para todo texto libre que entra a un Sheet. */
 function cleanText_(s) {
   var str = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
-  return truncate_(str, CFG().LIMITS.CELL_MAX);
+  return truncate_(str, CFG_().LIMITS.CELL_MAX);
 }
 
 /**
@@ -85,7 +102,7 @@ function cleanMultiline_(s) {
   var lines = String(s == null ? '' : s).split(/\r?\n/)
     .map(function (l) { return l.replace(/\s+/g, ' ').trim(); })
     .filter(function (l) { return l; });
-  return truncate_(lines.join('\n'), CFG().LIMITS.CELL_MAX);
+  return truncate_(lines.join('\n'), CFG_().LIMITS.CELL_MAX);
 }
 
 /** Redondeo a 2 decimales (montos en pesos: IVA, totales). */
@@ -108,12 +125,14 @@ function sanitizeFileName_(name) {
   return String(name || '').replace(/[\/:*?"<>|]/g, '-').trim();
 }
 
+/** Número acotado a [min, max]; un valor no numérico devuelve min. */
 function clamp_(n, min, max) {
   var v = Number(n);
   if (isNaN(v)) return min;
   return Math.max(min, Math.min(max, v));
 }
 
+/** true si v es un objeto plano (no null, no array). */
 function isPlainObject_(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
