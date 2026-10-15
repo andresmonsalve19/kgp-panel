@@ -5,10 +5,22 @@
  * doGet solo sirve el shell: los datos llegan vía api_bootstrap() después
  * del primer render. La única lectura de Sheets de doGet es la de la
  * configuración (hojas CONFIG_*, cfgs_refresh_), requisito explícito del
- * usuario: se relee en cada carga de la página. Toda api_* devuelve {ok,data,error,meta} (ver 01_Result.js)
- * y nunca deja escapar una excepción cruda (safeCall_).
+ * usuario: se relee en cada carga de la página.
+ *
+ * Contrato: toda api_* devuelve {ok, data, error, meta} (01_Result.js) y nunca
+ * deja escapar una excepción cruda (safeCall_). Son la ÚNICA superficie que el
+ * navegador debería usar; las capas de abajo son privadas (terminan en "_") o
+ * repiten la misma validación, y las admin_* están protegidas
+ * (admin_soloEditor_, 51_Admin.js).
  */
 
+/**
+ * Sirve la página (shell + vistas). Invalida las cachés por versión (una
+ * recarga con F5 siempre ve la BD real, incluso tras editar el Sheet a mano)
+ * y relee la configuración.
+ * @param {Object} e Evento de doGet; e.parameter.v === 'dashboard' abre el Dashboard.
+ * @return {!Object} HtmlOutput.
+ */
 function doGet(e) {
   // Recargar/refrescar la página (F5) SIEMPRE pasa por acá — a diferencia
   // de las llamadas google.script.run que hace la SPA al navegar entre
@@ -44,7 +56,12 @@ function doGet(e) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-/** Usado por las plantillas HTML: <?!= include('ui/Styles.css'); ?> */
+/**
+ * Contenido de otro archivo HTML del proyecto, para las plantillas:
+ * <?!= include('ui/Styles.css'); ?>
+ * @param {string} name Ruta sin extensión (p. ej. 'ui/JsCore.js').
+ * @return {string}
+ */
 function include(name) {
   return HtmlService.createHtmlOutputFromFile(name).getContent();
 }
@@ -53,7 +70,15 @@ function include(name) {
 // API — Formulario de cotización
 // ---------------------------------------------------------------------
 
-/** Datos iniciales para pintar el formulario: catálogo, clientes, estados, defaults. */
+/**
+ * Datos iniciales compartidos por todas las vistas (los cachea KGP.catalog en
+ * el navegador): catálogo de tipos de servicio, clientes, empleados internos
+ * y terceros, estados, valores por defecto y el próximo código (informativo).
+ * Cada bloque es independiente: si uno falla, llega vacío con un aviso en
+ * `warnings` en vez de tumbar la carga.
+ * @return {!Object} ok_({user, tiposServicio, catalogoPares, clientes,
+ *     empleados, terceros, estados, defaults, codigoTentativo, schemaOk, warnings})
+ */
 function api_bootstrap() {
   return safeCall_('api_bootstrap', function () {
     var user = '';
@@ -92,7 +117,7 @@ function api_bootstrap() {
     try {
       // Terceros / independientes: solo para el responsable de las tareas de
       // OIS/OIP (KGP.ui.responsables). El asesor comercial sigue siendo interno.
-      terceros = emp_listEmpleados_(CFG().TIPO_RESPONSABLE_TERCERO);
+      terceros = emp_listEmpleados_(CFG_().TIPO_RESPONSABLE_TERCERO);
     } catch (e) {
       // No crítico: sin la hoja PERSONAL_TERCEROS solo se ofrecen internos.
     }
@@ -103,7 +128,7 @@ function api_bootstrap() {
     } catch (e) {
       // No crítico: el campo de código se queda en su valor por defecto.
     }
-    if (!CFG().TEMPLATE_SHEET_ID) {
+    if (!CFG_().TEMPLATE_SHEET_ID) {
       warnings.push('La plantilla del documento aún no se ha preparado (falta ejecutar admin_convertTemplate()). Podrás crear cotizaciones, pero no generar el documento hasta que esto se resuelva.');
     }
 
@@ -114,8 +139,8 @@ function api_bootstrap() {
       clientes: clientes,
       empleados: empleados,
       terceros: terceros,
-      estados: CFG().ESTADOS,
-      defaults: { plazo: CFG().COTIZACION_PLAZO_DEFAULT, fechaElaboracion: toISODate_(new Date()), estado: CFG().ESTADO_INICIAL },
+      estados: CFG_().ESTADOS,
+      defaults: { plazo: CFG_().COTIZACION_PLAZO_DEFAULT, fechaElaboracion: toISODate_(new Date()), estado: CFG_().ESTADO_INICIAL },
       codigoTentativo: codigoTentativo,
       schemaOk: schemaOk,
       warnings: warnings
@@ -478,7 +503,7 @@ function api_setEncargadoEstablecimiento(idEstablecimiento, idContacto) {
 // ---------------------------------------------------------------------
 
 /**
- * Listado completo para la vista de gestión. tipo: CFG().TIPO_RESPONSABLE_
+ * Listado completo para la vista de gestión. tipo: CFG_().TIPO_RESPONSABLE_
  * INTERNO (PERSONAL_KGP, por defecto) o _TERCERO (PERSONAL_TERCEROS). Lo mismo
  * para create/update/delete de abajo.
  */
@@ -541,15 +566,5 @@ function api_getDashboardSnapshot(params) {
 function api_getOrdenesDashboard(params) {
   return safeCall_('api_getOrdenesDashboard', function () {
     return ds_getOrdenesSnapshot_(params || {});
-  });
-}
-
-// ---------------------------------------------------------------------
-// API — Diagnóstico (usable también desde la UI, además de admin_health() en el editor)
-// ---------------------------------------------------------------------
-
-function api_health() {
-  return safeCall_('api_health', function () {
-    return ok_(admin_health());
   });
 }

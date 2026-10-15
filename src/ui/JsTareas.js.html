@@ -31,9 +31,9 @@ window.KGP = window.KGP || {};
 (function (KGP) {
   'use strict';
 
-  var ESTADO_EN_CURSO = 'En curso';     // = CFG().TAREA_ESTADO_INICIAL
-  var ESTADO_FINALIZADA = 'Finalizada'; // = CFG().TAREA_ESTADO_FINALIZADA
-  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_TAREAS', 7); // = CFG().DIAS_POR_VENCER_TAREAS (hoja CONFIG_GENERAL)
+  var ESTADO_EN_CURSO = 'En curso';     // = CFG_().TAREA_ESTADO_INICIAL
+  var ESTADO_FINALIZADA = 'Finalizada'; // = CFG_().TAREA_ESTADO_FINALIZADA
+  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_TAREAS', 7); // = CFG_().DIAS_POR_VENCER_TAREAS (hoja CONFIG_GENERAL)
   var CACHE_KEY = 'tareas:snapshot';
   var PREFS_KEY = 'tareas:prefs';
   var YO = '__yo__';                    // valor del filtro de responsable "Mis tareas"
@@ -43,7 +43,7 @@ window.KGP = window.KGP || {};
   // ciegas un alta duplicaría la tarea.
   var WRITE_OPTS = { retryOn: ['BUSY'] };
 
-  var data = { hoy: '', yo: '', tareas: [], ordenes: [], empleados: [], limites: { OIS: 20, OIP: 200 } };
+  var data = { hoy: '', yo: '', tareas: [], ordenes: [], empleados: [], limites: { OIS: KGP.cfg('MAX_TAREAS', 20), OIP: KGP.cfg('MAX_TAREAS_OIP', 200) } };
   var ordenIdx = {};   // 'TIPO:idOrden' -> orden (mismo objeto que data.ordenes[i])
 
   var state = {
@@ -108,7 +108,7 @@ window.KGP = window.KGP || {};
 
   /**
    * 'finalizada' | 'vencida' (entrega < hoy) | 'porVencer' (entrega en los
-   * próximos 7 días, hoy incluido) | 'alDia'. Mismo criterio de "vencida" que
+   * próximos DIAS_POR_VENCER días, hoy incluido) | 'alDia'. Mismo criterio de "vencida" que
    * el estado de las órdenes: el propio día de entrega aún no está vencido.
    */
   function situacion(t) {
@@ -236,7 +236,7 @@ window.KGP = window.KGP || {};
       { id: '', label: 'Todas las tareas', value: c.total, sub: 'con los filtros actuales', tone: '', meter: c.total ? 100 : 0 },
       { id: 'pendientes', label: 'Pendientes', value: c.pendientes, sub: pct(c.pendientes, c.total) + '% sin finalizar', tone: '', meter: pct(c.pendientes, c.total) },
       { id: 'vencidas', label: 'Vencidas', value: c.vencida, sub: 'la entrega ya pasó', tone: 'alert', meter: pct(c.vencida, c.total) },
-      { id: 'porVencer', label: 'Vencen en 7 días', value: c.porVencer, sub: 'incluye las de hoy', tone: 'warn', meter: pct(c.porVencer, c.total) },
+      { id: 'porVencer', label: 'Vencen en ' + DIAS_POR_VENCER + ' días', value: c.porVencer, sub: 'incluye las de hoy', tone: 'warn', meter: pct(c.porVencer, c.total) },
       { id: 'finalizadas', label: 'Finalizadas', value: c.finalizada, sub: pct(c.finalizada, c.total) + '% completado', tone: 'good', meter: pct(c.finalizada, c.total) }
     ];
     $('tg-kpis').innerHTML = kpis.map(function (k) {

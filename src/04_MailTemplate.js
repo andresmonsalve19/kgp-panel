@@ -20,7 +20,7 @@
  * Las imágenes (logo e íconos del pie) viven en 05_MailAssets.js y viajan
  * como inlineImages ("cid:"), porque Gmail no muestra imágenes data:.
  *
- * Parametrizable (CLAUDE.md §15): firma, nota y pie salen de CFG().CORREO
+ * Parametrizable (CLAUDE.md §15): firma, nota y pie salen de CFG_().CORREO
  * (hoja CONFIG_CORREO); los textos de cada correo, de mail_textos_(clave)
  * (hoja CONFIG_CORREO_TEXTOS, con mail_textosDefault_ como respaldo). Un
  * correo de la app se envía con mail_enviar_(clave, destino, vars, opciones);
@@ -67,7 +67,7 @@ function mail_render_(opts) {
   var parrafos = (opts.parrafos || []).filter(function (p) { return String(p == null ? '' : p).trim(); });
   var destacados = (opts.destacados || []).filter(function (d) { return d && (d.titulo || d.texto); });
   var boton = (opts.boton && opts.boton.url) ? opts.boton : null;
-  var pie = CFG().CORREO; // firma, nota y pie: hoja CONFIG_CORREO
+  var pie = CFG_().CORREO; // firma, nota y pie: hoja CONFIG_CORREO
   var firma = opts.firma || pie.FIRMA;
   var nota = opts.nota || pie.NOTA_PIE;
   var webUrl = mail_attr_(pie.SITIO_WEB_URL);
@@ -216,7 +216,7 @@ function mail_text_(opts) {
   (opts.destacados || []).forEach(function (d) {
     if (d && (d.titulo || d.texto)) out.push((d.titulo ? d.titulo + ': ' : '') + (d.texto || ''));
   });
-  var pie = CFG().CORREO;
+  var pie = CFG_().CORREO;
   out.push('', 'Saludos cordiales,', opts.firma || pie.FIRMA, '',
     joinNonEmpty_([pie.DIRECCION, pie.TELEFONOS, pie.CORREO_CONTACTO, pie.SITIO_WEB_TEXTO], ' · '));
   return out.join('\n');
@@ -265,7 +265,7 @@ function mail_send_(destino, opts) {
     subject: opts.asunto,
     htmlBody: mail_render_(opts),
     body: texto,
-    name: CFG().CORREO.REMITENTE_NOMBRE || 'KGP',
+    name: CFG_().CORREO.REMITENTE_NOMBRE || 'KGP',
     inlineImages: mail_inlineImages_()
   });
   // Solo si MailApp NO lanzó: el historial lista correos realmente enviados.
@@ -273,7 +273,7 @@ function mail_send_(destino, opts) {
 }
 
 /**
- * Agrega una fila a HISTORIAL (spreadsheet CFG().MAIL_HISTORIAL_SHEET_ID) por
+ * Agrega una fila a HISTORIAL (spreadsheet CFG_().MAIL_HISTORIAL_SHEET_ID) por
  * cada correo enviado: NUMERO (autoincremental desde 1), TIMESTAMP, FROM (la
  * cuenta con la que corre la app, que es la que figura como remitente), TO,
  * SUBJECT y BODY (el cuerpo en texto plano, truncado al máximo de celda).
@@ -286,12 +286,12 @@ function mail_send_(destino, opts) {
 function mail_log_(destino, asunto, cuerpo) {
   var lock = null;
   try {
-    var cfg = CFG();
+    var cfg = CFG_();
     var from = '';
     try { from = Session.getEffectiveUser().getEmail() || ''; } catch (e) { from = ''; }
 
     lock = LockService.getScriptLock();
-    if (!lock.tryLock(10000)) throw new AppError_('BUSY', 'No se pudo tomar el lock para el historial de correos.');
+    if (!lock.tryLock(cfg.LIMITS.LOCK_HISTORIAL_MS)) throw new AppError_('BUSY', 'No se pudo tomar el lock para el historial de correos.');
 
     var ss = SpreadsheetApp.openById(cfg.MAIL_HISTORIAL_SHEET_ID);
     var sheet = ss.getSheetByName(cfg.MAIL_HISTORIAL_TAB);

@@ -87,7 +87,7 @@ function ds_getDashboard_(params) {
     pageSize: filters.pageSize
   };
 
-  cachePutJson_(cacheKey, payload, CFG().CACHE_TTL.DASHBOARD_S);
+  cachePutJson_(cacheKey, payload, CFG_().CACHE_TTL.DASHBOARD_S);
   return ok_(payload);
 }
 
@@ -148,7 +148,7 @@ function ds_getSnapshot_(params) {
   if (cached) return ok_(cached);
 
   var payload = ds_buildFullSnapshot_(currentVersion);
-  cachePutJson_(cacheKey, payload, CFG().CACHE_TTL.DASHBOARD_SNAPSHOT_S);
+  cachePutJson_(cacheKey, payload, CFG_().CACHE_TTL.DASHBOARD_SNAPSHOT_S);
   return ok_(payload);
 }
 
@@ -159,7 +159,7 @@ function ds_getSnapshot_(params) {
  * memoria, nunca con una llamada por cotización.
  */
 function ds_buildFullSnapshot_(version) {
-  var cfg = CFG();
+  var cfg = CFG_();
   var todas = ds_buildSnapshot_({ enriquecer: true }).all;
 
   // Más recientes primero: si hay que recortar por el tope, lo que se pierde
@@ -217,7 +217,7 @@ function ds_buildSnapshot_(opts) {
 
   var all = ds_groupCotizaciones_(enriquecer);
   var hoy = toISODate_(new Date());
-  var cfg = CFG();
+  var cfg = CFG_();
 
   all.forEach(function (c) {
     c.anio = c.fechaElaboracion ? Number(c.fechaElaboracion.slice(0, 4)) : null;
@@ -306,7 +306,7 @@ function ds_resolverNombres_(all, enriquecer) {
   // aportan la etiqueta bajo el nombre del cliente y una línea del detalle.
   // Si alguna de esas hojas tiene un problema de esquema, el panel degrada
   // esas etiquetas a vacío en vez de dejar de funcionar por completo (mismo
-  // criterio que las columnas `optional` de SCHEMA()).
+  // criterio que las columnas `optional` de SCHEMA_()).
   var nombreContacto = {}, nombreEstablecimiento = {};
   if (enriquecer) {
     nombreContacto = ds_indexarSeguro_('CONTACTOS_CLIENTES', function () {
@@ -421,7 +421,7 @@ function ds_getOrdenesSnapshot_(params) {
   if (cached) return ok_(cached);
 
   var payload = ds_buildOrdenesSnapshot_(token, hoy);
-  cachePutJson_(cacheKey, payload, CFG().CACHE_TTL.DASHBOARD_SNAPSHOT_S);
+  cachePutJson_(cacheKey, payload, CFG_().CACHE_TTL.DASHBOARD_SNAPSHOT_S);
   return ok_(payload);
 }
 
@@ -436,22 +436,21 @@ function ds_getOrdenesSnapshot_(params) {
  * también el otro; lo mismo con OIP_FACTURACION.
  */
 function ds_buildOrdenesSnapshot_(token, hoy) {
-  var cfg = CFG();
+  var cfg = CFG_();
   var avisos = [];
 
-  var cotPorId = {};
-  qr_tableCotizaciones_().rows.forEach(function (r) {
-    var id = r[normText_('ID COTIZACION')];
-    if (id && !cotPorId[id]) cotPorId[id] = { codigo: r[normText_('CODIGO')], idCliente: r[normText_('ID CLIENTE')] };
-  });
-  var clientePorId = ds_indexarPorId_(cli_table_(), 'ID CLIENTE', function (r) { return r[normText_('RAZON SOCIAL')]; });
+  var cotPorId = ord_indiceCotizaciones_();
+  var clientePorId = ord_indiceClientes_();
   // Tareas "por vencer": entrega dentro de DIAS_POR_VENCER_TAREAS (hoja CONFIG_GENERAL).
   var semana = toISODate_(addDays_(parseISODate_(hoy), cfg.DIAS_POR_VENCER_TAREAS));
 
-  function construir(tipo, ordenes, tareasPorOrden, factPorOrden, idKey) {
-    return ordenes.map(function (o) {
+  function construir(spec, factPorOrden) {
+    var tipo = spec.tipo;
+    var idKey = spec.idKey;
+    var tareasPorOrden = ord_tareasPorOrden_(spec, function (t) { return ord_tareaToDto_(t); });
+    return spec.listAll().map(function (o) {
       var tareas = tareasPorOrden[o[idKey]] || [];
-      var dto = tipo === 'OIS' ? ois_toDto_(o, tareas, hoy) : oip_toDto_(o, tareas, hoy);
+      var dto = ord_toDto_(spec, o, tareas, hoy);
       var cot = cotPorId[o.idCotizacion] || {};
 
       var resumen = { total: tareas.length, finalizadas: 0, vencidas: 0, porVencer: 0 };
@@ -493,20 +492,9 @@ function ds_buildOrdenesSnapshot_(token, hoy) {
     });
   }
 
-  function agruparTareas(table, rowToObj, fkKey, toDto) {
-    var por = {};
-    table.rows.forEach(function (r) {
-      var t = rowToObj(r);
-      if (!t[fkKey]) return;
-      (por[t[fkKey]] = por[t[fkKey]] || []).push(toDto(t));
-    });
-    return por;
-  }
-
   var ordenes = [];
   try {
-    ordenes = ordenes.concat(construir('OIS', ois_listAll_(),
-      agruparTareas(tar_table_(), tar_rowToObj_, 'idOis', ois_tareaToDto_), null, 'idOis'));
+    ordenes = ordenes.concat(construir(ord_spec_('OIS'), null));
   } catch (e) {
     logError_('ds_buildOrdenesSnapshot_', null, { tipo: 'OIS' }, null, e);
     avisos.push('No se pudieron leer las OIS: ' + errMsg_(e));
@@ -528,8 +516,7 @@ function ds_buildOrdenesSnapshot_(token, hoy) {
       avisos.push('No se pudo leer la facturación de las OIP: ' + errMsg_(eFac));
       factPorOip = {};
     }
-    ordenes = ordenes.concat(construir('OIP', oip_listAll_(),
-      agruparTareas(tarp_table_(), tarp_rowToObj_, 'idOip', oip_tareaToDto_), factPorOip, 'idOip'));
+    ordenes = ordenes.concat(construir(ord_spec_('OIP'), factPorOip));
   } catch (e2) {
     logError_('ds_buildOrdenesSnapshot_', null, { tipo: 'OIP' }, null, e2);
     avisos.push('No se pudieron leer las OIP: ' + errMsg_(e2));
@@ -545,6 +532,7 @@ function ds_buildOrdenesSnapshot_(token, hoy) {
   };
 }
 
+/** Días de isoDesde a isoHasta ('yyyy-MM-dd'); null si alguna fecha es inválida. */
 function ds_diffDays_(isoDesde, isoHasta) {
   var a = parseISODate_(isoDesde), b = parseISODate_(isoHasta);
   if (!a || !b) return null;
@@ -560,7 +548,7 @@ function ds_computeKpis_(all, hoy) {
   var totalAnio = 0, enRevision = 0, aprobado = 0, rechazado = 0;
   var porVencer = 0, vencidas = 0, docError = 0, sumServicios = 0;
   var creadasHoy = 0, creadasSemana = 0, creadasMes = 0;
-  var cfg = CFG(); // una sola lectura de ScriptProperties, no una por cotización
+  var cfg = CFG_(); // una sola lectura de ScriptProperties, no una por cotización
 
   all.forEach(function (c) {
     if (c.anio === anioActual) totalAnio++;

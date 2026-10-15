@@ -10,9 +10,10 @@ var ERROR_LOG_HEADERS_ = [
   'IDS GENERADOS', 'MENSAJE', 'STACK', 'PAYLOAD'
 ];
 
+/** Hoja _ERRORES de la BD, creándola con sus encabezados si no existe. */
 function errlog_sheet_() {
-  var ss = SpreadsheetApp.openById(CFG().DB_SHEET_ID);
-  var tabName = CFG().TABS.ERRORES;
+  var ss = SpreadsheetApp.openById(CFG_().DB_SHEET_ID);
+  var tabName = CFG_().TABS.ERRORES;
   var sheet = ss.getSheetByName(tabName);
   if (!sheet) {
     sheet = ss.insertSheet(tabName);

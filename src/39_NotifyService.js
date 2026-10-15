@@ -35,9 +35,14 @@
  *     (mismo requestId) no duplica el correo: marca 'ntf:sent:' en caché 6h.
  */
 
-/** Nombre largo de cada tipo de orden, para el texto de los correos. */
+/**
+ * Nombre largo de cada tipo de orden, para el texto de los correos
+ * (CFG_().NOMBRE_OIS / NOMBRE_OIP, hoja CONFIG_GENERAL).
+ * @param {string} tipo 'OIS' | 'OIP'
+ * @return {string}
+ */
 function ntf_nombreOrden_(tipo) {
-  return tipo === 'OIP' ? 'Orden Interna de Proyectos' : 'Orden Interna de Servicio';
+  return tipo === 'OIP' ? CFG_().NOMBRE_OIP : CFG_().NOMBRE_OIS;
 }
 
 /** "14 de octubre de 2026" a partir de una Date o de 'yyyy-MM-dd'. '' si no hay fecha. */
@@ -108,7 +113,7 @@ function ntf_trasDocumento_(evento, id, docRes, inicial, enviar) {
     var sentKey = 'ntf:sent:' + evento + ':' + id;
     if (!cache_().get(sentKey)) {
       enviar(docRes.data && docRes.data.docUrl);
-      cache_().put(sentKey, '1', 21600);
+      cache_().put(sentKey, '1', CFG_().CACHE_TTL.IDEMPOTENCIA_S);
     }
     props.deleteProperty(pendKey);
   } catch (e) {
@@ -135,7 +140,7 @@ function ntf_onDocumentoCotizacion_(idCotizacion, docRes, inicial) {
       nombre: info.nombreCreador,
       codigo: info.codigo,
       cliente: info.cliente,
-      estado: CFG().ESTADO_INICIAL,
+      estado: CFG_().ESTADO_INICIAL,
       fechaElaboracion: ntf_fechaLarga_(info.fechaElaboracion)
     }, { url: docUrl || info.urlDocumento });
     return true;

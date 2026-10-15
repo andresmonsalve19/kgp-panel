@@ -15,7 +15,7 @@ que algo "ya quedó":
    (`/tmp` no existe en este entorno Windows) y correr `node --check`.
    Borrar el temporal después.
 3. Grep por referencias rotas: si se elimina o renombra un `id` de HTML, una
-   función, o una clave de `CFG()`/`SCHEMA()`, buscar TODOS los usos antes de
+   función, o una clave de `CFG_()`/`SCHEMA_()`, buscar TODOS los usos antes de
    confirmar que no quedó nada colgando (funciones huérfanas, endpoints
    `api_*` que ya nadie llama, ids de DOM referenciados por JS que ya no
    existen en el HTML).
@@ -68,6 +68,29 @@ que algo "ya quedó":
 - Todo lo demás (`cli_listClientes_`, `cli_getDetalleCompleto_`) ya usa el
   patrón de invalidación por `dataVersion_()` — reutilízalo si agregas algo
   parecido, no inventes otro mecanismo de caché en paralelo.
+- **Escrituras en lote.** `repo_updateCells_`/`repo_updateCellsMany_`
+  escriben cada tramo de columnas contiguas con UN `setValues` (nunca tocan
+  una celda que no esté en el patch) y actualizan la memo de `repo_readTable_`
+  EN SITIO, así una segunda escritura sobre la misma hoja no la relee entera.
+  Para varias filas usa `repo_updateCellsMany_` (una sola llamada), nunca
+  `repo_updateCells_` en un bucle. `repo_deleteRows_` agrupa filas
+  consecutivas en un `deleteRows`. Appends y borrados sí descartan la memo.
+- **`CFG_()` está memoizada y congelada** (`Object.freeze`) por ejecución: no
+  la guardes en variables "por rendimiento" (ya no hace falta, se quitaron
+  `ois_cfg_`, `oip_cfg_` y el memo de `qs_normEstado_`) y nunca intentes
+  modificar el objeto que devuelve. Tras escribir una propiedad que lee
+  (`TEMPLATE_*`) llama `cfg_invalidar_()`. `normText_` también está
+  memoizada: úsala sin miedo en bucles.
+- **Documentos:** escribe celdas con `doc_escritor_(sheet)` (`w.texto`,
+  `w.numero`, `w.fecha`, `w.aplicar()`): el formato `@` y el vaciado de celdas
+  van en lote (`RangeList`). Llama `w.aplicar()` ANTES de insertar o borrar
+  filas (las direcciones A1 se fijan al acumular).
+- **Verificación sin tocar producción:** antes de subir un cambio de servidor
+  grande, la revisión de octubre 2026 usó un simulador en Node (mocks de
+  SpreadsheetApp/Drive/Cache/Mail, ver la sesión) que corre un escenario
+  completo y compara respuestas, hojas, celdas de los documentos y correos
+  contra una línea base. Si repites algo así, deja los scripts fuera del repo
+  (scratchpad) y compara antes/después; no basta con `node --check`.
 
 ## 2.1 Módulos de frontend compartidos — no dupliques, reutiliza
 
@@ -119,7 +142,7 @@ catálogo. Antes de escribir un modal o un listado nuevo, revisa si ya existe:
   independiente.
 - El **ESTADO de una cotización solo se edita desde "Gestionar cotización"**,
   y ya no es un campo del formulario: toda cotización nace
-  `CFG().ESTADO_INICIAL` ("En revisión", forzado en el servidor al crear) y
+  `CFG_().ESTADO_INICIAL` ("En revisión", forzado en el servidor al crear) y
   los botones "Garantía aprobada" / "Garantía rechazada" del resumen del
   detalle lo cambian **una sola vez** a "Aprobada"/"Rechazada" (con
   confirmación en línea), enviando `payload.estado` en el mismo
@@ -217,8 +240,8 @@ abre la vista, sin sacrificar frescura:
 ## 5. Reglas heredadas de la arquitectura del proyecto (no romper)
 
 - Cero código ejecutable a nivel top-level en los archivos del servidor —
-  toda la config vive dentro de funciones accesoras (`CFG()`, `SCHEMA()`,
-  `CELLMAP()`). El orden de subida de `clasp` no debe importar para que el
+  toda la config vive dentro de funciones accesoras (`CFG_()`, `SCHEMA_()`,
+  `CELLMAP_()`). El orden de subida de `clasp` no debe importar para que el
   código funcione.
 - `src/otherFunctions.js` es el respaldo literal del `Code.js` original.
   Nunca se llama, nunca se modifica, y ningún símbolo nuevo debe llamarse
@@ -232,20 +255,36 @@ abre la vista, sin sacrificar frescura:
 - La sección crítica de escritura (script lock) es corta: solo cubre
   reserva de consecutivo + appends a las hojas, nunca la generación del
   documento Excel (eso va en una segunda fase, fuera del lock).
+- **Toda escritura pasa por `tx_conLock_(etapa, fn, opts)`**
+  (`07_Transaccion.js`): toma el lock, ejecuta `fn` (que devuelve
+  `ok_`/`fail_`), hace `flush` + `bumpDataVersion_` solo si fue `ok`, convierte
+  excepciones en `fail_` y registra en `_ERRORES` todo menos los rechazos
+  esperados (CONFLICT / NOT_FOUND / VALIDATION). No vuelvas a escribir el
+  bloque `LockService ... try/finally` a mano. Lo que va DESPUÉS del lock
+  (correos, por ejemplo) se hace con el resultado que devuelve.
+- **Funciones privadas = terminan en `_`.** `google.script.run` puede llamar
+  CUALQUIER función global sin `_` y la web app está publicada para cualquiera
+  con el enlace. Por eso los accesores de configuración se llaman `CFG_()`,
+  `SCHEMA_()` y `CELLMAP_()` (antes `CFG()`, ...: exponían IDs y correos), y
+  toda función `admin_*` empieza con `admin_soloEditor_()` (solo corre si la
+  ejecuta la cuenta dueña, es decir, desde el editor). Una función nueva que no
+  sea `api_*`, `admin_*`, `doGet`, `include` o un servicio ya existente, debe
+  terminar en `_`. No vuelvas a exponer un endpoint de diagnóstico (se quitó
+  `api_health`).
 
 ## 6. Mapa de celdas de servicios en la plantilla (hasta 10 servicios)
 
-- Los hasta `CFG().LIMITS.MAX_SERVICIOS` (10) servicios de una cotización
+- Los hasta `CFG_().LIMITS.MAX_SERVICIOS` (10) servicios de una cotización
   **se escriben todos en la plantilla**, no solo el #1. Cada servicio repite
   el mismo layout de 3 celdas (tipo/UNSPSC/descripción) + su lista de
-  actividades, desplazado `CELLMAP().SERVICIOS_FILA_PASO` (18) filas hacia
+  actividades, desplazado `CELLMAP_().SERVICIOS_FILA_PASO` (18) filas hacia
   abajo del anterior — confirmado celda por celda con el usuario: Servicio
   #1 en la fila 39 (actividades desde B42), #2 en la fila 57 (actividades
   desde B60), ... #10 en la fila 201 (actividades desde B204). Ver
   `doc_writeServicioCells_` en `31_DocService.js`: la fila ancla de cada
   servicio es `SERVICIOS_FILA_BASE + indice * SERVICIOS_FILA_PASO`, nunca
   hardcodees una fila para un servicio puntual — si el usuario confirma un
-  nuevo layout, ajusta el paso/base en `CELLMAP()`, no cada celda a mano.
+  nuevo layout, ajusta el paso/base en `CELLMAP_()`, no cada celda a mano.
 - Las actividades se guardan en la hoja `SERVICIOS` con un prefijo de
   numeración interna ("1.1 texto", "1.2 texto", ...) para que la columna se
   lea de un vistazo en el sheet (`qr_formatActividades_`, 13_QuoteRepo.js).
@@ -267,18 +306,18 @@ abre la vista, sin sacrificar frescura:
   línea nueva; las anteriores se muestran en solo lectura y nunca se
   reemplazan).
 - COTIZACIONES: `SUBTOTAL` = suma de los `TOTAL` de sus servicios,
-  `IVA` = SUBTOTAL × `CFG().IVA_TASA` (0.19), `TOTAL` = SUBTOTAL + IVA — el
+  `IVA` = SUBTOTAL × `CFG_().IVA_TASA` (0.19), `TOTAL` = SUBTOTAL + IVA — el
   mismo valor en todas las filas de la cotización. El resumen del detalle
   de Gestión recalcula lo mismo en vivo (`computeTotales`) y avisa si hay
   cambios sin guardar; el servidor es la fuente de verdad.
-- Esas 7 columnas son `optional` en `SCHEMA()` (creación y dashboard
+- Esas 7 columnas son `optional` en `SCHEMA_()` (creación y dashboard
   funcionan sin ellas), pero `qs_updateQuotation` las exige vía
   `qr_requireTarifaCols_` para no descartar tarifas en silencio.
-- Plantilla: una fila por servicio desde `CELLMAP().TARIFAS_FILA_BASE`
+- Plantilla: una fila por servicio desde `CELLMAP_().TARIFAS_FILA_BASE`
   (223): Servicio #1 → E223/F223/H223, ... #10 → E232/F232/H232
   (tarifa/cantidad/observaciones). El TOTAL del servicio NO se escribe en la
-  plantilla. Tarifa y cantidad se escriben como número con `doc_setNumber_`
-  (sin el formato `@` de `doc_setText_`, para no romper el formato de
+  plantilla. Tarifa y cantidad se escriben como número (`w.numero` de
+  `doc_escritor_`, sin el formato `@` de los textos, para no romper el formato de
   moneda ni fórmulas de la plantilla).
 - `doc_generateForQuotation_` solo usa la caché de idempotencia cuando hay
   `requestId` (generación inicial). La regeneración de "Guardar cambios"
@@ -320,7 +359,7 @@ abre la vista, sin sacrificar frescura:
   `api_aprobarConOis` (aprobar + crear la fila OIS dentro de UN lock, vía
   `qs_applyQuotationUpdate_`). `qs_updateQuotation` rechaza `estado =
   Aprobada` a propósito: nunca debe existir una cotización Aprobada sin su
-  orden. OIP todavía no está implementada (el botón solo avisa).
+  orden. "OIP" hace lo mismo con `api_aprobarConOip` (§11).
 - Una cotización produce a lo sumo una OIS. La OIS **no duplica** datos de la
   cotización: cliente/solicitante/establecimiento/servicios se leen de la
   cotización padre por ID COTIZACION, y guardar la OIS los reescribe allí
@@ -336,18 +375,24 @@ abre la vista, sin sacrificar frescura:
   curso. Una OIS Finalizada queda de solo lectura.
 - Consecutivo `OIS-KGP-NNN-YY`, reinicia cada año (marca de agua
   `SEQ_OIS_YY`, `ois_codeReserve_`).
-- Documento: la pestaña `CFG().TEMPLATE_TAB_OIS` ("OIS V-4") de la misma
+- Documento: la pestaña `CFG_().TEMPLATE_TAB_OIS` ("OIS V-4") de la misma
   plantilla, sola en un .xlsx, en su subcarpeta dentro de
-  `CFG().OIS_FOLDER_ID`. Mismos datos compartidos que CTZ-V-4 **sin** la
+  `CFG_().OIS_FOLDER_ID`. Mismos datos compartidos que CTZ-V-4 **sin** la
   tabla de tarifas (esas filas las ocupan A225..E225 y las tareas
   A229..E248). Regeneración siempre sobre el mismo archivo (§8).
 
 ## 11. OIP — en qué se parece a la OIS y en qué NO
 
 La OIP es la otra rama del popup de aprobación y **calca la OIS** en casi
-todo: `16_OipRepo.js` / `36_OipService.js` son el espejo de
-`15_OisRepo.js` / `35_OisService.js`, y `ui/ViewOip.html` + `ui/JsOip.js.html`
-el de sus equivalentes de OIS. Una cotización produce **una OIS o una OIP,
+todo. En el servidor NO hay código duplicado: toda la lógica de las dos
+órdenes (aprobar, leer, listar, guardar, estado derivado, DTOs, tareas) vive
+UNA vez en `41_OrdenComun.js` (`ord_*`), parametrizada por el adaptador
+`ord_spec_('OIS'|'OIP')`, que también usan `38_TareaService.js` y el Dashboard.
+`35_OisService.js` / `36_OipService.js` solo exponen las funciones públicas
+(`ois_*`/`oip_*`) y lo propio de cada una (facturación en la OIP). Una
+diferencia nueva entre las dos se declara como un campo del spec, no con
+`if (tipo === 'OIP')` sueltos. `16_OipRepo.js` es el espejo de `15_OisRepo.js`,
+y `ui/ViewOip.html` + `ui/JsOip.js.html` el de sus equivalentes de OIS. Una cotización produce **una OIS o una OIP,
 nunca las dos** (la elección del popup es única); `qs_getCotizacion` devuelve
 `cotizacion.ois` y `cotizacion.oip` para los botones "Ver OIS"/"Ver OIP", y
 `oip_aprobarConOip` rechaza si ya hay OIS.
@@ -356,15 +401,14 @@ Las diferencias, todas confirmadas con el usuario — no las "corrijas" por
 simetría con la OIS:
 
 1. **El consecutivo NO reinicia cada año.** `oip_codeReserve_` usa
-   `code_nextNumberAnyYear_` y una sola marca de agua (`SEQ_OIP`, sin año):
+   `code_siguienteNumero_` sin año y una sola marca de agua (`SEQ_OIP`, sin año):
    el NNN es continuo y solo el sufijo YY cambia. Efecto colateral: los 3
    dígitos son un techo **global** de 999 OIP, no 999 por año.
-2. **PLAZO nace en `CFG().OIP_PLAZO_DEFAULT` (365 días)**, no hereda el de la
+2. **PLAZO nace en `CFG_().OIP_PLAZO_DEFAULT` (365 días)**, no hereda el de la
    cotización como la OIS.
 3. **Una OIP Finalizada NO queda de solo lectura.** Factura durante ~1 año:
    cerrar las tareas de un mes no puede congelarla. Por eso `JsOip.js.html`
-   no tiene `applyLockState` y `oip_updateOip` no tiene el gate de estado que
-   sí tiene `ois_updateOis`.
+   no tiene `applyLockState` y el spec de la OIP tiene `cierraAlFinalizar: false`.
 4. **Las tareas no tienen bloque fijo en la plantilla.** `doc_writeOipCells_`
    escribe la #1 en `OIP_TAREAS_FILA_BASE` (235) e **inserta** las filas que
    falten para las demás (`insertRowsAfter`), así que todo lo que esté más
@@ -384,7 +428,7 @@ simetría con la OIS:
 7. **Recordatorio mensual** (`37_OipNotify.js`): el día 1,
    `oipn_recordatorioFacturacion` crea la fila del mes que terminó para cada
    OIP vigente (PENDIENTE DE FACTURAR + FECHA NOTIFICACION) y envía **un solo
-   correo resumen** a `CFG().OIP_NOTIF_EMAIL`. Idempotente por mes
+   correo resumen** a `CFG_().OIP_NOTIF_EMAIL`. Idempotente por mes
    (`OIP_NOTIF_LAST`). Se instala UNA vez con
    `admin_installOipFacturacionTrigger()`; `admin_probarRecordatorioOip()` lo
    prueba sin esperar al día 1 (pero sí crea filas y sí manda el correo).
@@ -520,7 +564,7 @@ simetría con la OIS:
   regeneración exitosa (`api_regenerate*`); los reintentos de la generación
   inicial no lo duplican (marca `ntf:sent:` en caché 6 h).
 - **Historial (requisito permanente): todo correo enviado se registra** en
-  la pestaña `HISTORIAL` del spreadsheet `CFG().MAIL_HISTORIAL_SHEET_ID`
+  la pestaña `HISTORIAL` del spreadsheet `CFG_().MAIL_HISTORIAL_SHEET_ID`
   (distinto de la BD principal) con `NUMERO` (autoincremental desde 1),
   `TIMESTAMP`, `FROM`, `TO`, `SUBJECT`, `BODY` (texto plano). Lo hace
   `mail_log_` dentro de `mail_send_` (04_MailTemplate.js) solo si el envío
@@ -535,16 +579,16 @@ simetría con la OIS:
 
 - **REGLA PERMANENTE: nunca más un valor quemado en el código.** Todo dato o
   parámetro nuevo (IDs, nombres de hojas, correos, textos de correo, límites,
-  plazos, prefijos, etiquetas de opciones, umbrales...) va a `CFG()` /
-  `CELLMAP()` / `mail_textosDefault_()` como valor por defecto, se documenta
+  plazos, prefijos, etiquetas de opciones, umbrales...) va a `CFG_()` /
+  `CELLMAP_()` / `mail_textosDefault_()` como valor por defecto, se documenta
   en `cfgs_catalogo_()` para que aparezca en las hojas `CONFIG_*`, y el
   cliente lo lee con `KGP.cfg` / `KGP.cfgTexto`. Única excepción: valores que
   son DATOS guardados en filas (estados, `TIPO_RESPONSABLE_*`): viven en
-  `CFG()` pero no son editables desde la hoja (cambiarlos dejaría huérfanas las
+  `CFG_()` pero no son editables desde la hoja (cambiarlos dejaría huérfanas las
   filas existentes); sus ETIQUETAS sí son editables.
 
 - **Todo lo parametrizable vive en hojas `CONFIG_*`** del spreadsheet de
-  catálogo (`cfgs_sheetId_()` en `06_ConfigSheet.js` = `CFG().CAT_SHEET_ID`,
+  catálogo (`cfgs_sheetId_()` en `06_ConfigSheet.js` = `CFG_().CAT_SHEET_ID`,
   el mismo de `TIPOS DE SERVICIOS`), en forma de tabla y con las mismas
   columnas base para que se lean igual: `GRUPO | CLAVE | VALOR | VALOR POR
   DEFECTO | DESCRIPCION` (+ columnas de ayuda: `NOMBRE`, `TIPO`, `ENLACE`,
@@ -554,7 +598,7 @@ simetría con la OIS:
   vencer", polling, caché), `CONFIG_CORREO` (destinatarios, remitente, firma,
   pie), `CONFIG_CORREO_TEXTOS` (una fila por correo, una columna por campo:
   ASUNTO, PREHEADER, ETIQUETA, TITULO, SALUDO, PARRAFOS, BOTON, DESTACADOS) y
-  `CONFIG_CELDAS` (todo `CELLMAP()`).
+  `CONFIG_CELDAS` (todo `CELLMAP_()`).
 - **Se lee SIEMPRE al cargar la página**: `doGet` llama `cfgs_refresh_()`
   (una sola apertura del spreadsheet, todas las hojas `CONFIG_*`) y guarda el
   resultado en CacheService (`cfgsheet:data:v1`, 6 h); las llamadas
@@ -562,9 +606,9 @@ simetría con la OIS:
   (memoizada por ejecución en `repo_memo_().__cfgs`). Si la caché expiró, se
   relee la hoja una vez. Es la única lectura de Sheets de `doGet`, pedida
   explícitamente por el usuario: no la quites ni la muevas a otra llamada.
-- **Cómo se aplica**: los valores POR DEFECTO siguen en el código (`CFG()`,
-  `CELLMAP()`, `mail_textosDefault_()`); al final, `cfgs_aplicar_` los
-  reemplaza con lo de la hoja. Clave con puntos = ruta en `CFG()`
+- **Cómo se aplica**: los valores POR DEFECTO siguen en el código (`CFG_()`,
+  `CELLMAP_()`, `mail_textosDefault_()`); al final, `cfgs_aplicar_` los
+  reemplaza con lo de la hoja. Clave con puntos = ruta en `CFG_()`
   (`LIMITS.MAX_SERVICIOS`, `TABS.COTIZACIONES`, `CORREO.FIRMA`). Solo se
   aplican claves del catálogo `cfgs_catalogo_()` (allowlist); el valor se
   convierte al tipo del valor por defecto y, si no se puede (o la celda está
@@ -573,23 +617,23 @@ simetría con la OIS:
 - **No editables desde la hoja, a propósito**: `CAT_SHEET_ID` (de ahí se lee
   la config: se muestra en `CONFIG_IDS` como solo lectura), `APP_VERSION`, los
   nombres de ESTADOS (son datos guardados en las filas: renombrarlos dejaría
-  huérfanas las existentes) y `SCHEMA()` (encabezados de columnas).
+  huérfanas las existentes) y `SCHEMA_()` (encabezados de columnas).
 - **Navegador**: los parámetros que usa el cliente (IVA, límites, días por
   vencer, polling, plazo por defecto) los inyecta `doGet` en
   `window.KGP_CONFIG` (`cfgs_clientConfig_`, solo números) y se leen con
   `KGP.cfg('CLAVE', valorPorDefecto)` (`ui/JsCore.js.html`). **No vuelvas a
   escribir esos números fijos en un `Js*.js.html`**: si el servidor tiene el
-  parámetro en `CFG()`, el cliente lo toma de `KGP.cfg`.
-- **Agregar un parámetro nuevo**: (1) su valor por defecto en `CFG()` o
-  `CELLMAP()`; (2) su fila documentada en `cfgs_catalogo_()` (grupo,
+  parámetro en `CFG_()`, el cliente lo toma de `KGP.cfg`.
+- **Agregar un parámetro nuevo**: (1) su valor por defecto en `CFG_()` o
+  `CELLMAP_()`; (2) su fila documentada en `cfgs_catalogo_()` (grupo,
   descripción, tipo); (3) si lo usa el cliente, agrégalo a
   `cfgs_clientConfig_` y léelo con `KGP.cfg`; (4) ejecutar
   `admin_crearHojasConfig()`, que agrega solo las filas nuevas y **nunca pisa
   un VALOR ya escrito** (refresca solo las columnas de ayuda). Nunca leas una
-  hoja `CONFIG_*` por tu cuenta desde otro módulo: todo pasa por `CFG()`,
-  `CELLMAP()` o `mail_textos_()`.
+  hoja `CONFIG_*` por tu cuenta desde otro módulo: todo pasa por `CFG_()`,
+  `CELLMAP_()` o `mail_textos_()`.
 - Anti-recursión: nada de lo que use `cfgs_leerHoja_`/`cfgs_overrides_` puede
-  llamar `CFG()` (por eso el ID del spreadsheet está en `cfgs_sheetId_`).
+  llamar `CFG_()` (por eso el ID del spreadsheet está en `cfgs_sheetId_`).
   `cfgs_sinHoja_(fn)` ejecuta `fn` viendo solo los valores del código.
 
 ## 16. Gestión de clientes y personal tercero
@@ -609,9 +653,9 @@ simetría con la OIS:
   cliente (`ID CLIENTE`), contacto (`ID SOLICITANTE`), establecimiento
   (`ID ESTABLECIMIENTO`). Borrar un cliente sin cotizaciones borra también
   sus contactos y establecimientos.
-- **Personal tercero**: hoja `PERSONAL_TERCEROS` (`CFG().TABS.PERSONAL_TERCEROS`),
+- **Personal tercero**: hoja `PERSONAL_TERCEROS` (`CFG_().TABS.PERSONAL_TERCEROS`),
   mismas columnas que `PERSONAL_KGP`. `14_EmpleadoRepo.js` es UN solo código
-  para las dos con el parámetro `tipo` (`CFG().TIPO_RESPONSABLE_INTERNO` /
+  para las dos con el parámetro `tipo` (`CFG_().TIPO_RESPONSABLE_INTERNO` /
   `_TERCERO`; sin tipo = interno). IDs nuevos con `ID_PREFIJO_EMPLEADO` /
   `ID_PREFIJO_TERCERO`. `api_listEmpleados/create/update/delete` reciben el
   tipo como último argumento. "Gestión de empleados" tiene el selector

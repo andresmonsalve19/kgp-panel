@@ -6,7 +6,7 @@
  * oipn_recordatorioFacturacion: para cada OIP que estuvo vigente durante el
  * mes que acaba de terminar, se asegura de que exista su fila en
  * OIP_FACTURACION (la crea PENDIENTE DE FACTURAR si no está, con FECHA
- * NOTIFICACION = hoy) y envía UN correo resumen a CFG().OIP_NOTIF_EMAIL.
+ * NOTIFICACION = hoy) y envía UN correo resumen a CFG_().OIP_NOTIF_EMAIL.
  *
  * Decisiones confirmadas con el usuario:
  *   - El proceso SÍ crea la fila del mes anterior si no existe (así, al abrir
@@ -42,7 +42,7 @@ function oipn_recordatorioFacturacion() {
  * esperar al día 1 (ver admin_probarRecordatorioOip).
  */
 function oipn_run_(hoy) {
-  var cfg = CFG();
+  var cfg = CFG_();
   var periodo = oipn_mesAnterior_(hoy);
   var marca = periodo.year + '-' + pad2_(periodo.mes);
 
@@ -145,12 +145,8 @@ function oipn_oipsVigentesEn_(periodo) {
   var desdeISO = toISODate_(primerDia);
   var hastaISO = toISODate_(ultimoDia);
 
-  var cotPorId = {};
-  qr_tableCotizaciones_().rows.forEach(function (r) {
-    var id = r[normText_('ID COTIZACION')];
-    if (id && !cotPorId[id]) cotPorId[id] = { idCliente: r[normText_('ID CLIENTE')] };
-  });
-  var clientePorId = ds_indexarPorId_(cli_table_(), 'ID CLIENTE', function (r) { return r[normText_('RAZON SOCIAL')]; });
+  var cotPorId = ord_indiceCotizaciones_();
+  var clientePorId = ord_indiceClientes_();
 
   return oip_listAll_().filter(function (o) {
     var elab = qs_dateToISO_(o.fechaElaboracion);
@@ -187,7 +183,7 @@ function oipn_nombreMes_(mes) {
  */
 function oipn_enviarCorreo_(periodo, pendientes, filasCreadas) {
   if (!pendientes || !pendientes.length) return false;
-  var cfg = CFG();
+  var cfg = CFG_();
   var destino = cfg.OIP_NOTIF_EMAIL;
   if (!destino) return false;
 

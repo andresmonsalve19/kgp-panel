@@ -1,21 +1,33 @@
 /**
- * Orquestación del caso de uso "crear cotización" — Fase 1 (solo BD).
- * La Fase 2 (generación del documento) vive en 31_DocService.js y se llama
- * por separado desde el cliente, ya con la cotización persistida.
+ * Casos de uso de la COTIZACIÓN: crear, editar (incluida la decisión única
+ * Aprobada/Rechazada), leer el detalle, y las altas/ediciones rápidas de
+ * cliente, contacto y establecimiento.
  *
- * Sección crítica del lock: SOLO validar -> resolver/crear FKs -> reservar
+ * Patrón de 2 fases: aquí solo se escribe la BD (dentro del script lock, con
+ * tx_conLock_, 07_Transaccion.js). La generación del documento (31_DocService.js)
+ * es una llamada aparte del cliente, ya fuera del lock: puede tardar 10-30 s y
+ * no debe bloquear a nadie más.
+ *
+ * Sección crítica de la creación: validar -> resolver/crear FKs -> reservar
  * CODIGO -> appends -> flush -> bump. Nunca la generación del Excel.
  */
 
+// ---------------------------------------------------------------------
+// Crear
+// ---------------------------------------------------------------------
+
 /**
- * payload: ver 21_Validation.js / plan (api_createQuotation).
- * Devuelve ok_({idCotizacion, codigo, numServicios, docEstado, warnings})
- * o fail_(code, message).
+ * Crea una cotización (fase 1, solo BD).
+ *
+ * Idempotente por payload.requestId: si esa solicitud ya se procesó, devuelve
+ * el resultado anterior sin tocar el lock ni el sheet. Se comprueba dos veces
+ * (antes y dentro del lock) para cerrar la ventana de una carrera exacta.
+ *
+ * @param {!Object} payload Ver validateCreatePayload_ (21_Validation.js).
+ * @return {!Object} ok_({idCotizacion, codigo, idCliente, idSolicitante,
+ *     idEstablecimiento, numServicios, docEstado, warnings}) o fail_(...).
  */
 function qs_createQuotation(payload) {
-  // Idempotencia: si esta requestId ya se procesó, devolver el resultado
-  // anterior sin tocar el lock ni el sheet. Se comprueba dos veces (antes
-  // y dentro del lock) para cerrar la ventana de una carrera exacta.
   var early = qs_checkIdempotency_(payload && payload.requestId);
   if (early) return early;
 
@@ -24,50 +36,36 @@ function qs_createQuotation(payload) {
     return fail_('VALIDATION', 'El formulario tiene errores.', validation.errors);
   }
   var clean = validation.clean;
-
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'Otro usuario está creando una cotización. Intenta de nuevo en unos segundos.');
-  }
-
+  var cfg = CFG_();
   var idsGenerados = {};
-  try {
-    // Repetir el chequeo de idempotencia ya dentro del lock.
+
+  return tx_conLock_('qs_createQuotation', function () {
     var early2 = qs_checkIdempotency_(clean.requestId);
     if (early2) return early2;
 
-    var warnings = [];
-
-    // 1. CLIENTE
+    // 1. Cliente, 2-3. contactos (solicitante + encargado), 4. establecimiento.
     var idCliente = qs_resolveCliente_(clean.cliente, idsGenerados);
-
-    // 2 y 3. CONTACTOS (solicitante + encargado del establecimiento, si aplica)
     var idSolicitante = qs_resolveContacto_(clean.solicitante, idCliente, idsGenerados, 'idSolicitante');
-
-    // 4. ESTABLECIMIENTO (puede crear su propio contacto encargado)
     var idEstablecimiento = qs_resolveEstablecimiento_(clean.establecimiento, idCliente, idsGenerados);
 
-    // 5. SERVICIOS
-    var idCotizacion = id_new_('CTZ');
+    // 5. Servicios.
+    var idCotizacion = id_new_(cfg.ID_PREFIJO_COTIZACION);
     idsGenerados.idCotizacion = idCotizacion;
     var serviciosConId = qr_createServicios_(idCotizacion, clean.servicios);
     idsGenerados.servicios = serviciosConId;
 
-    // Reservar CODIGO (usa el sheet + ScriptProperties como fuente de verdad).
+    // Consecutivo (sheet + ScriptProperties como fuente de verdad).
     var codigo = code_reserve_(clean.fechaElaboracion);
     idsGenerados.codigo = codigo;
 
-    var creadoPor = '';
-    try { creadoPor = Session.getActiveUser().getEmail() || ''; } catch (e) { creadoPor = ''; }
-
-    // ELABORADO POR / CARGO: se resuelven UNA sola vez aquí (ID de empleado y
-    // cargo de PERSONAL_KGP, buscados por el correo del usuario activo) y no
-    // vuelven a tocarse en qs_updateQuotation. Si el correo no corresponde a
-    // ningún empleado registrado, quedan vacíos (no bloquea la creación).
+    // ELABORADO POR / CARGO: se resuelven UNA sola vez aquí (empleado interno
+    // buscado por el correo del usuario activo) y no vuelven a tocarse. Si el
+    // correo no corresponde a ningún empleado, quedan vacíos (no bloquea).
+    var creadoPor = qs_correoUsuarioActivo_();
     var elaborador = null;
     try { elaborador = creadoPor ? emp_findByCorreo_(creadoPor) : null; } catch (e) { elaborador = null; }
 
-    // 6. COTIZACIONES (una fila por servicio) — REGISTRO DE COMMIT
+    // 6. COTIZACIONES (una fila por servicio): el registro de commit.
     qr_createCotizaciones_({
       idCotizacion: idCotizacion,
       codigo: codigo,
@@ -85,12 +83,6 @@ function qs_createQuotation(payload) {
       cargoElaborador: elaborador ? elaborador.cargo : ''
     }, serviciosConId);
 
-    // 7. flush antes de soltar el lock (para que el siguiente lector no vea estado parcial)
-    SpreadsheetApp.flush();
-
-    // 8. versión de datos (invalida cachés de listas/dashboard)
-    bumpDataVersion_();
-
     var response = ok_({
       idCotizacion: idCotizacion,
       codigo: codigo,
@@ -99,26 +91,30 @@ function qs_createQuotation(payload) {
       idEstablecimiento: idEstablecimiento,
       numServicios: clean.servicios.length,
       docEstado: 'PENDIENTE',
-      warnings: warnings
+      warnings: []
     });
-
     qs_saveIdempotencyResult_(clean.requestId, response);
     return response;
-  } catch (e) {
-    logError_('qs_createQuotation', payload && payload.requestId, idsGenerados, payload, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e), idsGenerados);
-  } finally {
-    lock.releaseLock();
-  }
+  }, {
+    requestId: payload && payload.requestId,
+    ids: idsGenerados,
+    payload: payload,
+    detalles: function () { return idsGenerados; },
+    mensajeOcupado: 'Otro usuario está creando una cotización. Intenta de nuevo en unos segundos.'
+  });
 }
 
+/**
+ * Respuesta ya guardada para un requestId (caché, o la fila con esa REQUEST ID
+ * si la caché expiró). null si la solicitud es nueva.
+ * @param {string} requestId
+ * @return {Object}
+ */
 function qs_checkIdempotency_(requestId) {
   if (!requestId) return null;
   var cached = cacheGetJson_('idem:' + requestId);
   if (cached) return cached;
 
-  // Fallback si la caché expiró (6h) pero la columna REQUEST ID existe.
   var found = qr_findByRequestId_(requestId);
   if (found) {
     return ok_({
@@ -132,12 +128,25 @@ function qs_checkIdempotency_(requestId) {
   return null;
 }
 
+/**
+ * Guarda la respuesta de una creación para que un reintento la reciba igual.
+ * @param {string} requestId
+ * @param {!Object} response
+ */
 function qs_saveIdempotencyResult_(requestId, response) {
   if (!requestId) return;
-  cachePutJson_('idem:' + requestId, response, 21600); // 6h
+  cachePutJson_('idem:' + requestId, response, CFG_().CACHE_TTL.IDEMPOTENCIA_S);
 }
 
-/** Devuelve idCliente, creándolo si modo="nuevo". Lanza CONFLICT si el NIT ya existe. */
+/** @return {string} Correo del usuario activo, o '' si Apps Script no lo expone. */
+function qs_correoUsuarioActivo_() {
+  try { return Session.getActiveUser().getEmail() || ''; } catch (e) { return ''; }
+}
+
+/**
+ * idCliente de la cotización, creándolo si modo="nuevo".
+ * @throws {AppError_} NOT_FOUND si no existe; CONFLICT si el NIT ya existe.
+ */
 function qs_resolveCliente_(clienteInput, idsGenerados) {
   if (clienteInput.modo === 'existente') {
     var existing = cli_getCliente_(clienteInput.id);
@@ -154,8 +163,9 @@ function qs_resolveCliente_(clienteInput, idsGenerados) {
 }
 
 /**
- * Devuelve idContacto, creándolo si modo="nuevo". contactoInput puede ser
- * null (caso del encargado de establecimiento, que es opcional).
+ * idContacto, creándolo si modo="nuevo". contactoInput puede ser null (el
+ * encargado de un establecimiento es opcional): devuelve ''.
+ * @throws {AppError_} NOT_FOUND si el contacto existente no está.
  */
 function qs_resolveContacto_(contactoInput, idCliente, idsGenerados, label) {
   if (!contactoInput) return '';
@@ -169,7 +179,12 @@ function qs_resolveContacto_(contactoInput, idCliente, idsGenerados, label) {
   return idContacto;
 }
 
-/** Devuelve idEstablecimiento, creándolo (y su contacto encargado, si aplica) si modo="nuevo". */
+/**
+ * idEstablecimiento, creándolo (y su contacto encargado, si aplica) si
+ * modo="nuevo". La FK del encargado vive del lado del contacto
+ * (CONTACTOS_CLIENTES.ID ESTABLECIMIENTO).
+ * @throws {AppError_} NOT_FOUND si el establecimiento existente no está.
+ */
 function qs_resolveEstablecimiento_(estInput, idCliente, idsGenerados) {
   if (estInput.modo === 'existente') {
     var existing = est_getEstablecimiento_(estInput.idEstablecimiento);
@@ -178,28 +193,31 @@ function qs_resolveEstablecimiento_(estInput, idCliente, idsGenerados) {
   }
   var idEncargado = qs_resolveContacto_(estInput.encargado, idCliente, idsGenerados, 'idEncargado');
   var idEstablecimiento = est_createEstablecimiento_(idCliente, estInput.datos);
-  // La FK vive del lado del contacto (CONTACTOS_CLIENTES.ID ESTABLECIMIENTO);
-  // ver comentario equivalente en qs_createEstablecimiento.
   if (idEncargado) con_setEstablecimiento_(idEncargado, idEstablecimiento);
   idsGenerados.idEstablecimiento = idEstablecimiento;
   return idEstablecimiento;
 }
 
+// ---------------------------------------------------------------------
+// Editar
+// ---------------------------------------------------------------------
+
 /**
  * Edita una cotización existente: campos compartidos (plazo, descripción,
- * FKs de cliente/solicitante/establecimiento), su lista de servicios
- * (agrega, actualiza en sitio, o elimina según corresponda, comparando por
- * ID SERVICIO) con sus tarifas, y los totales SUBTOTAL/IVA/TOTAL que se
- * derivan de ellas. fechaElaboracion y CODIGO nunca cambian.
+ * cliente/solicitante/establecimiento), su lista de servicios (agrega,
+ * actualiza en sitio o elimina, comparando por ID SERVICIO) con sus tarifas,
+ * y los totales SUBTOTAL/IVA/TOTAL. fechaElaboracion y CODIGO nunca cambian.
  *
- * ESTADO: payload.estado vacío = se conserva. Si llega (botones "cotización
- * aprobada/rechazada"), solo se acepta mientras la cotización siga en
- * CFG().ESTADO_INICIAL — la decisión de cotización es única e irreversible.
+ * ESTADO: payload.estado vacío = se conserva. "Rechazada" solo se acepta
+ * mientras la cotización siga en ESTADO_INICIAL (decisión única). "Aprobada"
+ * NO pasa por aquí: va con api_aprobarConOis/Oip para que nunca exista una
+ * cotización aprobada sin su orden.
  *
- * Igual que qs_createQuotation: sección crítica corta (solo lectura +
- * escrituras de esta transacción), flush + bump antes de soltar el lock. No
- * genera el documento — eso es una llamada aparte del cliente
- * (api_generateDocument/api_regenerateDocument), mismo patrón de 2 fases.
+ * Fuera del lock, si acaba de rechazarse, avisa por correo al creador.
+ *
+ * @param {string} idCotizacion
+ * @param {!Object} payload Ver validateUpdatePayload_.
+ * @return {!Object} ok_(...) de qs_applyQuotationUpdate_ o fail_(...).
  */
 function qs_updateQuotation(idCotizacion, payload) {
   idCotizacion = String(idCotizacion || '').trim();
@@ -211,37 +229,17 @@ function qs_updateQuotation(idCotizacion, payload) {
   }
   var clean = validation.clean;
 
-  // Aprobar solo es posible junto con la creación de su OIS (popup de
-  // "cotización aprobada" -> api_aprobarConOis, una sola sección crítica): así
-  // nunca existe una cotización Aprobada sin su orden. Rechazar sí sigue
-  // pasando por aquí.
-  if (clean.estado === CFG().ESTADO_APROBADA) {
+  if (clean.estado === CFG_().ESTADO_APROBADA) {
     return fail_('VALIDATION', 'Para aprobar la cotización usa el botón "cotización aprobada" y elige el tipo de orden (OIS).');
   }
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  var res;
-  try {
-    res = qs_applyQuotationUpdate_(idCotizacion, clean, {});
-    if (res.ok) {
-      SpreadsheetApp.flush();
-      bumpDataVersion_();
-    }
-  } catch (e) {
-    logError_('qs_updateQuotation', null, { idCotizacion: idCotizacion }, payload, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  var res = tx_conLock_('qs_updateQuotation', function () {
+    return qs_applyQuotationUpdate_(idCotizacion, clean, {});
+  }, { ids: { idCotizacion: idCotizacion }, payload: payload });
 
-  // Ya fuera del lock: aviso al creador si la cotización acaba de rechazarse
-  // (39_NotifyService.js; nunca lanza). La aprobación avisa al generarse el
-  // documento de su OIS/OIP, porque el correo lleva ese enlace.
-  if (res.ok && res.data.estadoCambio && res.data.estado === CFG().ESTADO_RECHAZADA) {
+  // Ya fuera del lock (39_NotifyService.js; nunca lanza). La aprobación avisa
+  // al generarse el documento de su OIS/OIP, porque el correo lleva ese enlace.
+  if (res.ok && res.data.estadoCambio && res.data.estado === CFG_().ESTADO_RECHAZADA) {
     ntf_cotizacionRechazada_(idCotizacion);
   }
   return res;
@@ -250,62 +248,55 @@ function qs_updateQuotation(idCotizacion, payload) {
 /**
  * Cuerpo de qs_updateQuotation SIN lock, validación de payload, flush ni
  * bump: DEBE llamarse ya dentro del script lock, con `clean` salido de
- * validateUpdatePayload_. Existe para que otras transacciones reutilicen
- * exactamente la misma escritura de la cotización dentro de SU propio lock:
- *   - ois_aprobarConOis (35_OisService.js) / oip_aprobarConOip
- *     (36_OipService.js): aprobar + crear la orden en una sola sección
- *     crítica (nunca una cotización Aprobada sin su OIS u OIP).
- *   - ois_updateOis / oip_updateOip: guardar la orden reescribe los datos
- *     compartidos de la cotización padre, que ya está Aprobada.
+ * validateUpdatePayload_. Existe para que otras transacciones reutilicen la
+ * misma escritura dentro de SU propio lock:
+ *   - ois_aprobarConOis / oip_aprobarConOip: aprobar + crear la orden en una
+ *     sola sección crítica.
+ *   - ord_actualizarCotizacionPadre_ (41_OrdenComun.js): guardar una orden
+ *     reescribe los datos compartidos de su cotización, que ya está Aprobada.
  *
- * opts.permitirDecidida: true = saltarse el bloqueo de "cotización ya
- * decidida = solo lectura". SOLO lo usan las órdenes OIS/OIP (decisión
- * confirmada con el usuario: la orden es la única puerta de edición de una
- * cotización aprobada; "Gestionar cotización" sigue bloqueada como siempre).
+ * Nunca escribe nada antes de una validación que pueda fallar: todos los
+ * fail_ ocurren antes de la primera escritura.
  *
- * Devuelve ok_(...)/fail_(...); las excepciones las maneja el llamador.
+ * @param {string} idCotizacion
+ * @param {!Object} clean Payload ya validado.
+ * @param {{permitirDecidida: (boolean|undefined)}=} opts permitirDecidida:
+ *     saltarse el bloqueo "cotización ya decidida = solo lectura" (solo las
+ *     órdenes OIS/OIP, que nunca pueden volver a decidirla).
+ * @return {!Object} ok_({idCotizacion, codigo, numServicios, estado,
+ *     estadoCambio, subtotal, iva, total, revisadoAprobadoPor(Nombre),
+ *     asesorComercial(Nombre), tiempoEntrega}) o fail_(...).
  */
 function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
   opts = opts || {};
+  var cfg = CFG_();
   qr_requireTarifaCols_();
 
   var existentes = qr_getServiciosByCotizacion_(idCotizacion);
   if (!existentes.length) return fail_('NOT_FOUND', 'No existe la cotización ' + idCotizacion + '.');
 
-  // Capturados ANTES de tocar filas: CODIGO/fechaElaboracion/ELABORADO POR/
-  // CARGO nunca cambian, y no dependen de qué filas sobrevivan al diff de
-  // servicios de abajo (se reutilizan tal cual para cualquier fila nueva
-  // que cree este mismo servicio, ver el ctx de qr_createCotizaciones_ más
-  // abajo).
+  // CODIGO/fechaElaboracion/ELABORADO POR/CARGO nunca cambian: se capturan
+  // antes de tocar filas y se reutilizan para cualquier fila nueva.
   var filaBase = qr_getCotizacionRows_(idCotizacion)[0].obj;
 
-  // Cotización ya decidida (Aprobada/Rechazada) = solo lectura, sin
-  // excepción: ni tarifas, ni servicios, ni datos generales, ni siquiera
-  // el asesor comercial. Se revisa ANTES de validar cliente/solicitante/
-  // establecimiento para fallar rápido y no hacer lecturas de más. El
-  // formulario de "Gestionar cotización" ya bloquea los campos en la UI
-  // (ver applyLockState_ en JsGestion.js.html); este chequeo es la
-  // cotización real del lado del servidor — nunca confiar solo en que el
-  // cliente no haya enviado el "Guardar cambios".
-  // Única excepción: opts.permitirDecidida (guardar desde la OIS), que igual
-  // nunca puede volver a decidir la cotización — clean.estado debe venir vacío.
+  // Cotización ya decidida = solo lectura (salvo permitirDecidida, que igual
+  // nunca puede volver a decidirla). Es la verificación real del servidor:
+  // nunca confiar solo en que la UI bloquee los campos.
   var estadoActual = qs_normEstado_(filaBase[normText_('ESTADO')]);
-  if (estadoActual !== CFG().ESTADO_INICIAL) {
+  if (estadoActual !== cfg.ESTADO_INICIAL) {
     if (!opts.permitirDecidida) {
       return fail_('CONFLICT', 'Esta cotización ya fue marcada como "' + estadoActual + '" y no se puede editar.');
     }
     if (clean.estado && clean.estado !== estadoActual) {
-      return fail_('CONFLICT', 'La cotización de esta cotización ya fue decidida ("' + estadoActual + '").');
+      return fail_('CONFLICT', 'La cotización ya fue decidida ("' + estadoActual + '").');
     }
   }
 
-  // Decidir la cotización (aprobar o rechazar) exige tarifas en todos los
-  // servicios, TIEMPO DE ENTREGA y ASESOR COMERCIAL diligenciados. Cubre
-  // también aprobar+crear OIS/OIP, que pasan por aquí.
-  if (clean.estado && clean.estado !== estadoActual) {
+  // Decidir (aprobar o rechazar) exige tarifas, TIEMPO DE ENTREGA y ASESOR.
+  var decide = !!clean.estado && clean.estado !== estadoActual;
+  if (decide) {
     var faltantes = [];
-    var sinTarifa = clean.servicios.some(function (s) { return s.tarifa === '' || s.tarifa == null; });
-    if (sinTarifa) faltantes.push('las tarifas de todos los servicios');
+    if (clean.servicios.some(function (s) { return s.tarifa === '' || s.tarifa == null; })) faltantes.push('las tarifas de todos los servicios');
     if (!clean.tiempoEntrega) faltantes.push('el tiempo de entrega');
     if (!clean.asesorComercial) faltantes.push('el asesor comercial');
     if (faltantes.length) {
@@ -313,24 +304,17 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
     }
   }
 
-  var cliente = cli_getCliente_(clean.idCliente);
-  if (!cliente) return fail_('NOT_FOUND', 'No existe el cliente ' + clean.idCliente + '.');
-  var solicitante = con_getContacto_(clean.idSolicitante);
-  if (!solicitante) return fail_('NOT_FOUND', 'No existe el solicitante ' + clean.idSolicitante + '.');
-  var establecimiento = est_getEstablecimiento_(clean.idEstablecimiento);
-  if (!establecimiento) return fail_('NOT_FOUND', 'No existe el establecimiento ' + clean.idEstablecimiento + '.');
+  if (!cli_getCliente_(clean.idCliente)) return fail_('NOT_FOUND', 'No existe el cliente ' + clean.idCliente + '.');
+  if (!con_getContacto_(clean.idSolicitante)) return fail_('NOT_FOUND', 'No existe el solicitante ' + clean.idSolicitante + '.');
+  if (!est_getEstablecimiento_(clean.idEstablecimiento)) return fail_('NOT_FOUND', 'No existe el establecimiento ' + clean.idEstablecimiento + '.');
 
   var codigo = filaBase[normText_('CODIGO')];
-  var fechaElaboracionRaw = filaBase[normText_('FECHA ELABORACION')];
-  var fechaElaboracion = (Object.prototype.toString.call(fechaElaboracionRaw) === '[object Date]')
-    ? fechaElaboracionRaw
-    : parseISODate_(fechaElaboracionRaw);
+  var fechaElaboracion = qs_aFecha_(filaBase[normText_('FECHA ELABORACION')]);
   var fechaVencimiento = addDays_(fechaElaboracion, clean.plazo);
   var elaboradoPor = filaBase[normText_('ELABORADO POR')] || '';
   var cargoElaborador = filaBase[normText_('CARGO')] || '';
 
-  // ASESOR COMERCIAL: único de los 4 campos de personal editable libremente
-  // (desplegable en "Gestionar cotización"). Opcional — '' = sin asignar.
+  // ASESOR COMERCIAL: único campo de personal editable libremente. '' = sin asignar.
   var asesorComercial = '';
   if (clean.asesorComercial) {
     var asesor = emp_getEmpleado_(clean.asesorComercial);
@@ -338,26 +322,20 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
     asesorComercial = asesor.idEmpleado;
   }
 
-  // Si clean.estado llega distinto de estadoActual, el chequeo de arriba ya
-  // garantizó que estadoActual es ESTADO_INICIAL, así que aquí "decidir la
-  // cotización" siempre es la primera vez.
+  // REVISADO Y APROBADO POR: se fija una sola vez, al decidir la cotización.
   var estado = estadoActual;
-  // REVISADO Y APROBADO POR: se fija una sola vez, en el mismo momento en
-  // que la cotización pasa de ESTADO_INICIAL a Aprobada/Rechazada. Fuera de
-  // ese momento se conserva el valor ya guardado (filaBase).
   var revisadoAprobadoPor = filaBase[normText_('REVISADO Y APROBADO POR')] || '';
-  if (clean.estado && clean.estado !== estadoActual) {
+  if (decide) {
     estado = clean.estado;
-    var correoRevisor = '';
-    try { correoRevisor = Session.getActiveUser().getEmail() || ''; } catch (e) { correoRevisor = ''; }
+    var correoRevisor = qs_correoUsuarioActivo_();
     var revisor = correoRevisor ? emp_findByCorreo_(correoRevisor) : null;
     revisadoAprobadoPor = revisor ? revisor.idEmpleado : '';
   }
 
-  // SUBTOTAL = suma de los TOTAL (tarifa x cantidad) de cada servicio.
+  // Totales: SUBTOTAL = suma de los TOTAL (tarifa x cantidad) de cada servicio.
   var subtotal = 0;
   clean.servicios.forEach(function (s) { if (s.total !== '') subtotal += s.total; });
-  var iva = round2_(subtotal * CFG().IVA_TASA);
+  var iva = round2_(subtotal * cfg.IVA_TASA);
   var totalCotizacion = round2_(subtotal + iva);
 
   var existentesPorId = {};
@@ -365,43 +343,45 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
   var enviadosConId = {};
   clean.servicios.forEach(function (s) { if (s.idServicio) enviadosConId[s.idServicio] = true; });
 
-  // 1. Quitar servicios que ya no vienen en el payload.
+  // ---- A partir de aquí se escribe ----
+
+  // 1. Quitar los servicios que ya no vienen.
   existentes.forEach(function (s) {
     if (!enviadosConId[s.idServicio]) qr_deleteServicio_(idCotizacion, s.idServicio);
   });
 
-  // 2. Actualizar los que siguen existiendo / crear los nuevos, renumerando 1..N según el orden recibido.
+  // 2. Actualizar los que siguen / crear los nuevos, renumerando 1..N.
   clean.servicios.forEach(function (s, idx) {
     var numero = idx + 1;
     if (s.idServicio && existentesPorId[s.idServicio]) {
       qr_updateServicio_(s.idServicio, numero, s);
       qr_updateNumeroServicio_(idCotizacion, s.idServicio, numero);
-    } else {
-      var nuevo = qr_createServicios_(idCotizacion, [{
-        numero: numero, tipo: s.tipo, codigoUnspsc: s.codigoUnspsc, descripcion: s.descripcion, actividades: s.actividades,
-        tarifa: s.tarifa, cantidad: s.cantidad, total: s.total, observaciones: s.observaciones
-      }])[0];
-      qr_createCotizaciones_({
-        idCotizacion: idCotizacion,
-        codigo: codigo,
-        fechaElaboracion: fechaElaboracion,
-        plazo: clean.plazo,
-        fechaVencimiento: fechaVencimiento,
-        idCliente: clean.idCliente,
-        idSolicitante: clean.idSolicitante,
-        idEstablecimiento: clean.idEstablecimiento,
-        descripcion: clean.descripcion,
-        estado: estado,
-        elaboradoPor: elaboradoPor,
-        cargoElaborador: cargoElaborador,
-        revisadoAprobadoPor: revisadoAprobadoPor,
-        asesorComercial: asesorComercial,
-        tiempoEntrega: clean.tiempoEntrega
-      }, [nuevo]);
+      return;
     }
+    var nuevo = qr_createServicios_(idCotizacion, [{
+      numero: numero, tipo: s.tipo, codigoUnspsc: s.codigoUnspsc, descripcion: s.descripcion, actividades: s.actividades,
+      tarifa: s.tarifa, cantidad: s.cantidad, total: s.total, observaciones: s.observaciones
+    }])[0];
+    qr_createCotizaciones_({
+      idCotizacion: idCotizacion,
+      codigo: codigo,
+      fechaElaboracion: fechaElaboracion,
+      plazo: clean.plazo,
+      fechaVencimiento: fechaVencimiento,
+      idCliente: clean.idCliente,
+      idSolicitante: clean.idSolicitante,
+      idEstablecimiento: clean.idEstablecimiento,
+      descripcion: clean.descripcion,
+      estado: estado,
+      elaboradoPor: elaboradoPor,
+      cargoElaborador: cargoElaborador,
+      revisadoAprobadoPor: revisadoAprobadoPor,
+      asesorComercial: asesorComercial,
+      tiempoEntrega: clean.tiempoEntrega
+    }, [nuevo]);
   });
 
-  // 3. Campos compartidos en todas las filas que quedaron (incluye las recién creadas: reescribirlas es idempotente).
+  // 3. Campos compartidos en TODAS las filas (reescribir las recién creadas es idempotente).
   qr_updateCamposCompartidos_(idCotizacion, {
     'PLAZO': clean.plazo,
     'FECHA VENCIMIENTO': fechaVencimiento,
@@ -418,29 +398,37 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
     'TIEMPO DE ENTREGA': clean.tiempoEntrega
   });
 
-  var revisadoAprobadoPorEmp = revisadoAprobadoPor ? emp_getEmpleado_(revisadoAprobadoPor) : null;
-  var asesorComercialEmp = asesorComercial ? emp_getEmpleado_(asesorComercial) : null;
-
   return ok_({
     idCotizacion: idCotizacion,
     codigo: codigo,
     numServicios: clean.servicios.length,
     estado: estado,
-    // true solo en la llamada que decidió la cotización (En revisión ->
-    // Aprobada/Rechazada); qs_updateQuotation lo usa para el correo de rechazo.
+    // true solo en la llamada que decidió la cotización (para el correo de rechazo).
     estadoCambio: estado !== estadoActual,
     subtotal: subtotal,
     iva: iva,
     total: totalCotizacion,
     revisadoAprobadoPor: revisadoAprobadoPor,
-    revisadoAprobadoPorNombre: revisadoAprobadoPorEmp ? revisadoAprobadoPorEmp.nombre : '',
+    revisadoAprobadoPorNombre: qs_nombreEmpleado_(revisadoAprobadoPor),
     asesorComercial: asesorComercial,
-    asesorComercialNombre: asesorComercialEmp ? asesorComercialEmp.nombre : '',
+    asesorComercialNombre: qs_nombreEmpleado_(asesorComercial),
     tiempoEntrega: clean.tiempoEntrega
   });
 }
 
-/** Detalle completo de una cotización para la vista de detalle del dashboard. */
+// ---------------------------------------------------------------------
+// Leer
+// ---------------------------------------------------------------------
+
+/**
+ * Detalle completo de una cotización: datos generales (con los nombres de su
+ * personal ya resueltos), servicios, cliente, solicitante, establecimiento y
+ * la orden que generó (OIS u OIP), si la hay.
+ *
+ * @param {string} idCotizacion
+ * @return {!Object} ok_({cotizacion, servicios, cliente, solicitante,
+ *     establecimiento}) o fail_('NOT_FOUND').
+ */
 function qs_getCotizacion(idCotizacion) {
   var filas = qr_getCotizacionRows_(idCotizacion);
   if (!filas.length) return fail_('NOT_FOUND', 'No existe la cotización ' + idCotizacion + '.');
@@ -470,49 +458,51 @@ function qs_getCotizacion(idCotizacion) {
     tiempoEntrega: base[normText_('TIEMPO DE ENTREGA')] || ''
   };
 
-  // Nombres resueltos para mostrar en el resumen (Gestionar cotización):
-  // la BD solo guarda los IDs de empleado, la UI necesita el nombre.
-  var elaboradoPorEmp = cotizacion.elaboradoPor ? emp_getEmpleado_(cotizacion.elaboradoPor) : null;
-  var revisadoAprobadoPorEmp = cotizacion.revisadoAprobadoPor ? emp_getEmpleado_(cotizacion.revisadoAprobadoPor) : null;
-  var asesorComercialEmp = cotizacion.asesorComercial ? emp_getEmpleado_(cotizacion.asesorComercial) : null;
-  cotizacion.elaboradoPorNombre = elaboradoPorEmp ? elaboradoPorEmp.nombre : '';
-  cotizacion.revisadoAprobadoPorNombre = revisadoAprobadoPorEmp ? revisadoAprobadoPorEmp.nombre : '';
-  cotizacion.asesorComercialNombre = asesorComercialEmp ? asesorComercialEmp.nombre : '';
+  // La BD solo guarda los IDs de empleado; la UI y el documento necesitan el nombre.
+  cotizacion.elaboradoPorNombre = qs_nombreEmpleado_(cotizacion.elaboradoPor);
+  cotizacion.revisadoAprobadoPorNombre = qs_nombreEmpleado_(cotizacion.revisadoAprobadoPor);
+  cotizacion.asesorComercialNombre = qs_nombreEmpleado_(cotizacion.asesorComercial);
 
   var servicios = qr_getServiciosByCotizacion_(idCotizacion);
   var cliente = cli_getCliente_(cotizacion.idCliente);
   var solicitante = cotizacion.idSolicitante ? con_getContacto_(cotizacion.idSolicitante) : null;
   var establecimiento = cotizacion.idEstablecimiento ? est_getEstablecimiento_(cotizacion.idEstablecimiento) : null;
 
-  // OIS generada a partir de esta cotización (si ya se aprobó con "Crear
-  // OIS"), para el acceso directo "Ver OIS" de Gestionar cotización. No
-  // crítico: si la hoja OIS no existe o falla, la cotización se muestra igual.
-  var ois = null;
+  // Orden generada (para "Ver OIS"/"Ver OIP"). No crítico: si la hoja de la
+  // orden falla, la cotización se muestra igual.
+  cotizacion.ois = null;
   try {
     var o = ois_findByCotizacion_(cotizacion.idCotizacion);
-    if (o) ois = { idOis: o.idOis, codigo: o.codigo };
-  } catch (e) { ois = null; }
-  cotizacion.ois = ois;
-
-  // Lo mismo para la OIP (una cotización aprobada genera una OIS o una OIP,
-  // nunca las dos: el popup de aprobación es una elección única).
-  var oip = null;
+    if (o) cotizacion.ois = { idOis: o.idOis, codigo: o.codigo };
+  } catch (e) { cotizacion.ois = null; }
+  cotizacion.oip = null;
   try {
     var p = oip_findByCotizacion_(cotizacion.idCotizacion);
-    if (p) oip = { idOip: p.idOip, codigo: p.codigo };
-  } catch (e) { oip = null; }
-  cotizacion.oip = oip;
+    if (p) cotizacion.oip = { idOip: p.idOip, codigo: p.codigo };
+  } catch (e2) { cotizacion.oip = null; }
 
   return ok_({ cotizacion: cotizacion, servicios: servicios, cliente: cliente, solicitante: solicitante, establecimiento: establecimiento });
 }
 
 /**
+ * Nombre de un empleado interno por su ID, '' si no hay ID o no existe.
+ * @param {string} idEmpleado
+ * @return {string}
+ */
+function qs_nombreEmpleado_(idEmpleado) {
+  if (!idEmpleado) return '';
+  var emp = emp_getEmpleado_(idEmpleado);
+  return emp ? emp.nombre : '';
+}
+
+/**
  * Firma comparable de una lista de servicios (orden + id + tipo + UNSPSC +
- * descripción + actividades SIN el prefijo "N.M " con que se guardan en la
- * hoja). Sirve para que una orden (OIS u OIP) decida si al guardar cambió
- * algo de los servicios de su cotización padre y, por lo tanto, si hay que
- * reescribirla y regenerar su documento. Tarifas excluidas a propósito:
- * ninguna de las dos órdenes las edita.
+ * descripción + actividades SIN el prefijo "N.M "). Sirve para que una orden
+ * (OIS u OIP) decida si al guardar cambió algo de los servicios de su
+ * cotización padre. Tarifas excluidas a propósito: ninguna orden las edita.
+ *
+ * @param {!Array<!Object>} servicios
+ * @return {string}
  */
 function qs_serviciosFirma_(servicios) {
   return JSON.stringify((servicios || []).map(function (s) {
@@ -527,14 +517,17 @@ function qs_serviciosFirma_(servicios) {
 }
 
 // ---------------------------------------------------------------------
-// Alta rápida desde los paneles "Crear nuevo" del formulario (cliente,
-// contacto/solicitante, establecimiento y su encargado). Cada uno persiste
-// de inmediato -- a diferencia del flujo de creación de cotización, aquí
-// no hay un modo "nuevo" diferido: el panel guarda y el registro pasa a
-// estar disponible como "existente" en su desplegable correspondiente.
+// Altas y ediciones rápidas (modales de cliente / contacto / establecimiento).
+// Cada una persiste de inmediato y el registro queda disponible como
+// "existente" en su desplegable. "Gestión de clientes" usa las mismas.
 // ---------------------------------------------------------------------
 
-/** datos: {razonSocial, tipoIdentificacion, numeroIdentificacion, direccion, ciudad, departamento, pais, telefono, codigoCiiu, actividadPrincipal}. */
+/**
+ * Crea un cliente. Rechaza (CONFLICT) un número de identificación repetido.
+ * @param {!Object} datos {razonSocial, tipoIdentificacion, numeroIdentificacion,
+ *     direccion, ciudad, departamento, pais, telefono, codigoCiiu, actividadPrincipal}
+ * @return {!Object} ok_({idCliente, razonSocial, numeroIdentificacion}) o fail_.
+ */
 function qs_createCliente(datos) {
   datos = isPlainObject_(datos) ? datos : {};
   var razonSocial = cleanText_(datos.razonSocial);
@@ -542,29 +535,22 @@ function qs_createCliente(datos) {
   if (!razonSocial) return fail_('VALIDATION', 'La razón social es obligatoria.');
   if (!numeroIdentificacion) return fail_('VALIDATION', 'El número de identificación es obligatorio.');
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
+  return tx_conLock_('qs_createCliente', function () {
     var dup = cli_findByNumeroIdentificacion_(numeroIdentificacion);
     if (dup) {
       return fail_('CONFLICT', 'Ya existe un cliente con ese número de identificación.', { idClienteExistente: dup.idCliente, razonSocial: dup.razonSocial });
     }
     var idCliente = cli_createCliente_(datos);
-    SpreadsheetApp.flush();
-    bumpDataVersion_();
     return ok_({ idCliente: idCliente, razonSocial: razonSocial, numeroIdentificacion: numeroIdentificacion });
-  } catch (e) {
-    logError_('qs_createCliente', null, {}, datos, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  }, { payload: datos });
 }
 
-/** datos: {nombre, telefono, correo, cargo}. */
+/**
+ * Crea un contacto (solicitante o encargado) de un cliente.
+ * @param {string} idCliente
+ * @param {!Object} datos {nombre, telefono, correo, cargo, idEstablecimiento?}
+ * @return {!Object} ok_({idContacto, idCliente, nombre, cargo}) o fail_.
+ */
 function qs_createContacto(idCliente, datos) {
   idCliente = String(idCliente || '').trim();
   datos = isPlainObject_(datos) ? datos : {};
@@ -572,27 +558,21 @@ function qs_createContacto(idCliente, datos) {
   if (!idCliente) return fail_('VALIDATION', 'Falta idCliente.');
   if (!nombre) return fail_('VALIDATION', 'El nombre del contacto es obligatorio.');
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
-    var cliente = cli_getCliente_(idCliente);
-    if (!cliente) return fail_('NOT_FOUND', 'No existe el cliente ' + idCliente + '.');
+  return tx_conLock_('qs_createContacto', function () {
+    if (!cli_getCliente_(idCliente)) return fail_('NOT_FOUND', 'No existe el cliente ' + idCliente + '.');
     var idContacto = con_createContacto_(idCliente, datos);
-    SpreadsheetApp.flush();
-    bumpDataVersion_();
     return ok_({ idContacto: idContacto, idCliente: idCliente, nombre: nombre, cargo: cleanText_(datos.cargo) });
-  } catch (e) {
-    logError_('qs_createContacto', null, {}, { idCliente: idCliente, datos: datos }, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  }, { payload: { idCliente: idCliente, datos: datos } });
 }
 
-/** datos: {nombre, direccion, ciudad, departamento, pais}. idContacto (encargado) es opcional. */
+/**
+ * Crea un establecimiento de un cliente y, si llega idContacto, lo deja como
+ * su encargado (la FK vive en CONTACTOS_CLIENTES.ID ESTABLECIMIENTO).
+ * @param {string} idCliente
+ * @param {!Object} datos {nombre, direccion, ciudad, departamento, pais}
+ * @param {string=} idContacto Encargado (opcional).
+ * @return {!Object} ok_({idEstablecimiento, idCliente, idContacto, nombre}) o fail_.
+ */
 function qs_createEstablecimiento(idCliente, datos, idContacto) {
   idCliente = String(idCliente || '').trim();
   datos = isPlainObject_(datos) ? datos : {};
@@ -601,36 +581,22 @@ function qs_createEstablecimiento(idCliente, datos, idContacto) {
   if (!idCliente) return fail_('VALIDATION', 'Falta idCliente.');
   if (!nombre) return fail_('VALIDATION', 'El nombre del establecimiento es obligatorio.');
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
-    var cliente = cli_getCliente_(idCliente);
-    if (!cliente) return fail_('NOT_FOUND', 'No existe el cliente ' + idCliente + '.');
-    if (idContacto) {
-      var contacto = con_getContacto_(idContacto);
-      if (!contacto) return fail_('NOT_FOUND', 'No existe el contacto ' + idContacto + '.');
-    }
+  return tx_conLock_('qs_createEstablecimiento', function () {
+    if (!cli_getCliente_(idCliente)) return fail_('NOT_FOUND', 'No existe el cliente ' + idCliente + '.');
+    if (idContacto && !con_getContacto_(idContacto)) return fail_('NOT_FOUND', 'No existe el contacto ' + idContacto + '.');
     var idEstablecimiento = est_createEstablecimiento_(idCliente, datos);
-    // La FK de encargado vive del lado del contacto
-    // (CONTACTOS_CLIENTES.ID ESTABLECIMIENTO), para que
-    // refreshEncargadoOptions (Js*.js.html) filtre y proponga este mismo
-    // contacto la próxima vez que se elija este establecimiento.
     if (idContacto) con_setEstablecimiento_(idContacto, idEstablecimiento);
-    SpreadsheetApp.flush();
-    bumpDataVersion_();
     return ok_({ idEstablecimiento: idEstablecimiento, idCliente: idCliente, idContacto: idContacto, nombre: nombre });
-  } catch (e) {
-    logError_('qs_createEstablecimiento', null, {}, { idCliente: idCliente, datos: datos }, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  }, { payload: { idCliente: idCliente, datos: datos } });
 }
 
-/** Edita un cliente ya existente (botón "Editar" del panel de cliente). */
+/**
+ * Edita un cliente. Rechaza (CONFLICT) un número de identificación que ya
+ * tenga OTRO cliente.
+ * @param {string} idCliente
+ * @param {!Object} datos Mismos campos que qs_createCliente.
+ * @return {!Object} ok_({idCliente, razonSocial, numeroIdentificacion}) o fail_.
+ */
 function qs_updateCliente(idCliente, datos) {
   idCliente = String(idCliente || '').trim();
   datos = isPlainObject_(datos) ? datos : {};
@@ -640,29 +606,22 @@ function qs_updateCliente(idCliente, datos) {
   if (!razonSocial) return fail_('VALIDATION', 'La razón social es obligatoria.');
   if (!numeroIdentificacion) return fail_('VALIDATION', 'El número de identificación es obligatorio.');
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
+  return tx_conLock_('qs_updateCliente', function () {
     var dup = cli_findByNumeroIdentificacion_(numeroIdentificacion);
     if (dup && dup.idCliente !== idCliente) {
       return fail_('CONFLICT', 'Ya existe otro cliente con ese número de identificación.', { idClienteExistente: dup.idCliente, razonSocial: dup.razonSocial });
     }
     cli_updateCliente_(idCliente, datos);
-    SpreadsheetApp.flush();
-    bumpDataVersion_();
     return ok_({ idCliente: idCliente, razonSocial: razonSocial, numeroIdentificacion: numeroIdentificacion });
-  } catch (e) {
-    logError_('qs_updateCliente', null, {}, { idCliente: idCliente, datos: datos }, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  }, { payload: { idCliente: idCliente, datos: datos } });
 }
 
-/** Edita un contacto ya existente (solicitante o encargado). */
+/**
+ * Edita un contacto (solicitante o encargado).
+ * @param {string} idContacto
+ * @param {!Object} datos {nombre, telefono, correo, cargo}
+ * @return {!Object} ok_({idContacto, nombre, cargo}) o fail_.
+ */
 function qs_updateContacto(idContacto, datos) {
   idContacto = String(idContacto || '').trim();
   datos = isPlainObject_(datos) ? datos : {};
@@ -670,25 +629,18 @@ function qs_updateContacto(idContacto, datos) {
   if (!idContacto) return fail_('VALIDATION', 'Falta idContacto.');
   if (!nombre) return fail_('VALIDATION', 'El nombre del contacto es obligatorio.');
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
+  return tx_conLock_('qs_updateContacto', function () {
     con_updateContacto_(idContacto, datos);
-    SpreadsheetApp.flush();
-    bumpDataVersion_();
     return ok_({ idContacto: idContacto, nombre: nombre, cargo: cleanText_(datos.cargo) });
-  } catch (e) {
-    logError_('qs_updateContacto', null, {}, { idContacto: idContacto, datos: datos }, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  }, { payload: { idContacto: idContacto, datos: datos } });
 }
 
-/** Edita un establecimiento ya existente. */
+/**
+ * Edita un establecimiento.
+ * @param {string} idEstablecimiento
+ * @param {!Object} datos {nombre, direccion, ciudad, departamento, pais}
+ * @return {!Object} ok_({idEstablecimiento, nombre}) o fail_.
+ */
 function qs_updateEstablecimiento(idEstablecimiento, datos) {
   idEstablecimiento = String(idEstablecimiento || '').trim();
   datos = isPlainObject_(datos) ? datos : {};
@@ -696,34 +648,25 @@ function qs_updateEstablecimiento(idEstablecimiento, datos) {
   if (!idEstablecimiento) return fail_('VALIDATION', 'Falta idEstablecimiento.');
   if (!nombre) return fail_('VALIDATION', 'El nombre del establecimiento es obligatorio.');
 
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
+  return tx_conLock_('qs_updateEstablecimiento', function () {
     est_updateEstablecimiento_(idEstablecimiento, datos);
-    SpreadsheetApp.flush();
-    bumpDataVersion_();
     return ok_({ idEstablecimiento: idEstablecimiento, nombre: nombre });
-  } catch (e) {
-    logError_('qs_updateEstablecimiento', null, {}, { idEstablecimiento: idEstablecimiento, datos: datos }, e);
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
+  }, { payload: { idEstablecimiento: idEstablecimiento, datos: datos } });
 }
+
+// ---------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------
 
 /**
  * ESTADO tal como se muestra y se compara en toda la app. Tolera filas
  * antiguas (vacías, "Aprobado"/"Rechazado" en masculino, sin tilde) y las
- * lleva a los valores vigentes de CFG().ESTADOS.
+ * lleva a los valores vigentes de CFG_().ESTADOS.
+ * @param {*} raw Valor de la celda ESTADO.
+ * @return {string}
  */
 function qs_normEstado_(raw) {
-  // Se llama una vez por fila en ds_buildSnapshot_: CFG() lee
-  // ScriptProperties, así que se memoiza por ejecución.
-  var memo = repo_memo_();
-  var cfg = memo.__cfgEstados || (memo.__cfgEstados = CFG());
+  var cfg = CFG_();
   var n = normText_(raw);
   if (!n || n === 'EN REVISION') return cfg.ESTADO_INICIAL;
   if (n === 'APROBADA' || n === 'APROBADO') return cfg.ESTADO_APROBADA;
@@ -731,8 +674,24 @@ function qs_normEstado_(raw) {
   return String(raw);
 }
 
+/**
+ * Celda de fecha -> 'yyyy-MM-dd' (TZ de la app). Un texto se devuelve tal cual.
+ * @param {*} value
+ * @return {string}
+ */
 function qs_dateToISO_(value) {
   if (!value) return '';
   if (Object.prototype.toString.call(value) === '[object Date]') return toISODate_(value);
   return String(value);
+}
+
+/**
+ * Celda de fecha -> Date (una Date se devuelve tal cual; un texto
+ * 'yyyy-MM-dd' se parsea). null si no se puede interpretar.
+ * @param {*} value
+ * @return {Date}
+ */
+function qs_aFecha_(value) {
+  if (Object.prototype.toString.call(value) === '[object Date]') return value;
+  return parseISODate_(value);
 }

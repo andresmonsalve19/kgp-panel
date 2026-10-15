@@ -1,7 +1,7 @@
 /**
  * Repo de PERSONAL_KGP (empleados internos) y PERSONAL_TERCEROS (terceros /
  * independientes). Las dos hojas tienen EXACTAMENTE las mismas columnas, así
- * que todo este archivo es común: el parámetro `tipo` (CFG().TIPO_RESPONSABLE_
+ * que todo este archivo es común: el parámetro `tipo` (CFG_().TIPO_RESPONSABLE_
  * INTERNO / _TERCERO) elige la hoja. Sin `tipo` = interno (comportamiento de
  * siempre: ELABORADO POR, asesor comercial, etc. son solo internos).
  *
@@ -11,7 +11,7 @@
 
 /** Tipo normalizado: TERCERO si así se pide, INTERNO en cualquier otro caso. */
 function emp_tipo_(tipo) {
-  var cfg = CFG();
+  var cfg = CFG_();
   return String(tipo || '').trim().toUpperCase() === cfg.TIPO_RESPONSABLE_TERCERO
     ? cfg.TIPO_RESPONSABLE_TERCERO
     : cfg.TIPO_RESPONSABLE_INTERNO;
@@ -19,20 +19,26 @@ function emp_tipo_(tipo) {
 
 /** {tab, schema, prefijo} de la hoja de un tipo de empleado. */
 function emp_hoja_(tipo) {
-  var cfg = CFG();
+  var cfg = CFG_();
   if (emp_tipo_(tipo) === cfg.TIPO_RESPONSABLE_TERCERO) {
-    return { tab: cfg.TABS.PERSONAL_TERCEROS, schema: SCHEMA().PERSONAL_TERCEROS, prefijo: cfg.ID_PREFIJO_TERCERO };
+    return { tab: cfg.TABS.PERSONAL_TERCEROS, schema: SCHEMA_().PERSONAL_TERCEROS, prefijo: cfg.ID_PREFIJO_TERCERO };
   }
-  return { tab: cfg.TABS.PERSONAL, schema: SCHEMA().PERSONAL_KGP, prefijo: cfg.ID_PREFIJO_EMPLEADO };
+  return { tab: cfg.TABS.PERSONAL, schema: SCHEMA_().PERSONAL_KGP, prefijo: cfg.ID_PREFIJO_EMPLEADO };
 }
 
+/** Hoja de personal del tipo pedido, leída (memo) y con sus columnas requeridas verificadas. */
 function emp_table_(tipo) {
   var h = emp_hoja_(tipo);
-  var t = repo_readTable_(CFG().DB_SHEET_ID, h.tab);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, h.tab);
   repo_requireCols_(t.hmap, h.tab, h.schema.required);
   return t;
 }
 
+/**
+ * Fila cruda de personal -> objeto de dominio.
+ * @param {!Object} row
+ * @param {string=} tipo Ya normalizado por quien llama; sin él, interno.
+ */
 function emp_rowToObj_(row, tipo) {
   return {
     idEmpleado: row[normText_('ID EMPLEADO')],
@@ -40,12 +46,12 @@ function emp_rowToObj_(row, tipo) {
     correo: row[normText_('CORREO')],
     telefono: row[normText_('TELEFONO')],
     cargo: row[normText_('CARGO')],
-    // Opcional (no está en SCHEMA().PERSONAL_KGP.required): se usa para la
+    // Opcional (no está en SCHEMA_().PERSONAL_KGP.required): se usa para la
     // etiqueta "Cédula - Nombre" del responsable de una tarea. Sin la
     // columna, la etiqueta muestra solo el nombre.
     cedula: row[normText_('CEDULA')] || '',
     // `tipo` ya normalizado por quien llama (emp_listEmpleados_); sin él, interno.
-    tipoResponsable: tipo || CFG().TIPO_RESPONSABLE_INTERNO
+    tipoResponsable: tipo || CFG_().TIPO_RESPONSABLE_INTERNO
   };
 }
 
@@ -57,7 +63,7 @@ function emp_listEmpleados_(tipo) {
   if (cached) return cached;
 
   var list = emp_table_(tipo).rows.map(function (r) { return emp_rowToObj_(r, tipo); });
-  cachePutJson_(key, list, CFG().CACHE_TTL.EMPLEADOS_S);
+  cachePutJson_(key, list, CFG_().CACHE_TTL.EMPLEADOS_S);
   return list;
 }
 
@@ -67,7 +73,7 @@ function emp_listEmpleados_(tipo) {
  * faltan columnas, se devuelven solo los internos (no rompe las tareas).
  */
 function emp_listResponsables_() {
-  var cfg = CFG();
+  var cfg = CFG_();
   var terceros = [];
   try { terceros = emp_listEmpleados_(cfg.TIPO_RESPONSABLE_TERCERO); } catch (e) { terceros = []; }
   return emp_listEmpleados_(cfg.TIPO_RESPONSABLE_INTERNO).concat(terceros);
@@ -91,7 +97,7 @@ function emp_buscarResponsable_(responsables, idEmpleado, tipo) {
 function emp_createEmpleado_(datos, tipo) {
   var h = emp_hoja_(tipo);
   var idEmpleado = id_new_(h.prefijo);
-  repo_appendRows_(CFG().DB_SHEET_ID, h.tab, [{
+  repo_appendRows_(CFG_().DB_SHEET_ID, h.tab, [{
     'ID EMPLEADO': idEmpleado,
     'NOMBRE': cleanText_(datos.nombre),
     'CORREO': cleanText_(datos.correo),
@@ -106,7 +112,7 @@ function emp_updateEmpleado_(idEmpleado, datos, tipo) {
   var h = emp_hoja_(tipo);
   var match = repo_findRowByCol_(emp_table_(tipo), 'ID EMPLEADO', idEmpleado);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el empleado ' + idEmpleado + '.');
-  repo_updateCells_(CFG().DB_SHEET_ID, h.tab, match.rowIndex, {
+  repo_updateCells_(CFG_().DB_SHEET_ID, h.tab, match.rowIndex, {
     'NOMBRE': cleanText_(datos.nombre),
     'CORREO': cleanText_(datos.correo),
     'TELEFONO': cleanText_(datos.telefono),
@@ -119,7 +125,7 @@ function emp_deleteEmpleado_(idEmpleado, tipo) {
   var h = emp_hoja_(tipo);
   var match = repo_findRowByCol_(emp_table_(tipo), 'ID EMPLEADO', idEmpleado);
   if (!match) throw new AppError_('NOT_FOUND', 'No existe el empleado ' + idEmpleado + '.');
-  repo_deleteRows_(CFG().DB_SHEET_ID, h.tab, [match.rowIndex]);
+  repo_deleteRows_(CFG_().DB_SHEET_ID, h.tab, [match.rowIndex]);
 }
 
 /** Un empleado INTERNO por ID EMPLEADO, o null. Usado para resolver ELABORADO POR / REVISADO Y APROBADO POR / ASESOR COMERCIAL al leer una cotización. */

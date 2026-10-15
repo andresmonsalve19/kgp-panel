@@ -45,9 +45,11 @@ window.KGP = window.KGP || {};
   // Constantes
   // ===================================================================
 
-  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
-  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_COTIZACION', 7); // = CFG().DIAS_POR_VENCER_COTIZACION
-  var POLL_BACKOFF_MS = [30000, 60000, 120000, 300000];
+  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG_().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
+  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_COTIZACION', 7); // = CFG_().DIAS_POR_VENCER_COTIZACION
+  var DIAS_RECIENTES = KGP.cfg('DIAS_RECIENTES_COTIZACION', 7);   // = CFG_().DIAS_RECIENTES_COTIZACION (KPI "Recién creadas")
+  // Tras errores seguidos se espera cada vez más (x1, x2, x4, x10 el intervalo base).
+  var POLL_BACKOFF_MS = [1, 2, 4, 10].map(function (k) { return POLL_BASE_MS * k; });
   var SEARCH_DEBOUNCE_MS = 220;
   var MAX_BARRAS_FECHA = 12;   // columnas de "Cotizaciones creadas"
   var MAX_VIGENCIA = 6;        // filas de "Ventana de vigencia"
@@ -246,10 +248,10 @@ window.KGP = window.KGP || {};
       id: 'new', tone: '',
       match: function (c, ctx) {
         var d = Rules.antiguedadDias(c, ctx.hoy);
-        return d != null && d >= 0 && d <= 7;
+        return d != null && d >= 0 && d <= DIAS_RECIENTES;
       },
-      label: function () { return 'Recién creadas (≤7 días)'; },
-      sub: function () { return 'elaboradas esta semana'; }
+      label: function () { return 'Recién creadas (≤' + DIAS_RECIENTES + ' días)'; },
+      sub: function () { return 'elaboradas en los últimos ' + DIAS_RECIENTES + ' días'; }
     },
     {
       id: 'docerr', tone: 'alert',

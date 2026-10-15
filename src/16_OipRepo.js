@@ -18,20 +18,22 @@
  */
 
 function oip_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.OIP);
-  repo_requireCols_(t.hmap, CFG().TABS.OIP, SCHEMA().OIP.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP);
+  repo_requireCols_(t.hmap, CFG_().TABS.OIP, SCHEMA_().OIP.required);
   return t;
 }
 
+/** TAREAS_OIP leída (memo) y con sus columnas requeridas verificadas. */
 function tarp_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIP);
-  repo_requireCols_(t.hmap, CFG().TABS.TAREAS_OIP, SCHEMA().TAREAS_OIP.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIP);
+  repo_requireCols_(t.hmap, CFG_().TABS.TAREAS_OIP, SCHEMA_().TAREAS_OIP.required);
   return t;
 }
 
+/** OIP_FACTURACION leída (memo) y con sus columnas requeridas verificadas. */
 function fac_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.OIP_FACTURACION);
-  repo_requireCols_(t.hmap, CFG().TABS.OIP_FACTURACION, SCHEMA().OIP_FACTURACION.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP_FACTURACION);
+  repo_requireCols_(t.hmap, CFG_().TABS.OIP_FACTURACION, SCHEMA_().OIP_FACTURACION.required);
   return t;
 }
 
@@ -62,7 +64,7 @@ function oip_rowToObj_(row) {
  * ignoran (repo_appendRows_).
  */
 function oip_create_(ctx) {
-  return repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.OIP, [{
+  return repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP, [{
     'ID OIP': ctx.idOip,
     'ID COTIZACION': ctx.idCotizacion,
     'FECHA ELABORACION': ctx.fechaElaboracion,
@@ -113,7 +115,7 @@ function oip_update_(idOip, patch) {
   var full = {};
   for (var k in patch) full[k] = patch[k];
   full['ACTUALIZADO EN'] = new Date();
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.OIP, found.rowIndex, full);
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP, found.rowIndex, full);
 }
 
 /**
@@ -127,13 +129,14 @@ function oip_updateDocInfo_(idOip, docUrl, docEstado, docFileId) {
   var patch = { 'DOC ESTADO': docEstado };
   if (docUrl !== undefined) patch['URL DOCUMENTO'] = docUrl || '';
   if (docFileId !== undefined) patch['DOC FILE ID'] = docFileId || '';
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.OIP, found.rowIndex, patch);
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP, found.rowIndex, patch);
 }
 
 // ---------------------------------------------------------------------
 // TAREAS_OIP
 // ---------------------------------------------------------------------
 
+/** Fila cruda de TAREAS_OIP -> objeto de dominio (FK en idOip). */
 function tarp_rowToObj_(row) {
   return {
     idTarea: row[normText_('ID TAREA')],
@@ -157,10 +160,6 @@ function tarp_getRowsByOip_(idOip) {
     .map(function (m) { return { rowIndex: m.rowIndex, obj: tarp_rowToObj_(m.obj) }; });
 }
 
-/** Solo los objetos de dominio de las tareas de una OIP, en orden. */
-function tarp_getByOip_(idOip) {
-  return tarp_getRowsByOip_(idOip).map(function (r) { return r.obj; });
-}
 
 /** Mapea una tarea ya validada al objeto de fila de TAREAS_OIP. */
 function tarp_toRow_(idTarea, idOip, t) {
@@ -183,30 +182,31 @@ function tarp_createMany_(idOip, tareas) {
   if (!tareas.length) return [];
   var ids = [];
   var rows = tareas.map(function (t) {
-    var id = id_new_('TAP');
+    var id = id_new_(CFG_().ID_PREFIJO_TAREA_OIP);
     ids.push(id);
     return tarp_toRow_(id, idOip, t);
   });
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIP, rows);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIP, rows);
   return ids;
 }
 
 /** Reescribe varias tareas existentes con una sola lectura de la hoja. updates: [{rowIndex, idTarea, tarea}]. */
 function tarp_updateMany_(idOip, updates) {
-  repo_updateCellsMany_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIP, updates.map(function (u) {
+  repo_updateCellsMany_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIP, updates.map(function (u) {
     return { rowIndex: u.rowIndex, patch: tarp_toRow_(u.idTarea, idOip, u.tarea) };
   }));
 }
 
 /** Borra físicamente filas de TAREAS_OIP (de abajo hacia arriba, ver repo_deleteRows_). */
 function tarp_deleteRows_(rowIndexes) {
-  repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIP, rowIndexes);
+  repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIP, rowIndexes);
 }
 
 // ---------------------------------------------------------------------
 // OIP_FACTURACION
 // ---------------------------------------------------------------------
 
+/** Fila cruda de OIP_FACTURACION -> objeto de dominio. */
 function fac_rowToObj_(row) {
   return {
     idFacturacion: row[normText_('ID FACTURACION OIP')],
@@ -261,13 +261,13 @@ function fac_toRow_(idFacturacion, idOip, f) {
 
 /** Crea una fila de facturación. Devuelve el ID FACTURACION OIP generado. */
 function fac_create_(idOip, f) {
-  var id = id_new_('FAC');
+  var id = id_new_(CFG_().ID_PREFIJO_FACTURA_OIP);
   var row = fac_toRow_(id, idOip, f);
   // FECHA NOTIFICACION solo la escribe el recordatorio mensual: en una
   // creación manual desde el formulario queda vacía (undefined = '' en
   // repo_appendRows_), y en la automática el llamador la pasa explícita.
   if (f.fechaNotificacion !== undefined) row['FECHA NOTIFICACION'] = f.fechaNotificacion;
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.OIP_FACTURACION, [row]);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP_FACTURACION, [row]);
   return id;
 }
 
@@ -276,30 +276,30 @@ function fac_createMany_(rows) {
   if (!rows.length) return [];
   var ids = [];
   var objRows = rows.map(function (r) {
-    var id = id_new_('FAC');
+    var id = id_new_(CFG_().ID_PREFIJO_FACTURA_OIP);
     ids.push(id);
     var row = fac_toRow_(id, r.idOip, r.factura);
     if (r.factura.fechaNotificacion !== undefined) row['FECHA NOTIFICACION'] = r.factura.fechaNotificacion;
     return row;
   });
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.OIP_FACTURACION, objRows);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP_FACTURACION, objRows);
   return ids;
 }
 
 /** Reescribe una fila de facturación existente (sin tocar FECHA NOTIFICACION). */
 function fac_update_(rowIndex, idFacturacion, idOip, f) {
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.OIP_FACTURACION, rowIndex, fac_toRow_(idFacturacion, idOip, f));
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP_FACTURACION, rowIndex, fac_toRow_(idFacturacion, idOip, f));
 }
 
 /** Sella FECHA NOTIFICACION en varias filas con una sola lectura. updates: [{rowIndex, fecha}]. */
 function fac_stampNotificacionMany_(updates) {
   if (!updates.length) return;
-  repo_updateCellsMany_(CFG().DB_SHEET_ID, CFG().TABS.OIP_FACTURACION, updates.map(function (u) {
+  repo_updateCellsMany_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP_FACTURACION, updates.map(function (u) {
     return { rowIndex: u.rowIndex, patch: { 'FECHA NOTIFICACION': u.fecha } };
   }));
 }
 
 /** Borra físicamente filas de OIP_FACTURACION. */
 function fac_deleteRows_(rowIndexes) {
-  repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.OIP_FACTURACION, rowIndexes);
+  repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.OIP_FACTURACION, rowIndexes);
 }

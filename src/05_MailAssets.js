@@ -8,7 +8,7 @@
  * (se muestra a 150 px: 2x para pantallas de alta densidad) para no
  * cargar los ~150 KB del original en cada correo.
  *
- * Igual que CFG(): todo vive dentro de una función (cero código top-level).
+ * Igual que CFG_(): todo vive dentro de una función (cero código top-level).
  */
 function mail_assets_() {
   return {

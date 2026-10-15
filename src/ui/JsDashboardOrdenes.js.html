@@ -37,19 +37,20 @@ window.KGP = window.KGP || {};
   // Constantes
   // ===================================================================
 
-  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
-  var POLL_BACKOFF_MS = [30000, 60000, 120000, 300000];
+  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG_().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
+  // Tras errores seguidos se espera cada vez más (x1, x2, x4, x10 el intervalo base).
+  var POLL_BACKOFF_MS = [1, 2, 4, 10].map(function (k) { return POLL_BASE_MS * k; });
   var SEARCH_DEBOUNCE_MS = 220;
   // Una orden dura semanas o meses (una OIP, un año): 15 días de aviso. Las
   // cotizaciones usan 7 porque su plazo típico es de días.
-  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_ORDENES', 15); // = CFG().DIAS_POR_VENCER_ORDENES
+  var DIAS_POR_VENCER = KGP.cfg('DIAS_POR_VENCER_ORDENES', 15); // = CFG_().DIAS_POR_VENCER_ORDENES
   var MAX_MESES = 12;          // columnas de "Órdenes creadas" y "Facturación por mes"
   var MAX_VIGENCIA = 6;        // filas de "Ventana de vigencia"
   var MAX_RESPONSABLES = 7;    // filas de "Tareas pendientes por responsable"
   var CACHE_KEY = 'dashboard:ordenes';
   var MODULO_KEY = 'dashboard:modulo';
 
-  var ESTADO = { CURSO: 'En curso', FIN: 'Finalizada', VENC: 'Vencida' }; // = CFG().ESTADOS_OIS / ESTADOS_OIP
+  var ESTADO = { CURSO: 'En curso', FIN: 'Finalizada', VENC: 'Vencida' }; // = CFG_().ESTADOS_OIS / ESTADOS_OIP
   var MODULOS = ['cot', 'OIS', 'OIP'];
   var TITULOS = { cot: 'Dashboard de cotizaciones', OIS: 'Dashboard de OIS', OIP: 'Dashboard de OIP' };
   var COLOR_ESTADO = {};

@@ -23,14 +23,14 @@ window.KGP = window.KGP || {};
 (function (KGP) {
   'use strict';
 
-  var ESTADO_EN_CURSO = 'En curso';      // = CFG().OIP_ESTADO_INICIAL / TAREA_ESTADO_INICIAL
-  var ESTADO_FINALIZADA = 'Finalizada';  // = CFG().OIP_ESTADO_FINALIZADA / TAREA_ESTADO_FINALIZADA
-  var ESTADO_VENCIDA = 'Vencida';        // = CFG().OIP_ESTADO_VENCIDA
-  var MAX_TAREAS = KGP.cfg('MAX_TAREAS_OIP', 200);   // = CFG().LIMITS.MAX_TAREAS_OIP (hoja CONFIG_GENERAL)
-  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10);  // = CFG().LIMITS.MAX_SERVICIOS
-  var IVA_TASA = KGP.cfg('IVA_TASA', 0.19);          // = CFG().IVA_TASA (totales de la facturación, solo visuales)
-  var FACT_PENDIENTE = 'PENDIENTE DE FACTURAR'; // = CFG().FACT_ESTADO_PENDIENTE
-  var FACT_FACTURADO = 'FACTURADO';             // = CFG().FACT_ESTADO_FACTURADO
+  var ESTADO_EN_CURSO = 'En curso';      // = CFG_().OIP_ESTADO_INICIAL / TAREA_ESTADO_INICIAL
+  var ESTADO_FINALIZADA = 'Finalizada';  // = CFG_().OIP_ESTADO_FINALIZADA / TAREA_ESTADO_FINALIZADA
+  var ESTADO_VENCIDA = 'Vencida';        // = CFG_().OIP_ESTADO_VENCIDA
+  var MAX_TAREAS = KGP.cfg('MAX_TAREAS_OIP', 200);   // = CFG_().LIMITS.MAX_TAREAS_OIP (hoja CONFIG_GENERAL)
+  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10);  // = CFG_().LIMITS.MAX_SERVICIOS
+  var IVA_TASA = KGP.cfg('IVA_TASA', 0.19);          // = CFG_().IVA_TASA (totales de la facturación, solo visuales)
+  var FACT_PENDIENTE = 'PENDIENTE DE FACTURAR'; // = CFG_().FACT_ESTADO_PENDIENTE
+  var FACT_FACTURADO = 'FACTURADO';             // = CFG_().FACT_ESTADO_FACTURADO
 
   var listState = {
     page: 1,
@@ -1174,7 +1174,7 @@ window.KGP = window.KGP || {};
     clearInvalid();
     var hasError = false;
     var plazo = Number($('op-plazo').value);
-    if (!plazo || plazo < 1 || plazo > 365) { markInvalid('plazo'); hasError = true; }
+    if (!plazo || plazo < 1 || plazo > KGP.cfg('MAX_PLAZO_DIAS', 365)) { markInvalid('plazo'); hasError = true; }
     if (!currentClienteId()) { markInvalid('cliente'); hasError = true; }
     if (!$('op-solicitante-select').value) { markInvalid('solicitante'); hasError = true; }
     if (!$('op-establecimiento-select').value) { markInvalid('establecimiento'); hasError = true; }

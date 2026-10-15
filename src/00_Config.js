@@ -16,11 +16,27 @@
  */
 
 /**
- * Configuración general de la aplicación.
+ * Configuración general de la aplicación: valores por defecto del código con
+ * los de las hojas CONFIG_* aplicados encima (06_ConfigSheet.js).
+ *
+ * Memoizada por ejecución: se construye UNA vez (3 lecturas de
+ * ScriptProperties + aplicar la hoja) y las llamadas siguientes devuelven el
+ * mismo objeto, congelado (Object.freeze) para que ningún llamador lo pueda
+ * modificar por accidente. La memo se invalida sola si cambian los overrides
+ * de la hoja (cfgs_refresh_) y a mano con cfg_invalidar_() tras escribir una
+ * propiedad TEMPLATE_* (51_Admin.js). Con cfgs_sinHoja_ no se memoiza.
+ *
  * TEMPLATE_SHEET_ID se completa tras ejecutar admin_convertTemplate()
  * (Fase 2) y TEMPLATE_TAB_NAME tras ejecutar admin_health().
+ *
+ * @return {!Object} Configuración efectiva (de solo lectura).
  */
-function CFG() {
+function CFG_() {
+  var memo = repo_memo_();
+  var sinHoja = !!memo.__cfgsSinHoja;
+  var ov = cfgs_overrides_();
+  if (!sinHoja && memo.__cfg && memo.__cfg.ov === ov) return memo.__cfg.cfg;
+
   // TEMPLATE_SHEET_ID y TEMPLATE_TAB_NAME se autoconfiguran en
   // ScriptProperties: admin_convertTemplate() escribe TEMPLATE_SHEET_ID la
   // primera vez que se ejecuta, y admin_health()/la UI pueden fijar
@@ -110,6 +126,8 @@ function CFG() {
     DIAS_POR_VENCER_COTIZACION: 7,
     DIAS_POR_VENCER_ORDENES: 15,
     DIAS_POR_VENCER_TAREAS: 7,
+    // KPI "Recién creadas" del Dashboard: cotizaciones de los últimos N días.
+    DIAS_RECIENTES_COTIZACION: 7,
     // Cada cuánto el Dashboard consulta si hay datos nuevos (milisegundos).
     DASHBOARD_POLL_MS: 30000,
 
@@ -122,9 +140,37 @@ function CFG() {
     TIPO_RESPONSABLE_TERCERO: 'TERCERO',
     ETIQUETA_RESPONSABLE_INTERNO: 'Interno (KGP)',
     ETIQUETA_RESPONSABLE_TERCERO: 'Tercero / independiente',
-    // Prefijo del ID que se genera al crear un empleado interno / un tercero.
+    // Prefijo de los IDs internos que genera la app (PREFIJO-yyMMddHHmmss-XXXX,
+    // ver id_new_ en 20_Ids.js). Cambiarlo solo afecta a las filas nuevas: los
+    // IDs ya guardados se siguen leyendo igual (se comparan completos).
     ID_PREFIJO_EMPLEADO: 'EMP',
     ID_PREFIJO_TERCERO: 'TER',
+    ID_PREFIJO_CLIENTE: 'CLI',
+    ID_PREFIJO_CONTACTO: 'CON',
+    ID_PREFIJO_ESTABLECIMIENTO: 'EST',
+    ID_PREFIJO_COTIZACION: 'CTZ',
+    ID_PREFIJO_SERVICIO: 'SRV',
+    ID_PREFIJO_OIS: 'OIS',
+    ID_PREFIJO_OIP: 'OIP',
+    ID_PREFIJO_TAREA_OIS: 'TAR',
+    ID_PREFIJO_TAREA_OIP: 'TAP',
+    ID_PREFIJO_FACTURA_OIP: 'FAC',
+
+    // Prefijo del CÓDIGO consecutivo visible (CTZ-KGP-001-26, ...). El número
+    // sigue la marca de agua de ScriptProperties (SEQ_*), así que cambiar el
+    // prefijo no reinicia la numeración.
+    CODIGO_PREFIJO_COTIZACION: 'CTZ-KGP-',
+    CODIGO_PREFIJO_OIS: 'OIS-KGP-',
+    CODIGO_PREFIJO_OIP: 'OIP-KGP-',
+
+    // Nombre largo de cada tipo de orden (textos de los correos).
+    NOMBRE_OIS: 'Orden Interna de Servicio',
+    NOMBRE_OIP: 'Orden Interna de Proyectos',
+
+    // Disparador mensual del recordatorio de facturación OIP
+    // (admin_installOipFacturacionTrigger): día del mes y hora (TZ).
+    OIP_NOTIF_DIA: 1,
+    OIP_NOTIF_HORA: 7,
 
     TABS: {
       COTIZACIONES: 'COTIZACIONES',
@@ -148,7 +194,7 @@ function CFG() {
       MAX_SERVICIOS: 10,
       MAX_ACTIVIDADES: 10,
       // Tareas por OIS: la plantilla solo tiene 20 filas (229..248), ver
-      // CELLMAP().OIS_TAREAS_FILA_BASE.
+      // CELLMAP_().OIS_TAREAS_FILA_BASE.
       MAX_TAREAS: 20,
       // Tareas por OIP: a diferencia de la OIS, la plantilla NO reserva un
       // bloque fijo — doc_writeOipCells_ inserta una fila por tarea desde la
@@ -160,6 +206,8 @@ function CFG() {
       // años de mensualidades, muy por encima del plazo máximo de una OIP.
       MAX_FACTURAS_OIP: 120,
       LOCK_MS: 30000,
+      // Espera máxima del lock corto del historial de correos (mail_log_).
+      LOCK_HISTORIAL_MS: 10000,
       CELL_MAX: 5000,
       MAX_PLAZO_DIAS: 365,
       // Techo del snapshot completo que el Dashboard descarga de una sola
@@ -184,7 +232,7 @@ function CFG() {
 
     // Flujo de estado de una OIS (Gestionar OIS). Nace en OIS_ESTADO_INICIAL
     // y NUNCA se edita a mano: se deriva de sus tareas y de la fecha de
-    // vencimiento (ver ois_deriveEstado_ en 35_OisService.js). Regla
+    // vencimiento (ver ord_derivarEstado_ en 41_OrdenComun.js). Regla
     // confirmada con el usuario: "Finalizada" gana sobre "Vencida" — una OIS
     // con todas sus tareas finalizadas queda Finalizada aunque ya haya pasado
     // la fecha de vencimiento.
@@ -194,7 +242,7 @@ function CFG() {
     OIS_ESTADO_VENCIDA: 'Vencida',
 
     // Flujo de estado de una OIP (Gestionar OIP). Mismas tres etiquetas y la
-    // misma derivación que la OIS (ver oip_deriveEstado_ en 36_OipService.js),
+    // misma derivación que la OIS (ver ord_derivarEstado_ en 41_OrdenComun.js),
     // con UNA diferencia confirmada con el usuario: una OIP Finalizada NO
     // queda de solo lectura. Una OIP vive ~1 año facturando mes a mes, así
     // que cerrar las tareas de un mes no puede impedir registrar la
@@ -227,17 +275,44 @@ function CFG() {
     CANTIDAD_MAX: 99999,
 
     CACHE_TTL: {
-      CATALOGO_S: 21600,   // 6h, máximo permitido por CacheService
       CLIENTES_S: 900,     // 15 min
       DASHBOARD_S: 30,
       // El snapshot completo se invalida por versión de datos (la key la
       // incluye), así que puede vivir mucho más que la consulta paginada:
       // mientras nadie escriba, se sirve de caché sin tocar ningún Sheet.
       DASHBOARD_SNAPSHOT_S: 3600,
-      EMPLEADOS_S: 900     // 15 min, mismo criterio que CLIENTES_S
+      EMPLEADOS_S: 900,    // 15 min, mismo criterio que CLIENTES_S
+      // Respuestas guardadas para que un reintento (mismo requestId) no
+      // duplique una cotización, una orden ni un documento.
+      IDEMPOTENCIA_S: 21600
     }
   };
-  return cfgs_aplicar_(cfg, 'valores');
+  cfgs_aplicar_(cfg, 'valores', null, ov);
+  if (sinHoja) return cfg;
+  memo.__cfg = { ov: ov, cfg: cfg_congelar_(cfg) };
+  return memo.__cfg.cfg;
+}
+
+/**
+ * Descarta la CFG_() memoizada de esta ejecución. Llamar tras escribir una
+ * propiedad que CFG_() lee de ScriptProperties (TEMPLATE_*), para que el resto
+ * de la misma ejecución vea el valor nuevo.
+ */
+function cfg_invalidar_() {
+  delete repo_memo_().__cfg;
+}
+
+/**
+ * Object.freeze recursivo. Devuelve el mismo objeto.
+ * @param {*} obj
+ * @return {*}
+ */
+function cfg_congelar_(obj) {
+  if (obj && typeof obj === 'object' && !Object.isFrozen(obj)) {
+    Object.keys(obj).forEach(function (k) { cfg_congelar_(obj[k]); });
+    Object.freeze(obj);
+  }
+  return obj;
 }
 
 /**
@@ -247,7 +322,7 @@ function CFG() {
  * (ver 02_Utils.js normText_ / repo_normHeader_): sin acentos, mayúsculas,
  * espacios colapsados.
  */
-function SCHEMA() {
+function SCHEMA_() {
   return {
     COTIZACIONES: {
       required: [
@@ -276,7 +351,7 @@ function SCHEMA() {
         // correo del usuario activo) y nunca cambian después. REVISADO Y
         // APROBADO POR se fija una sola vez, cuando la cotización pasa de "En
         // revisión" a Aprobada/Rechazada (mismo criterio que ESTADO, ver
-        // CFG().ESTADO_INICIAL). ASESOR COMERCIAL es el único de los 4 editable
+        // CFG_().ESTADO_INICIAL). ASESOR COMERCIAL es el único de los 4 editable
         // libremente desde "Gestionar cotización" (selección manual en un
         // desplegable de PERSONAL_KGP).
         'ELABORADO POR', 'CARGO', 'REVISADO Y APROBADO POR', 'ASESOR COMERCIAL',
@@ -286,7 +361,7 @@ function SCHEMA() {
         // cotización (ViewCotizacion.html no tiene este campo, así que
         // qs_createQuotation nunca le pasa un valor y queda en blanco hasta
         // la primera edición). Se escribe también en la plantilla, ver
-        // CELLMAP().TIEMPO_ENTREGA.
+        // CELLMAP_().TIEMPO_ENTREGA.
         'TIEMPO DE ENTREGA'
       ]
     },
@@ -363,7 +438,7 @@ function SCHEMA() {
         'ID TAREA', 'ID OIS', 'TAREA', 'RESPONSABLE', 'ID EMPLEADO',
         'FECHA INICIO', 'FECHA ENTREGA', 'ESTADO', 'OBSERVACION'
       ],
-      // TIPO RESPONSABLE: INTERNO / TERCERO (CFG().TIPO_RESPONSABLE_*). Sin la
+      // TIPO RESPONSABLE: INTERNO / TERCERO (CFG_().TIPO_RESPONSABLE_*). Sin la
       // columna, el tipo se deduce de la hoja donde está el ID EMPLEADO.
       optional: ['TIPO RESPONSABLE']
     },
@@ -385,7 +460,7 @@ function SCHEMA() {
         'ID TAREA', 'ID OIP', 'TAREA', 'RESPONSABLE', 'ID EMPLEADO',
         'FECHA INICIO', 'FECHA ENTREGA', 'ESTADO', 'OBSERVACION'
       ],
-      // TIPO RESPONSABLE: INTERNO / TERCERO (CFG().TIPO_RESPONSABLE_*). Sin la
+      // TIPO RESPONSABLE: INTERNO / TERCERO (CFG_().TIPO_RESPONSABLE_*). Sin la
       // columna, el tipo se deduce de la hoja donde está el ID EMPLEADO.
       optional: ['TIPO RESPONSABLE']
     },
@@ -412,7 +487,7 @@ function SCHEMA() {
  * la lógica de escritura (siempre setValue sobre la celda ancla, nunca
  * setValues sobre un rango, por las celdas combinadas).
  */
-function CELLMAP() {
+function CELLMAP_() {
   // Valores POR DEFECTO; la hoja CONFIG_CELDAS los puede sobrescribir
   // (cfgs_aplicar_, 06_ConfigSheet.js).
   return cfgs_aplicar_({
@@ -469,24 +544,24 @@ function CELLMAP() {
     TARIFAS_COL_OBSERVACIONES: 'H',
 
     // COTIZACIONES.TIEMPO DE ENTREGA (editable solo desde "Gestionar
-    // cotización", ver SCHEMA()) — confirmado con el usuario: celda C216 de
-    // la hoja CTZ-V-4. doc_setText_ con '' limpia la celda si el campo se
+    // cotización", ver SCHEMA_()) — confirmado con el usuario: celda C216 de
+    // la hoja CTZ-V-4. un texto '' limpia la celda si el campo se
     // deja vacío en vez de dejar un valor de un guardado anterior.
     TIEMPO_ENTREGA: 'C216',
 
     // Trazabilidad de personal (ver COTIZACIONES.ELABORADO POR/CARGO/
-    // REVISADO Y APROBADO POR/ASESOR COMERCIAL en SCHEMA() y qs_getCotizacion
+    // REVISADO Y APROBADO POR/ASESOR COMERCIAL en SCHEMA_() y qs_getCotizacion
     // en 30_QuoteService.js) — se escribe el NOMBRE del empleado (no el ID),
     // confirmado celda por celda con el usuario. APROBADO_POR y
     // ASESOR_COMERCIAL quedan vacías hasta que corresponda (Cotización sin
-    // decidir / sin asesor asignado todavía) — doc_setText_ con '' limpia la
+    // decidir / sin asesor asignado todavía) — un texto '' limpia la
     // celda en vez de dejar un valor viejo tras un "Guardar cambios".
     ELABORADO_POR: 'D260',
     CARGO_ELABORADO_POR: 'D261',
     APROBADO_POR: 'D262',
     ASESOR_COMERCIAL: 'D263',
 
-    // ---- Solo hoja OIS V-4 (CFG().TEMPLATE_TAB_OIS) ----
+    // ---- Solo hoja OIS V-4 (CFG_().TEMPLATE_TAB_OIS) ----
     // Fila de identificación de la OIS, confirmada con el usuario: código de
     // la cotización padre, código de la OIS, y año/mes/día iguales a
     // A7/B7/C7 (FECHA_ANIO/MES/DIA de arriba).
@@ -505,7 +580,7 @@ function CELLMAP() {
     OIS_TAREAS_COL_FECHA_ENTREGA: 'D',
     OIS_TAREAS_COL_OBSERVACION: 'E',
 
-    // ---- Solo hoja OIP V-4 (CFG().TEMPLATE_TAB_OIP) ----
+    // ---- Solo hoja OIP V-4 (CFG_().TEMPLATE_TAB_OIP) ----
     // Fila de identificación de la OIP (fila 231, confirmada por el usuario):
     // código de la cotización padre, código de la OIP, y año/mes/día iguales
     // a A7/B7/C7. Mismo rol que la fila 225 de la hoja OIS.

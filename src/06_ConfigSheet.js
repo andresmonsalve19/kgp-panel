@@ -22,7 +22,7 @@
  *     lee TODAS las hojas CONFIG_* en una sola apertura del spreadsheet y
  *     guarda el resultado en CacheService. Las demás llamadas de esa sesión
  *     (google.script.run, disparadores) usan esa copia sin volver a leer.
- *   - CFG() y CELLMAP() (00_Config.js) aplican esos valores al final con
+ *   - CFG_() y CELLMAP_() (00_Config.js) aplican esos valores al final con
  *     cfgs_aplicar_. Los textos de correo los toma mail_textos_.
  *   - Solo se aplican claves del catálogo (cfgs_catalogo_): una clave
  *     desconocida o un valor que no se puede interpretar se IGNORA y queda el
@@ -35,7 +35,7 @@
  * refresca las columnas de ayuda (VALOR POR DEFECTO, DESCRIPCION...).
  *
  * Regla de recursión: nada de este archivo que se use al leer la config puede
- * llamar CFG() (CFG depende de esto). Por eso el ID del spreadsheet vive en
+ * llamar CFG_() (CFG depende de esto). Por eso el ID del spreadsheet vive en
  * cfgs_sheetId_ y no en CFG.
  */
 
@@ -57,8 +57,18 @@ function cfgs_tabs_() {
   };
 }
 
+/** Clave de CacheService donde vive la copia leída de las hojas CONFIG_*. */
 function cfgs_cacheKey_() {
   return 'cfgsheet:data:v1';
+}
+
+/**
+ * Segundos que dura esa copia: el máximo de CacheService (6 h). Fijo aquí y no
+ * en CFG_(): leer CFG_() desde la lectura de la config sería recursivo. En la
+ * práctica se renueva en cada carga de la página (doGet).
+ */
+function cfgs_ttl_() {
+  return 21600;
 }
 
 /** Overrides vacíos (sin hoja o con error). */
@@ -78,14 +88,14 @@ function cfgs_overrides_() {
   var memo = repo_memo_();
   if (memo.__cfgsSinHoja) return cfgs_vacio_();
   if (memo.__cfgs) return memo.__cfgs;
-  // Guarda anti-recursión: si algo de abajo llama CFG(), ve "sin overrides".
+  // Guarda anti-recursión: si algo de abajo llama CFG_(), ve "sin overrides".
   memo.__cfgs = cfgs_vacio_();
   var data = null;
   try {
     data = cacheGetJson_(cfgs_cacheKey_());
     if (!data) {
       data = cfgs_leerHoja_();
-      cachePutJson_(cfgs_cacheKey_(), data, 21600);
+      cachePutJson_(cfgs_cacheKey_(), data, cfgs_ttl_());
     }
   } catch (e) {
     data = cfgs_vacio_('No se pudo leer la configuración: ' + errMsg_(e));
@@ -104,7 +114,7 @@ function cfgs_refresh_() {
   try {
     memo.__cfgs = cfgs_vacio_(); // anti-recursión durante la lectura
     var data = cfgs_leerHoja_();
-    cachePutJson_(cfgs_cacheKey_(), data, 21600);
+    cachePutJson_(cfgs_cacheKey_(), data, cfgs_ttl_());
     memo.__cfgs = data;
     return data;
   } catch (e) {
@@ -171,10 +181,10 @@ function cfgs_leerHoja_() {
 }
 
 // ---------------------------------------------------------------------
-// Aplicación sobre CFG() / CELLMAP()
+// Aplicación sobre CFG_() / CELLMAP_()
 // ---------------------------------------------------------------------
 
-/** Claves de CFG() que se pueden sobrescribir desde la hoja (las del catálogo, salvo las de solo lectura). Memoizado. */
+/** Claves de CFG_() que se pueden sobrescribir desde la hoja (las del catálogo, salvo las de solo lectura). Memoizado. */
 function cfgs_clavesEditables_() {
   var memo = repo_memo_();
   if (memo.__cfgsEditables) return memo.__cfgsEditables;
@@ -269,7 +279,7 @@ function cfgs_sinHoja_(fn) {
  * archivos, correos y demás se quedan en el servidor.
  */
 function cfgs_clientConfig_() {
-  var c = CFG();
+  var c = CFG_();
   return {
     IVA_TASA: c.IVA_TASA,
     MAX_SERVICIOS: c.LIMITS.MAX_SERVICIOS,
@@ -279,9 +289,11 @@ function cfgs_clientConfig_() {
     TARIFA_MAX_DIGITS: String(Math.trunc(c.TARIFA_MAX)).length,
     CANTIDAD_MAX: c.CANTIDAD_MAX,
     PLAZO_DEFAULT: c.COTIZACION_PLAZO_DEFAULT,
+    MAX_PLAZO_DIAS: c.LIMITS.MAX_PLAZO_DIAS,
     DIAS_POR_VENCER_COTIZACION: c.DIAS_POR_VENCER_COTIZACION,
     DIAS_POR_VENCER_ORDENES: c.DIAS_POR_VENCER_ORDENES,
     DIAS_POR_VENCER_TAREAS: c.DIAS_POR_VENCER_TAREAS,
+    DIAS_RECIENTES_COTIZACION: c.DIAS_RECIENTES_COTIZACION,
     DASHBOARD_POLL_MS: c.DASHBOARD_POLL_MS,
     TIPO_RESPONSABLE_INTERNO: c.TIPO_RESPONSABLE_INTERNO,
     TIPO_RESPONSABLE_TERCERO: c.TIPO_RESPONSABLE_TERCERO,
@@ -298,7 +310,7 @@ function cfgs_clientConfig_() {
  * Filas de cada hoja de configuración. {grupo, clave, descripcion, tipo,
  * nombre?, hoja?, soloLectura?}. El VALOR POR DEFECTO sale del código
  * (cfgs_valorDefault_); aquí solo se documenta. Para agregar un parámetro
- * nuevo: añádelo a CFG()/CELLMAP() y luego aquí, y vuelve a ejecutar
+ * nuevo: añádelo a CFG_()/CELLMAP_() y luego aquí, y vuelve a ejecutar
  * admin_crearHojasConfig().
  */
 function cfgs_catalogo_() {
@@ -358,14 +370,33 @@ function cfgs_catalogo_() {
       { grupo: 'Avisos y dashboard', clave: 'DIAS_POR_VENCER_COTIZACION', tipo: 'Número entero', descripcion: 'Días antes del vencimiento en que una cotización aparece como "por vencer".' },
       { grupo: 'Avisos y dashboard', clave: 'DIAS_POR_VENCER_ORDENES', tipo: 'Número entero', descripcion: 'Días antes del vencimiento en que una OIS/OIP aparece como "por vencer".' },
       { grupo: 'Avisos y dashboard', clave: 'DIAS_POR_VENCER_TAREAS', tipo: 'Número entero', descripcion: 'Días antes de la fecha de entrega en que una tarea aparece como "por vencer".' },
+      { grupo: 'Avisos y dashboard', clave: 'DIAS_RECIENTES_COTIZACION', tipo: 'Número entero', descripcion: 'Días hacia atrás que cuenta la tarjeta "Recién creadas" del Dashboard.' },
       { grupo: 'Avisos y dashboard', clave: 'DASHBOARD_POLL_MS', tipo: 'Número entero', descripcion: 'Cada cuántos milisegundos el Dashboard revisa si hay datos nuevos (30000 = 30 s).' },
       { grupo: 'Avisos y dashboard', clave: 'LIMITS.DASHBOARD_MAX_COTIZACIONES', tipo: 'Número entero', descripcion: 'Máximo de cotizaciones que descarga el Dashboard (las más recientes).' },
       { grupo: 'Responsables de tareas', clave: 'ETIQUETA_RESPONSABLE_INTERNO', tipo: 'Texto', descripcion: 'Cómo se muestra la opción "interno" al elegir el responsable de una tarea y en Gestión de empleados.' },
       { grupo: 'Responsables de tareas', clave: 'ETIQUETA_RESPONSABLE_TERCERO', tipo: 'Texto', descripcion: 'Cómo se muestra la opción "tercero" al elegir el responsable de una tarea y en Gestión de empleados.' },
       { grupo: 'Identificadores', clave: 'ID_PREFIJO_EMPLEADO', tipo: 'Texto', descripcion: 'Prefijo del ID de un empleado interno nuevo (EMP-...). Solo afecta a los que se creen después.' },
       { grupo: 'Identificadores', clave: 'ID_PREFIJO_TERCERO', tipo: 'Texto', descripcion: 'Prefijo del ID de un tercero nuevo (TER-...). Solo afecta a los que se creen después.' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_CLIENTE', tipo: 'Texto', descripcion: 'Prefijo del ID de un cliente nuevo (CLI-...).' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_CONTACTO', tipo: 'Texto', descripcion: 'Prefijo del ID de un contacto nuevo (CON-...).' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_ESTABLECIMIENTO', tipo: 'Texto', descripcion: 'Prefijo del ID de un establecimiento nuevo (EST-...).' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_COTIZACION', tipo: 'Texto', descripcion: 'Prefijo del ID interno de una cotización nueva (CTZ-...). No es el código visible.' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_SERVICIO', tipo: 'Texto', descripcion: 'Prefijo del ID de un servicio nuevo (SRV-...).' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_OIS', tipo: 'Texto', descripcion: 'Prefijo del ID interno de una OIS nueva (OIS-...). No es el código visible.' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_OIP', tipo: 'Texto', descripcion: 'Prefijo del ID interno de una OIP nueva (OIP-...). No es el código visible.' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_TAREA_OIS', tipo: 'Texto', descripcion: 'Prefijo del ID de una tarea nueva de OIS (TAR-...).' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_TAREA_OIP', tipo: 'Texto', descripcion: 'Prefijo del ID de una tarea nueva de OIP (TAP-...).' },
+      { grupo: 'Identificadores', clave: 'ID_PREFIJO_FACTURA_OIP', tipo: 'Texto', descripcion: 'Prefijo del ID de una fila nueva de facturación OIP (FAC-...).' },
+      { grupo: 'Consecutivos', clave: 'CODIGO_PREFIJO_COTIZACION', tipo: 'Texto', descripcion: 'Prefijo del código visible de una cotización (CTZ-KGP-001-26). La numeración continúa aunque se cambie.' },
+      { grupo: 'Consecutivos', clave: 'CODIGO_PREFIJO_OIS', tipo: 'Texto', descripcion: 'Prefijo del código visible de una OIS (OIS-KGP-001-26). La numeración continúa aunque se cambie.' },
+      { grupo: 'Consecutivos', clave: 'CODIGO_PREFIJO_OIP', tipo: 'Texto', descripcion: 'Prefijo del código visible de una OIP (OIP-KGP-001-26). La numeración continúa aunque se cambie.' },
+      { grupo: 'Textos', clave: 'NOMBRE_OIS', tipo: 'Texto', descripcion: 'Nombre largo de la OIS en los correos ({{nombreOrden}}).' },
+      { grupo: 'Textos', clave: 'NOMBRE_OIP', tipo: 'Texto', descripcion: 'Nombre largo de la OIP en los correos ({{nombreOrden}}).' },
+      { grupo: 'Recordatorio de facturación OIP', clave: 'OIP_NOTIF_DIA', tipo: 'Número entero', descripcion: 'Día del mes (1-28) en que corre el recordatorio. Se aplica al volver a ejecutar admin_installOipFacturacionTrigger().' },
+      { grupo: 'Recordatorio de facturación OIP', clave: 'OIP_NOTIF_HORA', tipo: 'Número entero', descripcion: 'Hora aproximada (0-23, zona TZ) del recordatorio. Se aplica al volver a ejecutar admin_installOipFacturacionTrigger().' },
       { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'LIMITS.LOCK_MS', tipo: 'Número entero', descripcion: 'Milisegundos que una escritura espera su turno antes de responder "sistema ocupado".' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.CATALOGO_S', tipo: 'Número entero', descripcion: 'Segundos de caché del catálogo (máx. 21600).' },
+      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'LIMITS.LOCK_HISTORIAL_MS', tipo: 'Número entero', descripcion: 'Milisegundos que espera el registro de un correo en HISTORIAL antes de rendirse (el correo ya salió).' },
+      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.IDEMPOTENCIA_S', tipo: 'Número entero', descripcion: 'Segundos durante los que un reintento de la misma operación devuelve el resultado ya guardado (máx. 21600).' },
       { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.CLIENTES_S', tipo: 'Número entero', descripcion: 'Segundos de caché del listado de clientes (máx. 21600).' },
       { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.EMPLEADOS_S', tipo: 'Número entero', descripcion: 'Segundos de caché del listado de empleados (máx. 21600).' },
       { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.DASHBOARD_S', tipo: 'Número entero', descripcion: 'Segundos de caché de las consultas paginadas del Dashboard y listados.' },
@@ -471,7 +502,7 @@ function cfgs_crearHojas_() {
   var tabs = cfgs_tabs_();
   var cat = cfgs_catalogo_();
   // Valores por defecto = los del CÓDIGO, sin lo que diga la hoja.
-  var defs = cfgs_sinHoja_(function () { return { cfg: CFG(), celdas: CELLMAP() }; });
+  var defs = cfgs_sinHoja_(function () { return { cfg: CFG_(), celdas: CELLMAP_() }; });
   var ss = SpreadsheetApp.openById(cfgs_sheetId_());
   var resumen = [];
 
@@ -707,7 +738,7 @@ function cfgs_escribirLeeme_(ss) {
 function cfgs_verificar_() {
   var data = cfgs_refresh_();
   var avisos = (data.avisos || []).slice();
-  var defs = cfgs_sinHoja_(function () { return { cfg: CFG(), celdas: CELLMAP() }; });
+  var defs = cfgs_sinHoja_(function () { return { cfg: CFG_(), celdas: CELLMAP_() }; });
   cfgs_aplicar_(defs.cfg, 'valores', avisos, data);
   cfgs_aplicar_(defs.celdas, 'celdas', avisos, data);
   var textos = mail_textosDefault_();
@@ -719,6 +750,6 @@ function cfgs_verificar_() {
     clavesEnHoja: Object.keys(data.valores || {}).length + Object.keys(data.celdas || {}).length,
     correosEnHoja: Object.keys(data.correos || {}).length,
     avisos: avisos,
-    efectivo: { CFG: CFG(), CELLMAP: CELLMAP(), CLIENTE: cfgs_clientConfig_() }
+    efectivo: { CFG: CFG_(), CELLMAP: CELLMAP_(), CLIENTE: cfgs_clientConfig_() }
   };
 }

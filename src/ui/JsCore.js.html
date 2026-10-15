@@ -62,6 +62,7 @@ window.KGP = window.KGP || {};
     var timeoutMs = opts.timeoutMs || 90000;
 
     function attempt(n) {
+      var timer = null;
       var callPromise = new Promise(function (resolve, reject) {
         google.script.run
           .withSuccessHandler(function (r) {
@@ -80,10 +81,17 @@ window.KGP = window.KGP || {};
       });
 
       var timeoutPromise = new Promise(function (_, reject) {
-        setTimeout(function () { reject({ code: 'TIMEOUT', message: 'La operación tardó demasiado (90s).' }); }, timeoutMs);
+        timer = setTimeout(function () {
+          reject({ code: 'TIMEOUT', message: 'La operación tardó demasiado (' + Math.round(timeoutMs / 1000) + ' s).' });
+        }, timeoutMs);
       });
 
-      return Promise.race([callPromise, timeoutPromise]).catch(function (err) {
+      // El temporizador se cancela en cuanto el servidor responde: si no, cada
+      // llamada dejaba un setTimeout vivo durante 90 s.
+      var race = Promise.race([callPromise, timeoutPromise]);
+      race.then(function () { clearTimeout(timer); }, function () { clearTimeout(timer); });
+
+      return race.catch(function (err) {
         if (err && retryOn.indexOf(err.code) !== -1 && n < retryDelays.length) {
           return new Promise(function (resolve) { setTimeout(resolve, retryDelays[n]); })
             .then(function () { return attempt(n + 1); });
@@ -275,9 +283,19 @@ window.KGP = window.KGP || {};
       });
     },
 
+    /**
+     * <option> de un <select> por su value, o null. Recorre las opciones en
+     * vez de usar querySelector('option[value="..."]'), que se rompe si el
+     * valor trae comillas o barras.
+     */
+    findOption: function (sel, value) {
+      var v = String(value);
+      return Array.prototype.filter.call(sel.options, function (o) { return o.value === v; })[0] || null;
+    },
+
     /** Inserta (o reemplaza si ya existe) una <option> sin tocar la selección actual. */
     addOption: function (sel, value, label) {
-      var existing = sel.querySelector('option[value="' + value + '"]');
+      var existing = KGP.ui.findOption(sel, value);
       if (existing) { existing.textContent = label; return existing; }
       var opt = document.createElement('option');
       opt.value = value;
@@ -293,7 +311,7 @@ window.KGP = window.KGP || {};
     },
 
     updateOptionLabel: function (sel, value, label) {
-      var opt = sel.querySelector('option[value="' + value + '"]');
+      var opt = KGP.ui.findOption(sel, value);
       if (opt) opt.textContent = label;
     },
 
@@ -313,7 +331,7 @@ window.KGP = window.KGP || {};
 
     /**
      * Tipos de responsable de una tarea, en orden: [{valor, etiqueta}].
-     * Valores y etiquetas salen de la config (CFG().TIPO_RESPONSABLE_* /
+     * Valores y etiquetas salen de la config (CFG_().TIPO_RESPONSABLE_* /
      * ETIQUETA_RESPONSABLE_*, inyectados por doGet).
      */
     tiposResponsable: function () {
@@ -560,9 +578,9 @@ window.KGP = window.KGP || {};
    * línea nueva debajo de ellas (nunca las reemplaza).
    */
   KGP.servicioModal = (function () {
-    var TARIFA_MAX_DIGITS = KGP.cfg('TARIFA_MAX_DIGITS', 10); // dígitos de CFG().TARIFA_MAX
-    var CANTIDAD_MAX = KGP.cfg('CANTIDAD_MAX', 99999);         // = CFG().CANTIDAD_MAX
-    var MAX_ACTIVIDADES = KGP.cfg('MAX_ACTIVIDADES', 10);      // = CFG().LIMITS.MAX_ACTIVIDADES
+    var TARIFA_MAX_DIGITS = KGP.cfg('TARIFA_MAX_DIGITS', 10); // dígitos de CFG_().TARIFA_MAX
+    var CANTIDAD_MAX = KGP.cfg('CANTIDAD_MAX', 99999);         // = CFG_().CANTIDAD_MAX
+    var MAX_ACTIVIDADES = KGP.cfg('MAX_ACTIVIDADES', 10);      // = CFG_().LIMITS.MAX_ACTIVIDADES
     var state = { onSave: null, actividades: [], actSeq: 0, unspscMap: {}, showTarifas: false, observacionesPrevias: '' };
     var wired = false;
 
@@ -1041,10 +1059,37 @@ window.KGP = window.KGP || {};
     if (overlay) overlay.addEventListener('click', function () { setSidebarOpen(false); });
   }
 
+  // ---------------- Límites de la config en el HTML ----------------
+
+  /**
+   * Los View*.html se incluyen sin plantilla (no pueden leer la config), así
+   * que los topes que muestran salen de aquí:
+   *   - data-cfg-max="CLAVE": el atributo max del input = KGP.cfg(CLAVE).
+   *   - data-cfg-plantilla="... {CLAVE} ...": el texto del elemento con cada
+   *     {CLAVE} reemplazada por su valor (p. ej. el mensaje de error del plazo).
+   * Si la clave no llegó, se deja lo que ya trae el HTML.
+   */
+  function aplicarConfigAlHtml() {
+    document.querySelectorAll('[data-cfg-max]').forEach(function (el) {
+      var v = KGP.cfg(el.getAttribute('data-cfg-max'), null);
+      if (v != null) el.setAttribute('max', String(v));
+    });
+    document.querySelectorAll('[data-cfg-plantilla]').forEach(function (el) {
+      var completo = true;
+      var texto = el.getAttribute('data-cfg-plantilla').replace(/\{(\w+)\}/g, function (m, clave) {
+        var v = KGP.cfgTexto(clave, null);
+        if (v == null) completo = false;
+        return v == null ? m : v;
+      });
+      if (completo) el.textContent = texto;
+    });
+  }
+
   // ---------------- Init ----------------
 
   KGP.init = function () {
     KGP.setConn('connecting');
+    aplicarConfigAlHtml();
 
     document.querySelectorAll('.nav-item[data-nav]').forEach(function (el) {
       el.addEventListener('click', function () {

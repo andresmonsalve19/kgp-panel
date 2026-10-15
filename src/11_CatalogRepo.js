@@ -11,11 +11,11 @@
  */
 
 function cat_getTiposServicioSheet_() {
-  var ss = SpreadsheetApp.openById(CFG().CAT_SHEET_ID);
-  var sheet = ss.getSheetByName(CFG().TABS.TIPOS_SERVICIO);
+  var ss = SpreadsheetApp.openById(CFG_().CAT_SHEET_ID);
+  var sheet = ss.getSheetByName(CFG_().TABS.TIPOS_SERVICIO);
   if (!sheet) {
     var names = ss.getSheets().map(function (s) { return s.getName(); });
-    throw new AppError_('SCHEMA', 'No se encontró la hoja "' + CFG().TABS.TIPOS_SERVICIO + '" en el catálogo. Hojas disponibles: [' + names.join(', ') + ']');
+    throw new AppError_('SCHEMA', 'No se encontró la hoja "' + CFG_().TABS.TIPOS_SERVICIO + '" en el catálogo. Hojas disponibles: [' + names.join(', ') + ']');
   }
   return sheet;
 }
@@ -59,13 +59,6 @@ function cat_getCatalogoPares_() {
   return cat_readCatalogo_().pares;
 }
 
-/** Código UNSPSC de la misma fila que `tipo` en el catálogo (comparación normalizada). '' si no hay match. */
-function cat_getUnspscPorTipo_(tipo) {
-  var norm = normText_(tipo);
-  if (!norm) return '';
-  var match = cat_readCatalogo_().pares.filter(function (p) { return normText_(p.tipo) === norm; })[0];
-  return match ? match.codigoUnspsc : '';
-}
 
 /** true si `tipo` coincide (normalizado) con alguna entrada del catálogo. */
 function cat_isTipoValido_(tipo) {

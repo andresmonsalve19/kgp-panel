@@ -76,7 +76,7 @@ function clis_listGestion() {
   }).filter(function (c) { return c.idCliente; });
 
   var data = { clientes: clientes };
-  cachePutJson_(key, data, CFG().CACHE_TTL.CLIENTES_S);
+  cachePutJson_(key, data, CFG_().CACHE_TTL.CLIENTES_S);
   return ok_(data);
 }
 
@@ -109,67 +109,49 @@ function clis_bloqueoPorUso_(campo, id, queEs) {
   return fail_('CONFLICT', 'No se puede eliminar ' + queEs + ': ' + detalle + '.', { cotizaciones: usos.length });
 }
 
-/** Ejecuta fn() dentro del script lock con flush + bump si devuelve ok. Errores -> fail_. */
-function clis_conLock_(etapa, ids, fn) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(CFG().LIMITS.LOCK_MS)) {
-    return fail_('BUSY', 'El sistema está ocupado. Intenta de nuevo en unos segundos.');
-  }
-  try {
-    var res = fn();
-    if (res.ok) {
-      SpreadsheetApp.flush();
-      bumpDataVersion_();
-    }
-    return res;
-  } catch (e) {
-    var code = (e && e.name === 'AppError_' && e.code) ? e.code : 'INTERNAL';
-    if (['CONFLICT', 'NOT_FOUND', 'VALIDATION'].indexOf(code) === -1) logError_(etapa, null, ids, null, e);
-    return fail_(code, errMsg_(e));
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-/** Borra el cliente y sus contactos/establecimientos, solo si no tiene cotizaciones. */
+/**
+ * Borra el cliente y sus contactos/establecimientos, solo si no tiene cotizaciones.
+ * @param {string} idCliente
+ * @return {!Object} ok_({idCliente, contactosBorrados, establecimientosBorrados}) o fail_.
+ */
 function clis_deleteCliente(idCliente) {
   idCliente = String(idCliente || '').trim();
   if (!idCliente) return fail_('VALIDATION', 'Falta idCliente.');
-  return clis_conLock_('clis_deleteCliente', { idCliente: idCliente }, function () {
+  return tx_conLock_('clis_deleteCliente', function () {
     var match = repo_findRowByCol_(cli_table_(), 'ID CLIENTE', idCliente);
     if (!match) return fail_('NOT_FOUND', 'No existe el cliente ' + idCliente + '.');
     var bloqueo = clis_bloqueoPorUso_('idCliente', idCliente, 'el cliente');
     if (bloqueo) return bloqueo;
 
-    var cfg = CFG();
+    var cfg = CFG_();
     var filasCon = repo_findRowsByCol_(con_table_(), 'ID CLIENTE', [idCliente]).map(function (m) { return m.rowIndex; });
     var filasEst = repo_findRowsByCol_(est_table_(), 'ID CLIENTE', [idCliente]).map(function (m) { return m.rowIndex; });
     repo_deleteRows_(cfg.DB_SHEET_ID, cfg.TABS.CONTACTOS, filasCon);
     repo_deleteRows_(cfg.DB_SHEET_ID, cfg.TABS.ESTABLECIMIENTOS, filasEst);
     repo_deleteRows_(cfg.DB_SHEET_ID, cfg.TABS.CLIENTES, [match.rowIndex]);
     return ok_({ idCliente: idCliente, contactosBorrados: filasCon.length, establecimientosBorrados: filasEst.length });
-  });
+  }, { ids: { idCliente: idCliente } });
 }
 
 /** Borra un contacto, solo si ninguna cotización lo tiene como solicitante. */
 function clis_deleteContacto(idContacto) {
   idContacto = String(idContacto || '').trim();
   if (!idContacto) return fail_('VALIDATION', 'Falta idContacto.');
-  return clis_conLock_('clis_deleteContacto', { idContacto: idContacto }, function () {
+  return tx_conLock_('clis_deleteContacto', function () {
     var match = repo_findRowByCol_(con_table_(), 'ID CONTACTO', idContacto);
     if (!match) return fail_('NOT_FOUND', 'No existe el contacto ' + idContacto + '.');
     var bloqueo = clis_bloqueoPorUso_('idSolicitante', idContacto, 'el contacto');
     if (bloqueo) return bloqueo;
-    repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.CONTACTOS, [match.rowIndex]);
+    repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.CONTACTOS, [match.rowIndex]);
     return ok_({ idContacto: idContacto });
-  });
+  }, { ids: { idContacto: idContacto } });
 }
 
 /** Borra un establecimiento, solo si ninguna cotización lo usa; desasocia a su encargado. */
 function clis_deleteEstablecimiento(idEstablecimiento) {
   idEstablecimiento = String(idEstablecimiento || '').trim();
   if (!idEstablecimiento) return fail_('VALIDATION', 'Falta idEstablecimiento.');
-  return clis_conLock_('clis_deleteEstablecimiento', { idEstablecimiento: idEstablecimiento }, function () {
+  return tx_conLock_('clis_deleteEstablecimiento', function () {
     var match = repo_findRowByCol_(est_table_(), 'ID ESTABLECIMIENTO', idEstablecimiento);
     if (!match) return fail_('NOT_FOUND', 'No existe el establecimiento ' + idEstablecimiento + '.');
     var bloqueo = clis_bloqueoPorUso_('idEstablecimiento', idEstablecimiento, 'el establecimiento');
@@ -178,9 +160,9 @@ function clis_deleteEstablecimiento(idEstablecimiento) {
     repo_findRowsByCol_(con_table_(), 'ID ESTABLECIMIENTO', [idEstablecimiento]).forEach(function (m) {
       con_setEstablecimiento_(m.obj[normText_('ID CONTACTO')], '');
     });
-    repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.ESTABLECIMIENTOS, [match.rowIndex]);
+    repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.ESTABLECIMIENTOS, [match.rowIndex]);
     return ok_({ idEstablecimiento: idEstablecimiento });
-  });
+  }, { ids: { idEstablecimiento: idEstablecimiento } });
 }
 
 /** Asigna (o quita, con idContacto vacío) el contacto encargado de un establecimiento. */
@@ -188,7 +170,7 @@ function clis_setEncargado(idEstablecimiento, idContacto) {
   idEstablecimiento = String(idEstablecimiento || '').trim();
   idContacto = String(idContacto || '').trim();
   if (!idEstablecimiento) return fail_('VALIDATION', 'Falta idEstablecimiento.');
-  return clis_conLock_('clis_setEncargado', { idEstablecimiento: idEstablecimiento, idContacto: idContacto }, function () {
+  return tx_conLock_('clis_setEncargado', function () {
     var est = est_getEstablecimiento_(idEstablecimiento);
     if (!est) return fail_('NOT_FOUND', 'No existe el establecimiento ' + idEstablecimiento + '.');
     if (idContacto) {
@@ -203,5 +185,5 @@ function clis_setEncargado(idEstablecimiento, idContacto) {
     });
     if (idContacto) con_setEstablecimiento_(idContacto, idEstablecimiento);
     return ok_({ idEstablecimiento: idEstablecimiento, idContacto: idContacto });
-  });
+  }, { ids: { idEstablecimiento: idEstablecimiento, idContacto: idContacto } });
 }

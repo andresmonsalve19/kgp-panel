@@ -13,14 +13,15 @@
  */
 
 function ois_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.OIS);
-  repo_requireCols_(t.hmap, CFG().TABS.OIS, SCHEMA().OIS.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.OIS);
+  repo_requireCols_(t.hmap, CFG_().TABS.OIS, SCHEMA_().OIS.required);
   return t;
 }
 
+/** TAREAS_OIS leída (memo) y con sus columnas requeridas verificadas. */
 function tar_table_() {
-  var t = repo_readTable_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIS);
-  repo_requireCols_(t.hmap, CFG().TABS.TAREAS_OIS, SCHEMA().TAREAS_OIS.required);
+  var t = repo_readTable_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIS);
+  repo_requireCols_(t.hmap, CFG_().TABS.TAREAS_OIS, SCHEMA_().TAREAS_OIS.required);
   return t;
 }
 
@@ -51,7 +52,7 @@ function ois_rowToObj_(row) {
  * ignoran (repo_appendRows_).
  */
 function ois_create_(ctx) {
-  return repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.OIS, [{
+  return repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.OIS, [{
     'ID OIS': ctx.idOis,
     'ID COTIZACION': ctx.idCotizacion,
     'FECHA ELABORACION': ctx.fechaElaboracion,
@@ -102,7 +103,7 @@ function ois_update_(idOis, patch) {
   var full = {};
   for (var k in patch) full[k] = patch[k];
   full['ACTUALIZADO EN'] = new Date();
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.OIS, found.rowIndex, full);
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.OIS, found.rowIndex, full);
 }
 
 /**
@@ -116,13 +117,14 @@ function ois_updateDocInfo_(idOis, docUrl, docEstado, docFileId) {
   var patch = { 'DOC ESTADO': docEstado };
   if (docUrl !== undefined) patch['URL DOCUMENTO'] = docUrl || '';
   if (docFileId !== undefined) patch['DOC FILE ID'] = docFileId || '';
-  repo_updateCells_(CFG().DB_SHEET_ID, CFG().TABS.OIS, found.rowIndex, patch);
+  repo_updateCells_(CFG_().DB_SHEET_ID, CFG_().TABS.OIS, found.rowIndex, patch);
 }
 
 // ---------------------------------------------------------------------
 // TAREAS_OIS
 // ---------------------------------------------------------------------
 
+/** Fila cruda de TAREAS_OIS -> objeto de dominio (FK en idOis). */
 function tar_rowToObj_(row) {
   return {
     idTarea: row[normText_('ID TAREA')],
@@ -146,10 +148,6 @@ function tar_getRowsByOis_(idOis) {
     .map(function (m) { return { rowIndex: m.rowIndex, obj: tar_rowToObj_(m.obj) }; });
 }
 
-/** Solo los objetos de dominio de las tareas de una OIS, en orden. */
-function tar_getByOis_(idOis) {
-  return tar_getRowsByOis_(idOis).map(function (r) { return r.obj; });
-}
 
 /** Mapea una tarea ya validada al objeto de fila de TAREAS_OIS. */
 function tar_toRow_(idTarea, idOis, t) {
@@ -172,22 +170,22 @@ function tar_createMany_(idOis, tareas) {
   if (!tareas.length) return [];
   var ids = [];
   var rows = tareas.map(function (t) {
-    var id = id_new_('TAR');
+    var id = id_new_(CFG_().ID_PREFIJO_TAREA_OIS);
     ids.push(id);
     return tar_toRow_(id, idOis, t);
   });
-  repo_appendRows_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIS, rows);
+  repo_appendRows_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIS, rows);
   return ids;
 }
 
 /** Reescribe varias tareas existentes con una sola lectura de la hoja. updates: [{rowIndex, idTarea, tarea}]. */
 function tar_updateMany_(idOis, updates) {
-  repo_updateCellsMany_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIS, updates.map(function (u) {
+  repo_updateCellsMany_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIS, updates.map(function (u) {
     return { rowIndex: u.rowIndex, patch: tar_toRow_(u.idTarea, idOis, u.tarea) };
   }));
 }
 
 /** Borra físicamente filas de TAREAS_OIS (de abajo hacia arriba, ver repo_deleteRows_). */
 function tar_deleteRows_(rowIndexes) {
-  repo_deleteRows_(CFG().DB_SHEET_ID, CFG().TABS.TAREAS_OIS, rowIndexes);
+  repo_deleteRows_(CFG_().DB_SHEET_ID, CFG_().TABS.TAREAS_OIS, rowIndexes);
 }

@@ -11,16 +11,39 @@
  *      (si TEMPLATE_TAB_NAME detectado automáticamente no es el correcto,
  *      admin_setTemplateTabName('NombreReal') lo corrige)
  *   4. admin_dumpSample()           — opcional, ver 3 filas reales de cada hoja
+ *
+ * SEGURIDAD: google.script.run puede invocar cualquier función global que no
+ * termine en "_", y la web app está publicada para cualquiera con el enlace.
+ * Por eso TODA función admin_* empieza con admin_soloEditor_(): solo corre si
+ * quien la ejecuta es la misma cuenta con la que corre el script (el dueño,
+ * desde el editor). Desde el navegador de cualquier otra persona falla.
  */
 
 /**
- * Convierte la plantilla .xlsx (CFG().TEMPLATE_FILE_ID) a un Google Sheet
+ * Corta la ejecución si no la lanzó la cuenta dueña del script (ver el
+ * encabezado). En el editor, el usuario activo y el efectivo son el mismo; en
+ * la web app (executeAs USER_DEPLOYING) el activo es el visitante, o vacío.
+ * @throws {Error}
+ */
+function admin_soloEditor_() {
+  var activo = '';
+  var efectivo = '';
+  try { activo = Session.getActiveUser().getEmail() || ''; } catch (e) { activo = ''; }
+  try { efectivo = Session.getEffectiveUser().getEmail() || ''; } catch (e2) { efectivo = ''; }
+  if (!activo || !efectivo || activo.toLowerCase() !== efectivo.toLowerCase()) {
+    throw new Error('Las funciones admin_* solo se pueden ejecutar desde el editor de Apps Script, con la cuenta dueña del proyecto.');
+  }
+}
+
+/**
+ * Convierte la plantilla .xlsx (CFG_().TEMPLATE_FILE_ID) a un Google Sheet
  * nativo UNA SOLA VEZ, y guarda su ID en ScriptProperties (TEMPLATE_SHEET_ID)
- * para que CFG() lo recoja automáticamente en adelante. El .xlsx original
+ * para que CFG_() lo recoja automáticamente en adelante. El .xlsx original
  * no se toca. Si ya existe un TEMPLATE_SHEET_ID guardado, no vuelve a
  * convertir (evita duplicar el archivo si se ejecuta más de una vez).
  */
 function admin_convertTemplate() {
+  admin_soloEditor_();
   var props = PropertiesService.getScriptProperties();
   var existing = props.getProperty('TEMPLATE_SHEET_ID');
   if (existing) {
@@ -31,7 +54,7 @@ function admin_convertTemplate() {
     return { templateSheetId: existing, alreadyExisted: true, message: msgExist };
   }
 
-  var templateFileId = CFG().TEMPLATE_FILE_ID;
+  var templateFileId = CFG_().TEMPLATE_FILE_ID;
   var parentId = null;
   try {
     var templateFile = DriveApp.getFileById(templateFileId);
@@ -47,10 +70,11 @@ function admin_convertTemplate() {
   var converted = Drive.Files.copy(copyResource, templateFileId, { convert: true, supportsAllDrives: true });
 
   props.setProperty('TEMPLATE_SHEET_ID', converted.id);
+  cfg_invalidar_();
 
   var msg = 'Plantilla convertida a Google Sheet nativo.\n' +
     'Nuevo ID: ' + converted.id + '\n' +
-    'Guardado en ScriptProperties (TEMPLATE_SHEET_ID). CFG() lo usará automáticamente desde ahora.\n' +
+    'Guardado en ScriptProperties (TEMPLATE_SHEET_ID). CFG_() lo usará automáticamente desde ahora.\n' +
     'Siguiente paso: ejecuta admin_smokeTestTemplate() y compara el resultado visualmente con la plantilla original.';
   Logger.log(msg);
   return { templateSheetId: converted.id, alreadyExisted: false, message: msg };
@@ -60,11 +84,12 @@ function admin_convertTemplate() {
  * 🚦 Puerta de decisión del plan: genera un .xlsx de la plantilla SIN
  * escribir ningún dato de negocio, y lo guarda en la carpeta destino. Hay
  * que abrirlo y compararlo visualmente contra la plantilla original
- * (CFG().TEMPLATE_FILE_ID) antes de dar por buena la generación de
+ * (CFG_().TEMPLATE_FILE_ID) antes de dar por buena la generación de
  * documentos reales.
  */
 function admin_smokeTestTemplate() {
-  if (!CFG().TEMPLATE_SHEET_ID) {
+  admin_soloEditor_();
+  if (!CFG_().TEMPLATE_SHEET_ID) {
     var errMsg = 'TEMPLATE_SHEET_ID vacío. Ejecuta admin_convertTemplate() primero.';
     Logger.log(errMsg);
     throw new Error(errMsg);
@@ -74,17 +99,17 @@ function admin_smokeTestTemplate() {
   try {
     var copy = Drive.Files.copy(
       { title: '__TMP_SMOKETEST__' + Date.now(), mimeType: MimeType.GOOGLE_SHEETS },
-      CFG().TEMPLATE_SHEET_ID,
+      CFG_().TEMPLATE_SHEET_ID,
       { convert: true, supportsAllDrives: true }
     );
     tmpId = copy.id;
 
-    var name = '__SMOKETEST__' + Utilities.formatDate(new Date(), CFG().TZ, 'yyyyMMdd_HHmmss') + '.xlsx';
+    var name = '__SMOKETEST__' + Utilities.formatDate(new Date(), CFG_().TZ, 'yyyyMMdd_HHmmss') + '.xlsx';
     var blob = doc_exportXlsx_(tmpId, name);
-    var saved = Drive.Files.insert({ title: name, parents: [{ id: CFG().OUT_FOLDER_ID }] }, blob, { supportsAllDrives: true });
+    var saved = Drive.Files.insert({ title: name, parents: [{ id: CFG_().OUT_FOLDER_ID }] }, blob, { supportsAllDrives: true });
 
     var msg = 'Smoke test generado: ' + saved.alternateLink + '\n' +
-      'Ábrelo y compáralo visualmente con la plantilla original (Drive file ID ' + CFG().TEMPLATE_FILE_ID + ').\n' +
+      'Ábrelo y compáralo visualmente con la plantilla original (Drive file ID ' + CFG_().TEMPLATE_FILE_ID + ').\n' +
       'Si el formato se ve degradado (bordes, validaciones de datos, imágenes), avisa antes de continuar.';
     Logger.log(msg);
     return { url: saved.alternateLink, fileId: saved.id, message: msg };
@@ -97,12 +122,13 @@ function admin_smokeTestTemplate() {
 
 /**
  * Vuelca a Logger.log los encabezados REALES de las 5 hojas de la BD, del
- * catálogo, y de la plantilla, comparándolos contra SCHEMA(). Es el paso
+ * catálogo, y de la plantilla, comparándolos contra SCHEMA_(). Es el paso
  * que resuelve todas las incógnitas de esquema pendientes de la Fase 2.
  */
 function admin_health() {
-  var cfg = CFG();
-  var schema = SCHEMA();
+  admin_soloEditor_();
+  var cfg = CFG_();
+  var schema = SCHEMA_();
   var report = { sheets: [], catalogo: null, plantilla: null };
 
   var checks = [
@@ -112,6 +138,7 @@ function admin_health() {
     { tabKey: 'CONTACTOS', schemaKey: 'CONTACTOS_CLIENTES' },
     { tabKey: 'ESTABLECIMIENTOS', schemaKey: 'ESTABLECIMIENTOS_CLIENTES' },
     { tabKey: 'PERSONAL', schemaKey: 'PERSONAL_KGP' },
+    { tabKey: 'PERSONAL_TERCEROS', schemaKey: 'PERSONAL_TERCEROS' },
     { tabKey: 'OIS', schemaKey: 'OIS' },
     { tabKey: 'TAREAS_OIS', schemaKey: 'TAREAS_OIS' },
     { tabKey: 'OIP', schemaKey: 'OIP' },
@@ -171,6 +198,7 @@ function admin_health() {
   return report;
 }
 
+/** Texto legible del informe de admin_health para Logger.log. */
 function admin_formatHealthReport_(report) {
   var lines = ['=== admin_health() ==='];
   report.sheets.forEach(function (s) {
@@ -196,7 +224,9 @@ function admin_formatHealthReport_(report) {
  * correcta (ver report.plantilla.hojas de admin_health()).
  */
 function admin_setTemplateTabName(nombreHoja) {
+  admin_soloEditor_();
   PropertiesService.getScriptProperties().setProperty('TEMPLATE_TAB_NAME', nombreHoja);
+  cfg_invalidar_();
   var msg = 'TEMPLATE_TAB_NAME fijado a: "' + nombreHoja + '"';
   Logger.log(msg);
   return { ok: true, nombreHoja: nombreHoja, message: msg };
@@ -204,11 +234,13 @@ function admin_setTemplateTabName(nombreHoja) {
 
 /**
  * Corrige el nombre de la pestaña de la OIS dentro de la plantilla
- * (CFG().TEMPLATE_TAB_OIS, por defecto "OIS V-4") si en el archivo real se
+ * (CFG_().TEMPLATE_TAB_OIS, por defecto "OIS V-4") si en el archivo real se
  * llama distinto (ver report.plantilla.hojas de admin_health()).
  */
 function admin_setOisTabName(nombreHoja) {
+  admin_soloEditor_();
   PropertiesService.getScriptProperties().setProperty('TEMPLATE_TAB_OIS', nombreHoja);
+  cfg_invalidar_();
   var msg = 'TEMPLATE_TAB_OIS fijado a: "' + nombreHoja + '"';
   Logger.log(msg);
   return { ok: true, nombreHoja: nombreHoja, message: msg };
@@ -216,7 +248,9 @@ function admin_setOisTabName(nombreHoja) {
 
 /** Igual que admin_setOisTabName pero para la pestaña de la OIP ("OIP V-4"). */
 function admin_setOipTabName(nombreHoja) {
+  admin_soloEditor_();
   PropertiesService.getScriptProperties().setProperty('TEMPLATE_TAB_OIP', nombreHoja);
+  cfg_invalidar_();
   var msg = 'TEMPLATE_TAB_OIP fijado a: "' + nombreHoja + '"';
   Logger.log(msg);
   return { ok: true, nombreHoja: nombreHoja, message: msg };
@@ -231,6 +265,7 @@ function admin_setOipTabName(nombreHoja) {
  * volverla a correr no deja dos recordatorios enviando el correo dos veces.
  */
 function admin_installOipFacturacionTrigger() {
+  admin_soloEditor_();
   var fn = 'oipn_recordatorioFacturacion';
   var borrados = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -240,14 +275,15 @@ function admin_installOipFacturacionTrigger() {
     }
   });
 
+  var cfg = CFG_();
   ScriptApp.newTrigger(fn)
     .timeBased()
-    .onMonthDay(1)
-    .atHour(7)
-    .inTimezone(CFG().TZ)
+    .onMonthDay(cfg.OIP_NOTIF_DIA)
+    .atHour(cfg.OIP_NOTIF_HORA)
+    .inTimezone(cfg.TZ)
     .create();
 
-  var msg = 'Disparador mensual instalado para ' + fn + ' (día 1, ~7:00 ' + CFG().TZ + ').' +
+  var msg = 'Disparador mensual instalado para ' + fn + ' (día ' + cfg.OIP_NOTIF_DIA + ', ~' + cfg.OIP_NOTIF_HORA + ':00 ' + cfg.TZ + ').' +
     (borrados ? ' Se eliminaron ' + borrados + ' disparador(es) anterior(es) de la misma función.' : '');
   Logger.log(msg);
   return { ok: true, borrados: borrados, message: msg };
@@ -255,6 +291,7 @@ function admin_installOipFacturacionTrigger() {
 
 /** Lista los disparadores del proyecto (para confirmar que el recordatorio quedó instalado una sola vez). */
 function admin_listTriggers() {
+  admin_soloEditor_();
   var list = ScriptApp.getProjectTriggers().map(function (t) {
     return { funcion: t.getHandlerFunction(), tipo: String(t.getEventType()), fuente: String(t.getTriggerSource()) };
   });
@@ -269,6 +306,7 @@ function admin_listTriggers() {
  * OIP_FACTURACION que falten y SÍ envía el correo de verdad.
  */
 function admin_probarRecordatorioOip() {
+  admin_soloEditor_();
   PropertiesService.getScriptProperties().deleteProperty('OIP_NOTIF_LAST');
   var res = oipn_recordatorioFacturacion();
   Logger.log(JSON.stringify(res, null, 2));
@@ -282,12 +320,13 @@ function admin_probarRecordatorioOip() {
  * escribe la BD. Para revisar cómo se ven después de cambiar la plantilla o
  * los textos. Ejecutar a mano desde el editor, p. ej.
  * admin_probarCorreos('alguien@dominio.com'). Sin argumento usa
- * CFG().OIP_NOTIF_EMAIL. Si agregas un correo nuevo, agrega sus variables de
+ * CFG_().OIP_NOTIF_EMAIL. Si agregas un correo nuevo, agrega sus variables de
  * muestra en admin_muestrasCorreo_.
  */
 function admin_probarCorreos(destino) {
+  admin_soloEditor_();
   cfgs_refresh_(); // textos recién editados en la hoja, sin esperar a recargar la página
-  destino = destino || CFG().OIP_NOTIF_EMAIL;
+  destino = destino || CFG_().OIP_NOTIF_EMAIL;
   var muestras = admin_muestrasCorreo_();
   var claves = Object.keys(mail_textosDefault_());
   claves.forEach(function (clave) {
@@ -307,7 +346,7 @@ function admin_muestrasCorreo_() {
   var url = 'https://docs.google.com/spreadsheets/';
   return {
     COTIZACION_CREADA: {
-      vars: { nombre: 'Nombre Apellido', codigo: 'CTZ-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', estado: CFG().ESTADO_INICIAL, fechaElaboracion: hoy },
+      vars: { nombre: 'Nombre Apellido', codigo: 'CTZ-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', estado: CFG_().ESTADO_INICIAL, fechaElaboracion: hoy },
       opciones: { url: url }
     },
     COTIZACION_APROBADA: {
@@ -328,11 +367,11 @@ function admin_muestrasCorreo_() {
       opciones: { url: url }
     },
     OIP_RECORDATORIO: {
-      vars: { mes: 'septiembre de 2026', total: 2, plural: 's', filasCreadas: 1, estadoPendiente: CFG().FACT_ESTADO_PENDIENTE },
+      vars: { mes: 'septiembre de 2026', total: 2, plural: 's', filasCreadas: 1, estadoPendiente: CFG_().FACT_ESTADO_PENDIENTE },
       opciones: {
         items: [
-          { codigo: 'OIP-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', estado: CFG().FACT_ESTADO_PENDIENTE, nueva: 'si' },
-          { codigo: 'OIP-KGP-002-26', cliente: 'OTRO CLIENTE LTDA', estado: CFG().FACT_ESTADO_PENDIENTE, nueva: '' }
+          { codigo: 'OIP-KGP-001-26', cliente: 'CLIENTE DE PRUEBA S.A.S.', estado: CFG_().FACT_ESTADO_PENDIENTE, nueva: 'si' },
+          { codigo: 'OIP-KGP-002-26', cliente: 'OTRO CLIENTE LTDA', estado: CFG_().FACT_ESTADO_PENDIENTE, nueva: '' }
         ]
       }
     }
@@ -341,7 +380,7 @@ function admin_muestrasCorreo_() {
 
 /**
  * Crea (o completa) las hojas CONFIG_* en el spreadsheet de catálogo
- * (CFG().CAT_SHEET_ID) con todos los parámetros de la app en forma de tabla:
+ * (CFG_().CAT_SHEET_ID) con todos los parámetros de la app en forma de tabla:
  * IDs, nombres de hojas, parámetros generales, correo, textos de cada correo
  * y celdas de la plantilla, más CONFIG_LEEME con las instrucciones.
  *
@@ -351,6 +390,7 @@ function admin_muestrasCorreo_() {
  * por defecto, enlace). Ver 06_ConfigSheet.js / CLAUDE.md §15.
  */
 function admin_crearHojasConfig() {
+  admin_soloEditor_();
   var resumen = cfgs_crearHojas_();
   cfgs_refresh_();
   var msg = 'Hojas de configuración listas en https://docs.google.com/spreadsheets/d/' + cfgs_sheetId_() + '/edit\n' + resumen.join('\n');
@@ -364,6 +404,7 @@ function admin_crearHojasConfig() {
  * está usando la app. No escribe nada.
  */
 function admin_verConfig() {
+  admin_soloEditor_();
   var r = cfgs_verificar_();
   Logger.log('Configuración leída: ' + r.leidoEn + ' | claves en la hoja: ' + r.clavesEnHoja + ' | correos en la hoja: ' + r.correosEnHoja);
   Logger.log(r.avisos.length ? 'AVISOS:\n- ' + r.avisos.join('\n- ') : 'Sin avisos: todo lo de la hoja se aplicó.');
@@ -373,9 +414,10 @@ function admin_verConfig() {
 
 /** Vuelca 3 filas reales de cada hoja de la BD, para verificar que el mapeo de columnas interpreta bien los datos. */
 function admin_dumpSample() {
-  var cfg = CFG();
+  admin_soloEditor_();
+  var cfg = CFG_();
   var out = {};
-  ['COTIZACIONES', 'SERVICIOS', 'CLIENTES', 'CONTACTOS', 'ESTABLECIMIENTOS', 'PERSONAL'].forEach(function (key) {
+  ['COTIZACIONES', 'SERVICIOS', 'CLIENTES', 'CONTACTOS', 'ESTABLECIMIENTOS', 'PERSONAL', 'PERSONAL_TERCEROS'].forEach(function (key) {
     var tabName = cfg.TABS[key];
     try {
       var table = repo_readTable_(cfg.DB_SHEET_ID, tabName);
@@ -390,6 +432,7 @@ function admin_dumpSample() {
 
 /** Borra archivos temporales __TMP_* de más de 24h que hayan quedado huérfanos por un fallo de script (timeout duro, etc). */
 function admin_cleanTempFiles() {
+  admin_soloEditor_();
   var cutoff = Date.now() - 24 * 3600 * 1000;
   var result = Drive.Files.list({
     q: "title contains '__TMP_' and trashed = false",
@@ -417,11 +460,16 @@ function admin_cleanTempFiles() {
   return { cleaned: cleaned, skipped: skipped };
 }
 
-/** Invalida todas las cachés (incrementa dataVersion + limpia el catálogo, que no depende de dataVersion). */
+/**
+ * Invalida todas las cachés: incrementa dataVersion (listados, dashboard,
+ * empleados...) y relee las hojas CONFIG_* (la copia de la configuración no
+ * depende de dataVersion). El catálogo TIPOS DE SERVICIOS nunca se cachea.
+ */
 function admin_clearCaches() {
+  admin_soloEditor_();
   bumpDataVersion_();
-  CacheService.getScriptCache().remove('cat:tipos:v1');
-  var msg = 'Cachés invalidadas: dataVersion incrementada y catálogo de tipos limpiado.';
+  cfgs_refresh_();
+  var msg = 'Cachés invalidadas: dataVersion incrementada y configuración releída de las hojas CONFIG_*.';
   Logger.log(msg);
   return { ok: true, message: msg };
 }
