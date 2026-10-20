@@ -294,15 +294,15 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
     }
   }
 
-  // Decidir (aprobar o rechazar) exige tarifas, TIEMPO DE ENTREGA y ASESOR.
+  // Aprobar exige tarifas y TIEMPO DE ENTREGA (el ASESOR es siempre opcional). Rechazar NO: se puede
+  // rechazar con el formulario tal como esté (requisito del usuario).
   var decide = !!clean.estado && clean.estado !== estadoActual;
-  if (decide) {
+  if (decide && clean.estado === cfg.ESTADO_APROBADA) {
     var faltantes = [];
     if (clean.servicios.some(function (s) { return s.tarifa === '' || s.tarifa == null; })) faltantes.push('las tarifas de todos los servicios');
     if (!clean.tiempoEntrega) faltantes.push('el tiempo de entrega');
-    if (!clean.asesorComercial) faltantes.push('el asesor comercial');
     if (faltantes.length) {
-      return fail_('VALIDATION', 'Antes de aprobar o rechazar la cotización debes diligenciar: ' + faltantes.join(', ') + '.');
+      return fail_('VALIDATION', 'Antes de aprobar la cotización debes diligenciar: ' + faltantes.join(', ') + '.');
     }
   }
 

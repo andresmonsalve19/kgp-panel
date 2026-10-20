@@ -150,7 +150,11 @@ catálogo. Antes de escribir un modal o un listado nuevo, revisa si ya existe:
   `qs_updateQuotation` rechaza (CONFLICT) cualquier cambio si la cotización
   ya no está en revisión. Filas antiguas con "Aprobado"/"Rechazado"
   (masculino) se leen como sus equivalentes vía `qs_normEstado_`.
-  El Dashboard lo muestra como una insignia de solo lectura (misma
+  **Solo APROBAR exige** tarifas de todos los servicios y tiempo de entrega
+  (el asesor comercial es SIEMPRE opcional, con botón "+ Agregar empleado" que
+  usa `KGP.entityModal` tipo `empleado`) (`qs_applyQuotationUpdate_` y `buildPayload` de
+  `JsGestion`); **rechazar no pide nada de eso** (requisito del usuario, oct.
+  2026). El Dashboard lo muestra como una insignia de solo lectura (misma
   `estadoBadgeClass` duplicada a propósito en `JsDashboard.js.html` y
   `JsGestion.js.html` — son ~4 líneas, no vale la pena compartirlas). No
   existe `api_updateEstado` ni `qs_updateEstado`: se eliminaron por quedar

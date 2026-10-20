@@ -638,6 +638,23 @@ window.KGP = window.KGP || {};
     });
   }
 
+  /**
+   * Alta rápida de un empleado interno desde "Asesor comercial" (si la BD no
+   * tiene empleados no habría a quién elegir). Queda seleccionado.
+   */
+  function crearAsesorModal(datos) {
+    return KGP.apiCall('api_createEmpleado', [datos]).then(function (creado) {
+      KGP.toast('Empleado "' + creado.nombre + '" guardado.', 'success');
+      KGP.ui.addOptionAndSelect(document.getElementById('ge-asesor-select'), creado.idEmpleado,
+        creado.nombre + (creado.cargo ? ' — ' + creado.cargo : ''));
+      KGP.catalog.load(true).catch(function () { /* no crítico: se reintenta al recargar */ });
+      if (KGP.tareas && KGP.tareas.markStale) KGP.tareas.markStale();
+    }).catch(function (err) {
+      KGP.toast('No se pudo guardar el empleado: ' + KGP.friendlyError(err), 'error');
+      throw err;
+    });
+  }
+
   function editarEstablecimientoModal(idEstablecimiento, datos) {
     return KGP.apiCall('api_updateEstablecimiento', [idEstablecimiento, datos]).then(function () {
       KGP.toast('Establecimiento actualizado.', 'success');
@@ -852,7 +869,7 @@ window.KGP = window.KGP || {};
     ['ge-cliente-select', 'ge-solicitante-select', 'ge-establecimiento-select', 'ge-encargado-select', 'ge-asesor-select'].forEach(function (id) {
       document.getElementById(id).disabled = locked;
     });
-    ['ge-cliente-nuevo-btn', 'ge-solicitante-nuevo-btn', 'ge-establecimiento-nuevo-btn', 'ge-encargado-nuevo-btn'].forEach(function (id) {
+    ['ge-cliente-nuevo-btn', 'ge-solicitante-nuevo-btn', 'ge-establecimiento-nuevo-btn', 'ge-encargado-nuevo-btn', 'ge-asesor-nuevo-btn'].forEach(function (id) {
       document.getElementById(id).hidden = locked;
     });
     EDIT_BTN_PAIRS.forEach(function (pair) {
@@ -954,17 +971,16 @@ window.KGP = window.KGP || {};
       KGP.toast('Agrega al menos 1 servicio.', 'error');
       return null;
     }
-    // Decidir la cotización (aprobar/rechazar) exige tarifas en todos los
-    // servicios, tiempo de entrega y asesor comercial. Mismo chequeo que
+    // Aprobar la cotización exige tarifas en todos los servicios y tiempo de
+    // entrega (el asesor comercial es siempre opcional); rechazarla no. Mismo chequeo que
     // qs_applyQuotationUpdate_ (el servidor es quien manda).
-    if (estado) {
+    if (estado === ESTADO_APROBADA) {
       var faltantes = [];
       var sinTarifa = servicios.some(function (s) { return s.tarifa === '' || s.tarifa == null; });
       if (sinTarifa) faltantes.push('las tarifas de todos los servicios');
       if (!document.getElementById('ge-tiempo-entrega').value.trim()) { markInvalid('tiempoEntrega'); faltantes.push('el tiempo de entrega'); }
-      if (!document.getElementById('ge-asesor-select').value) { markInvalid('asesorComercial'); faltantes.push('el asesor comercial'); }
       if (faltantes.length) {
-        KGP.toast('Antes de aprobar o rechazar la cotización debes diligenciar: ' + faltantes.join(', ') + '.', 'error', 8000);
+        KGP.toast('Antes de aprobar la cotización debes diligenciar: ' + faltantes.join(', ') + '.', 'error', 8000);
         showGarantiaConfirm(null);
         return null;
       }
@@ -1309,6 +1325,10 @@ window.KGP = window.KGP || {};
       var c = findContacto(id);
       if (!c) return;
       KGP.entityModal.open({ type: 'contacto', mode: 'edit', target: 'encargado', editId: id, initial: c, onSave: function (datos) { return editarContactoModal(id, datos); } });
+    });
+
+    document.getElementById('ge-asesor-nuevo-btn').addEventListener('click', function () {
+      KGP.entityModal.open({ type: 'empleado', mode: 'create', title: 'Agregar empleado', onSave: crearAsesorModal });
     });
 
     document.getElementById('ge-establecimiento-nuevo-btn').addEventListener('click', function () {
