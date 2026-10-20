@@ -22,7 +22,7 @@ window.KGP = window.KGP || {};
 (function (KGP) {
   'use strict';
 
-  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10);  // = CFG_().LIMITS.MAX_SERVICIOS (hoja CONFIG_GENERAL)
+  var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10);  // = CFG_().LIMITS.MAX_SERVICIOS (00_Config.js)
   var PLAZO_DEFAULT = KGP.cfg('PLAZO_DEFAULT', 15);  // = CFG_().COTIZACION_PLAZO_DEFAULT
 
   var data = {
@@ -495,7 +495,6 @@ window.KGP = window.KGP || {};
     if (!descripcion.trim()) { markInvalid('descripcion'); hasError = true; }
     if (!clienteSel) { markInvalid('cliente'); hasError = true; }
     if (!solicitanteSel) { markInvalid('solicitante'); hasError = true; }
-    if (!establecimientoSel) { markInvalid('establecimiento'); hasError = true; }
 
     var servicios = collectServicios();
     if (!servicios.length) { KGP.toast('Agrega al menos 1 servicio.', 'error'); hasError = true; }
@@ -516,14 +515,24 @@ window.KGP = window.KGP || {};
       estado: estado,
       cliente: { modo: 'existente', idCliente: clienteSel },
       solicitante: { modo: 'existente', idContacto: solicitanteSel },
-      establecimiento: { modo: 'existente', idEstablecimiento: establecimientoSel },
+      // Opcional: sin establecimiento la cotización se crea sin él (celdas vacías en el documento).
+      establecimiento: establecimientoSel ? { modo: 'existente', idEstablecimiento: establecimientoSel } : null,
       servicios: servicios
     };
 
-    runCreateFlow(payload);
+    // Antes de crear: ¿quién más recibe copia del correo "cotización creada"?
+    // Cancelar = no se crea nada.
+    KGP.mailCc.pedir({
+      titulo: 'Crear cotización',
+      descripcion: 'Al crearla se enviará un correo con el enlace al documento a quien la crea. Elige quién más recibe una copia.',
+      para: 'quien crea la cotización',
+      confirmar: 'Crear cotización'
+    }).then(function (cc) {
+      if (cc) runCreateFlow(payload, cc);
+    });
   }
 
-  function runCreateFlow(payload) {
+  function runCreateFlow(payload, cc) {
     setSubmitBusy(true);
 
     KGP.apiCall('api_createQuotation', [payload]).then(function (created) {
@@ -539,7 +548,7 @@ window.KGP = window.KGP || {};
       KGP.toast('Cotización ' + created.codigo + ' guardada.', 'success');
       showResultScreen(created);
       showDocStatus('Generando documento…', 'busy');
-      generateDoc(created.idCotizacion, payload.requestId);
+      generateDoc(created.idCotizacion, payload.requestId, cc);
     }).catch(function (err) {
       handleCreateError(err);
     }).finally(function () {
@@ -547,14 +556,14 @@ window.KGP = window.KGP || {};
     });
   }
 
-  function generateDoc(idCotizacion, requestId) {
-    KGP.apiCall('api_generateDocument', [idCotizacion, requestId]).then(function (doc) {
+  function generateDoc(idCotizacion, requestId, cc) {
+    KGP.apiCall('api_generateDocument', [idCotizacion, requestId, cc || []]).then(function (doc) {
       showDocStatus('Documento generado.', 'success', doc.docUrl);
       KGP.toast('Documento generado correctamente.', 'success');
     }).catch(function (docErr) {
       showDocStatus('La cotización se guardó, pero el documento falló: ' + KGP.friendlyError(docErr), 'error', null, function () {
         showDocStatus('Reintentando generación del documento…', 'busy');
-        generateDoc(idCotizacion, requestId);
+        generateDoc(idCotizacion, requestId, cc);
       });
     });
   }
@@ -585,7 +594,7 @@ window.KGP = window.KGP || {};
 
     var clienteNombre = (data.clienteDetalle && data.clienteDetalle.cliente) ? data.clienteDetalle.cliente.razonSocial : '';
     var estSel = document.getElementById('cz-establecimiento-select');
-    var estNombre = (estSel.selectedIndex >= 0 && estSel.options[estSel.selectedIndex]) ? estSel.options[estSel.selectedIndex].textContent : '';
+    var estNombre = (estSel.value && estSel.selectedIndex >= 0 && estSel.options[estSel.selectedIndex]) ? estSel.options[estSel.selectedIndex].textContent : ''; // sin establecimiento (opcional) no se muestra el placeholder
     document.getElementById('cz-resultado-detalle').textContent = [clienteNombre, estNombre].filter(Boolean).join(' — ');
 
     document.getElementById('cz-resultado-doc').innerHTML = '';

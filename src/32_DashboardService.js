@@ -441,7 +441,7 @@ function ds_buildOrdenesSnapshot_(token, hoy) {
 
   var cotPorId = ord_indiceCotizaciones_();
   var clientePorId = ord_indiceClientes_();
-  // Tareas "por vencer": entrega dentro de DIAS_POR_VENCER_TAREAS (hoja CONFIG_GENERAL).
+  // Tareas "por vencer": entrega dentro de DIAS_POR_VENCER_TAREAS (00_Config.js).
   var semana = toISODate_(addDays_(parseISODate_(hoy), cfg.DIAS_POR_VENCER_TAREAS));
 
   function construir(spec, factPorOrden) {

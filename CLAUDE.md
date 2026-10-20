@@ -337,20 +337,22 @@ abre la vista, sin sacrificar frescura:
 - En la ruta de error NUNCA se borran `URL DOCUMENTO` ni `DOC FILE ID`
   (`qr_updateDocInfo_` con `undefined` = no tocar).
 
-## 9. Orden del menú lateral — Dashboard siempre de último
+## 9. Orden del menú lateral — Dashboard y luego Configuración, al final
 
 - Orden fijo, requisito explícito del usuario: **Crear cotización → Gestionar
   cotización → Gestionar OIS → Gestionar OIP → Gestionar tareas → Gestión de
-  clientes → Gestión de empleados → Dashboard**. Dashboard va siempre en la última posición.
+  clientes → Gestión de empleados → Dashboard → Configuración**.
+  Configuración va siempre en la última posición (pedido del usuario al
+  crearla) y Dashboard justo antes.
 - Los `.nav-item` viven en `ui/Sidebar.html` (`data-nav="cotizacion"`,
-  `"gestion"`, `"ois"`, `"oip"`, `"tareas"`, `"clientes"`, `"empleados"`, `"dashboard"`, en
-  ese orden) — el
-  orden visual es simplemente el orden en que aparecen esos
-  `<div class="nav-item">` en el HTML, no hay lógica de JS que los reordene.
+  `"gestion"`, `"ois"`, `"oip"`, `"tareas"`, `"clientes"`, `"empleados"`,
+  `"dashboard"`, `"config"`, en ese orden) — el orden visual es simplemente el
+  orden en que aparecen esos `<div class="nav-item">` en el HTML, no hay
+  lógica de JS que los reordene.
 - **Si se agrega una vista nueva**, su `nav-item` va **antes** del de
-  `data-nav="dashboard"` (nunca después) — Dashboard se queda de último
-  siempre. No hace falta tocar `KGP.nav` en `ui/JsCore.js.html` para esto:
-  solo reordena el HTML de `ui/Sidebar.html`.
+  `data-nav="dashboard"` — Dashboard y Configuración se quedan de últimos.
+  Una vista nueva sí necesita su línea `onEnter` en `KGP.nav`
+  (`ui/JsCore.js.html`), pero el orden sale solo del HTML de `ui/Sidebar.html`.
 
 ## 10. OIS (orden interna de servicio)
 
@@ -519,10 +521,14 @@ simetría con la OIS:
   en otro archivo. **Un correo nuevo** = (1) una clave nueva en
   `mail_textosDefault_` (04_MailTemplate.js) con ASUNTO/PREHEADER/ETIQUETA/
   TITULO/SALUDO/PARRAFOS/BOTON/DESTACADOS y sus VARIABLES documentadas;
+  más `NOMBRE` (para la vista Configuración) y, si tiene destinatario fijo,
+  `DESTINO_CFG` (clave de `CFG_()` con sus correos);
   (2) enviarlo con `mail_enviar_(clave, destino, vars, {url, items})`;
   (3) sus variables de muestra en `admin_muestrasCorreo_` (51_Admin.js);
-  (4) volver a ejecutar `admin_crearHojasConfig()` para que aparezca su fila
-  en `CONFIG_CORREO_TEXTOS`. Nunca escribas el texto de un correo dentro del
+  (4) nada más: su fila en `CONFIG_CORREOS` se agrega sola la próxima vez que
+  se abra la vista Configuración (o con `admin_crearHojasConfig()`), y desde
+  ahí se editan su asunto, cuerpo, destinatarios fijos y "copia siempre a"
+  (§15). Nunca escribas el texto de un correo dentro del
   código que lo envía. Si un correo pide algo que la plantilla no tiene, se
   reutilizan sus bloques (p. ej. una lista de datos = varios `destacados`),
   no se inventa otro diseño.
@@ -552,6 +558,30 @@ simetría con la OIS:
      `tg_saveTarea` (solo altas, editar no avisa) y desde las tareas nuevas
      (sin ID) de `ois_updateOis`/`oip_updateOip`. Título = TAREA,
      descripción = OBSERVACION (no hay otra columna de descripción).
+  4. **OIS finalizada** → a contabilidad (`CFG_().OIS_FINALIZADA_EMAIL`, clave
+     `OIS_FINALIZADA`): "ya está lista para facturar". El servidor NO la envía
+     al escribir: la escritura que deja la OIS Finalizada (`ord_actualizar_`,
+     `tg_saveTarea`/`tg_setTareaEstado`/`tg_deleteTarea`) devuelve
+     `ordenFinalizada: true` solo en la transición, y el cliente llama
+     `KGP.mailCc.avisarOisFinalizada` → `api_avisarOisFinalizada` →
+     `ntf_oisFinalizada_` (una sola vez por OIS, marca `NTF_FIN_OIS_<id>`). Solo
+     OIS (`avisaFinalizada` del spec), no OIP.
+- **Copias (CC) — requisito permanente:** toda acción de usuario que dispare un
+  correo debe abrir antes el selector `KGP.mailCc.pedir({...})`
+  (`ui/JsCore.js.html`, HTML `#cc-modal-overlay` en `ui/Index.html`): personas
+  de la BD con correo (internos + terceros, de `KGP.catalog`) y correos
+  escritos a mano. Devuelve `string[]` (puede ir vacío) o `null` si se cancela
+  (entonces no se hace la acción). El cliente manda `cc` en la llamada
+  (`api_generateDocument`/`api_generate*Document` 3.er argumento,
+  `payload.cc` en `api_updateQuotation`/`api_saveTarea`/`api_update*`) y el
+  servidor lo pasa a `mail_enviar_(..., {cc})`; `mail_normalizarCc_` depura
+  (válidos, sin repetidos, tope `LIMITS.MAX_CC`) y `mail_send_` no repite a
+  quien ya es destinatario. Las copias van ADEMÁS del destinatario de siempre
+  y el historial las anota en `TO` como `(CC: ...)`. Si el correo queda
+  pendiente (documento fallido) las copias se guardan dentro de la marca
+  `NTF_PEND_*`. Un correo nuevo que salga de una acción del usuario debe
+  seguir este mismo patrón; los automáticos sin usuario (recordatorio OIP) no
+  llevan selector.
 - "Creador" = `CREADO POR` de la cotización (correo del usuario activo) o,
   si está vacío, el CORREO del empleado `ELABORADO POR`. Con
   `executeAs: USER_DEPLOYING`, `getActiveUser()` puede venir vacío para
@@ -575,63 +605,70 @@ simetría con la OIS:
 - Cuota de `MailApp`: 100 destinatarios/día en cuentas Gmail, 1.500 en
   Workspace. `mail_send_` falla con mensaje claro si se agota.
 
-## 15. Configuración editable desde Google Sheets (requisito permanente del usuario)
+## 15. Configuración — vista "Configuración" (requisito permanente del usuario)
 
-- **REGLA PERMANENTE: nunca más un valor quemado en el código.** Todo dato o
-  parámetro nuevo (IDs, nombres de hojas, correos, textos de correo, límites,
-  plazos, prefijos, etiquetas de opciones, umbrales...) va a `CFG_()` /
-  `CELLMAP_()` / `mail_textosDefault_()` como valor por defecto, se documenta
-  en `cfgs_catalogo_()` para que aparezca en las hojas `CONFIG_*`, y el
-  cliente lo lee con `KGP.cfg` / `KGP.cfgTexto`. Única excepción: valores que
-  son DATOS guardados en filas (estados, `TIPO_RESPONSABLE_*`): viven en
-  `CFG_()` pero no son editables desde la hoja (cambiarlos dejaría huérfanas las
-  filas existentes); sus ETIQUETAS sí son editables.
-
-- **Todo lo parametrizable vive en hojas `CONFIG_*`** del spreadsheet de
-  catálogo (`cfgs_sheetId_()` en `06_ConfigSheet.js` = `CFG_().CAT_SHEET_ID`,
-  el mismo de `TIPOS DE SERVICIOS`), en forma de tabla y con las mismas
-  columnas base para que se lean igual: `GRUPO | CLAVE | VALOR | VALOR POR
-  DEFECTO | DESCRIPCION` (+ columnas de ayuda: `NOMBRE`, `TIPO`, `ENLACE`,
-  `HOJA DE PLANTILLA`). Hojas: `CONFIG_LEEME` (instrucciones),
-  `CONFIG_IDS` (spreadsheets/carpetas/archivos, con enlace), `CONFIG_HOJAS`
-  (nombres de pestañas), `CONFIG_GENERAL` (plazos, IVA, límites, días "por
-  vencer", polling, caché), `CONFIG_CORREO` (destinatarios, remitente, firma,
-  pie), `CONFIG_CORREO_TEXTOS` (una fila por correo, una columna por campo:
-  ASUNTO, PREHEADER, ETIQUETA, TITULO, SALUDO, PARRAFOS, BOTON, DESTACADOS) y
-  `CONFIG_CELDAS` (todo `CELLMAP_()`).
+- **Solo estas cosas son configurables** (decisión del usuario, oct. 2026):
+  1. **IDs** de spreadsheets, carpetas y archivos (BD, historial de correos,
+     plantilla, carpetas de cotizaciones/OIS/OIP) → hoja `CONFIG_IDS`
+     (`GRUPO | CLAVE | NOMBRE | VALOR | DESCRIPCION | ENLACE`).
+  2. **Correos**: destinatarios fijos (solo `OIS_FINALIZADA` y
+     `OIP_RECORDATORIO`, vía `DESTINO_CFG`), "copia siempre a", y asunto +
+     cuerpo (`mail_camposTexto_`: ASUNTO, TITULO, SALUDO, PARRAFOS, BOTON,
+     DESTACADOS) → hoja `CONFIG_CORREOS`, una fila por correo. PREHEADER,
+     ETIQUETA, firma, remitente y pie quedan solo en el código.
+  3. **Tipos de servicio** → hoja `TIPOS DE SERVICIOS` (11_CatalogRepo.js,
+     `cat_guardarTipo_` / `cat_eliminarTipo_`).
+  4. **Contadores de los consecutivos** (pestaña "Consecutivos"): cotización,
+     OIS y OIP. Se edita el "último número usado" (la marca de agua `SEQ_YY` /
+     `SEQ_OIS_YY` / `SEQ_OIP` de ScriptProperties, `code_guardarContador_` en
+     `20_Ids.js`, `api_saveConsecutivo`): el siguiente código es ese + 1. Solo
+     puede subir o igualar lo que ya existe en la hoja (bajar de ahí repetiría
+     códigos); 0-999. Cotización y OIS son del año en curso (reinician cada
+     año); la OIP es global. `code_spec_(tipo)` define hoja/prefijo/marca de
+     cada contador y lo comparten las reservas y la vista.
+- **Todo lo demás vive SOLO en el código** y se cambia ahí: plazos, IVA,
+  límites, días "por vencer", polling, caché, prefijos, nombres de pestañas
+  (`TABS`), etiquetas, `CELLMAP_()` (celdas de la plantilla) y los datos fijos
+  del correo. Las hojas antiguas `CONFIG_LEEME`, `CONFIG_HOJAS`,
+  `CONFIG_GENERAL`, `CONFIG_CORREO`, `CONFIG_CORREO_TEXTOS` y `CONFIG_CELDAS`
+  ya no existen: `cfgs_asegurarHojas_` las migra (lo que sigue siendo
+  configurable) y las borra la primera vez que se abre la vista o con
+  `admin_crearHojasConfig()`. **No vuelvas a crear hojas `CONFIG_*` para otros
+  parámetros** sin que el usuario lo pida.
+- Las tres hojas viven en el spreadsheet de catálogo (`cfgs_sheetId_()` =
+  `CFG_().CAT_SHEET_ID`, 1n87Kj1w...) y se editan desde la vista
+  **Configuración** (`ui/ViewConfig.html` + `ui/JsConfig.js.html`,
+  `KGP.config`; última del menú, §9): `api_getConfiguracion` (siempre fresco,
+  nunca `KGP.localCache`), `api_saveConfigIds`, `api_saveConfigCorreo`,
+  `api_saveTipoServicio`, `api_deleteTipoServicio`, todos con
+  `tx_conLock_`. Guardar IDs comprueba antes que cada archivo/carpeta exista
+  y sea accesible (acepta el enlace completo); cambiar la BD pide doble clic.
+  Tras guardar tipos, la vista refresca `KGP.catalog`.
 - **Se lee SIEMPRE al cargar la página**: `doGet` llama `cfgs_refresh_()`
-  (una sola apertura del spreadsheet, todas las hojas `CONFIG_*`) y guarda el
-  resultado en CacheService (`cfgsheet:data:v1`, 6 h); las llamadas
-  `google.script.run` de esa sesión y los disparadores usan esa copia
-  (memoizada por ejecución en `repo_memo_().__cfgs`). Si la caché expiró, se
-  relee la hoja una vez. Es la única lectura de Sheets de `doGet`, pedida
-  explícitamente por el usuario: no la quites ni la muevas a otra llamada.
-- **Cómo se aplica**: los valores POR DEFECTO siguen en el código (`CFG_()`,
-  `CELLMAP_()`, `mail_textosDefault_()`); al final, `cfgs_aplicar_` los
-  reemplaza con lo de la hoja. Clave con puntos = ruta en `CFG_()`
-  (`LIMITS.MAX_SERVICIOS`, `TABS.COTIZACIONES`, `CORREO.FIRMA`). Solo se
-  aplican claves del catálogo `cfgs_catalogo_()` (allowlist); el valor se
-  convierte al tipo del valor por defecto y, si no se puede (o la celda está
-  vacía), **se queda el del código**: la app nunca se cae por la config.
-  `admin_verConfig()` lista lo ignorado y la config efectiva.
-- **No editables desde la hoja, a propósito**: `CAT_SHEET_ID` (de ahí se lee
-  la config: se muestra en `CONFIG_IDS` como solo lectura), `APP_VERSION`, los
-  nombres de ESTADOS (son datos guardados en las filas: renombrarlos dejaría
-  huérfanas las existentes) y `SCHEMA_()` (encabezados de columnas).
+  (una apertura del spreadsheet, `CONFIG_IDS` + `CONFIG_CORREOS`) y lo deja en
+  CacheService (`cfgsheet:data:v2`, 6 h); `google.script.run` y los
+  disparadores usan esa copia (memo `repo_memo_().__cfgs`). Guardar desde la
+  vista también la refresca. No quites esa lectura de `doGet` (pedido del
+  usuario).
+- **Cómo se aplica**: `cfgs_aplicar_(cfg)` pone sobre `CFG_()` solo las
+  claves de la allowlist (`cfgs_catalogoIds_` + los `DESTINO_CFG`); celda
+  vacía = valor del código. `mail_textos_(clave)`: si el correo tiene fila,
+  manda la fila (un campo vacío queda vacío, p. ej. sin botón) salvo ASUNTO y
+  PARRAFOS, que vacíos vuelven al texto del código; `CC` = "copia siempre a",
+  que `mail_construir_` suma a las copias del popup (§14). `CAT_SHEET_ID` es
+  de solo lectura. `admin_verConfig()` lista lo ignorado y la config efectiva.
+- **Agregar un ID configurable**: su default en `CFG_()` + su fila en
+  `cfgs_catalogoIds_()`. **Agregar un correo**: ver §14 (aparece solo en
+  `CONFIG_CORREOS`). Nunca leas `CONFIG_*` por tu cuenta desde otro módulo:
+  todo pasa por `CFG_()` o `mail_textos_()`.
 - **Navegador**: los parámetros que usa el cliente (IVA, límites, días por
-  vencer, polling, plazo por defecto) los inyecta `doGet` en
-  `window.KGP_CONFIG` (`cfgs_clientConfig_`, solo números) y se leen con
-  `KGP.cfg('CLAVE', valorPorDefecto)` (`ui/JsCore.js.html`). **No vuelvas a
-  escribir esos números fijos en un `Js*.js.html`**: si el servidor tiene el
-  parámetro en `CFG_()`, el cliente lo toma de `KGP.cfg`.
-- **Agregar un parámetro nuevo**: (1) su valor por defecto en `CFG_()` o
-  `CELLMAP_()`; (2) su fila documentada en `cfgs_catalogo_()` (grupo,
-  descripción, tipo); (3) si lo usa el cliente, agrégalo a
-  `cfgs_clientConfig_` y léelo con `KGP.cfg`; (4) ejecutar
-  `admin_crearHojasConfig()`, que agrega solo las filas nuevas y **nunca pisa
-  un VALOR ya escrito** (refresca solo las columnas de ayuda). Nunca leas una
-  hoja `CONFIG_*` por tu cuenta desde otro módulo: todo pasa por `CFG_()`,
-  `CELLMAP_()` o `mail_textos_()`.
+  vencer, polling...) salen del código y los inyecta `doGet` en
+  `window.KGP_CONFIG` (`cfgs_clientConfig_`); se leen con
+  `KGP.cfg('CLAVE', def)` / `KGP.cfgTexto`. No escribas esos números fijos en
+  un `Js*.js.html`: si el servidor tiene el parámetro en `CFG_()`, el cliente
+  lo toma de ahí.
+- Seguridad: la web app es `access: ANYONE` sin roles, así que cualquiera con
+  el enlace puede abrir Configuración (igual que el resto de la app).
 - Anti-recursión: nada de lo que use `cfgs_leerHoja_`/`cfgs_overrides_` puede
   llamar `CFG_()` (por eso el ID del spreadsheet está en `cfgs_sheetId_`).
   `cfgs_sinHoja_(fn)` ejecuta `fn` viendo solo los valores del código.
@@ -674,3 +711,30 @@ simetría con la OIS:
   `KGP.catalog.load(true)` en segundo plano: los desplegables de las demás
   vistas (cliente, responsable) salen de ahí.
 
+## 17. Historial de cambios de las tareas (requisito del usuario, oct. 2026)
+
+- Hoja `HISTORIAL_TAREAS` (BD principal, `CFG_().TABS.HISTORIAL_TAREAS`):
+  una fila por cambio de una tarea de OIS u OIP, con `FECHA`, `USUARIO`
+  (nombre en `PERSONAL_KGP` por correo, o el correo; "Usuario no
+  identificado" si `getActiveUser()` viene vacío), `CORREO USUARIO`,
+  `ACCION` (CREADA / EDITADA / FINALIZADA / REABIERTA / ELIMINADA) y
+  `DETALLE` ("Campo: antes → después", una línea por campo). Nunca se edita
+  ni se borra. Además `TAREAS_OIS`/`TAREAS_OIP` tienen `ACTUALIZADO POR` /
+  `ACTUALIZADO EN` (opcionales) con el último cambio. Todo lo prepara
+  `admin_prepararHistorialTareas()` (51_Admin.js, idempotente).
+- Código: `42_HistorialTareas.js` (`htar_*`). **Toda escritura de tareas**
+  registra con `htar_diff_` + `htar_registrar_` DENTRO de su lock:
+  `tg_saveTarea` / `tg_setTareaEstado` / `tg_deleteTarea` y
+  `ord_sincronizarTareas_` (Guardar cambios de OIS/OIP). Si agregas otra
+  ruta que escriba tareas, haz lo mismo. Un guardado sin cambios visibles no
+  deja fila ni cambia el sello; `ord_sincronizarTareas_` ya no reescribe
+  tareas idénticas.
+- `htar_registrar_` nunca lanza (fallo -> `_ERRORES`): el historial no puede
+  tumbar una escritura de tareas que ya ocurrió.
+- Lectura: `api_getHistorialTareas({tipo, idTarea | idOrden})`, bajo demanda
+  (nunca desde el snapshot ni una carga de vista: la hoja solo crece), tope
+  `LIMITS.MAX_HISTORIAL_TAREAS`. Por orden incluye las tareas eliminadas.
+- UI: popup global `KGP.historialTareas` (`#ht-modal-overlay` en
+  `ui/Index.html`): botón reloj por tarea (Gestionar tareas y `tpl-tarea`;
+  en una OIS finalizada es el único que queda visible) y "Historial de
+  cambios" por orden en Gestionar OIS/OIP. No lo dupliques.

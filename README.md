@@ -32,7 +32,7 @@ Es una **Web App de Google Apps Script**: no requiere servidores propios ni base
 | **Gestionar cotización** | Listado filtrable y detalle: servicios, **tarifas** (tarifa × cantidad), observaciones acumulativas, asesor comercial y tiempo de entrega. Calcula SUBTOTAL, IVA y TOTAL. Botones **"Cotización aprobada"** (crea su OIS u OIP) y **"Cotización rechazada"**. "Guardar cambios" regenera el **mismo** documento. |
 | **Gestionar OIS** | Órdenes internas de servicio: tareas (responsable interno o tercero, fechas, observación), plazo y datos compartidos con la cotización. Estado derivado: En curso / Vencida / Finalizada. |
 | **Gestionar OIP** | Órdenes internas de proyectos: como la OIS, más la **facturación mensual** (cuota, número de factura, estado) y un recordatorio automático el día 1 de cada mes. Tareas agrupadas por mes de entrega. |
-| **Gestionar tareas** | Todas las tareas de OIS y OIP en una sola tabla, con filtros, KPIs y alta/edición/finalización al instante. |
+| **Gestionar tareas** | Todas las tareas de OIS y OIP en una sola tabla, con filtros, KPIs y alta/edición/finalización al instante. Cada tarea tiene su **historial de cambios** (quién, cuándo y qué cambió); también disponible por tarea y por orden en Gestionar OIS/OIP. |
 | **Gestión de clientes** | Clientes con sus contactos, establecimientos (y su encargado) e historial de cotizaciones. Borrar solo se permite si ninguna cotización usa el registro. |
 | **Gestión de empleados** | Personal interno (`PERSONAL_KGP`) y terceros/independientes (`PERSONAL_TERCEROS`). |
 | **Dashboard** | Pestañas Cotizaciones / OIS / OIP: KPIs, gráficas, filtros, tabla y actualización automática. |
@@ -55,6 +55,10 @@ OIS / OIP:   En curso ──► Finalizada  (todas sus tareas finalizadas)
 | ¿NNN reinicia cada año? | Sí | Sí | **No** (consecutivo continuo) |
 | Plazo inicial | Formulario (15 días) | El de la cotización | 365 días |
 | Tareas en la plantilla | — | 20 filas fijas | Se insertan filas |
+
+Los documentos generados se nombran `<CÓDIGO>-<RAZÓN SOCIAL>.xlsx` (p. ej. `CTZ-KGP-001-26-ACME S.A.S.xlsx`); una cotización ya generada conserva su nombre al regenerarse.
+
+**Historial de tareas:** toda creación, edición, finalización/reapertura o eliminación de una tarea queda en la hoja `HISTORIAL_TAREAS` (usuario, correo, fecha, acción y detalle "antes → después") y sella `ACTUALIZADO POR/EN` en la tarea. Se activa una vez con `admin_prepararHistorialTareas()`.
 
 Los consecutivos se reservan dentro de un lock (dos usuarios nunca obtienen el mismo número) y una marca de agua en las Propiedades del script evita reutilizar números si se borra una fila a mano.
 
@@ -142,6 +146,7 @@ kgp-panel/
     ├── 39_NotifyService.js      # Cuándo y a quién se envía cada correo
     ├── 40_ClienteService.js     # Gestión de clientes (listado, detalle, bajas)
     ├── 41_OrdenComun.js         # Lógica común de OIS y OIP
+    ├── 42_HistorialTareas.js    # Historial de cambios de las tareas (HISTORIAL_TAREAS)
     ├── 50_WebApp.js             # doGet, include, endpoints api_*
     ├── 51_Admin.js              # Funciones admin_* (solo desde el editor)
     ├── otherFunctions.js        # Respaldo literal del Code.js original (no se usa ni se modifica)
@@ -169,7 +174,8 @@ Base de datos (`DB_SHEET_ID`). Los nombres de columna se buscan sin importar til
 | `ESTABLECIMIENTOS_CLIENTES` | establecimiento | ID ESTABLECIMIENTO, ID CLIENTE, NOMBRE, DIRECCION, CIUDAD, DEPARTAMENTO, PAIS | — |
 | `PERSONAL_KGP` / `PERSONAL_TERCEROS` | persona | ID EMPLEADO, NOMBRE, CORREO, TELEFONO, CARGO | CEDULA |
 | `OIS` / `OIP` | orden | ID OIS / ID OIP, ID COTIZACION, FECHA ELABORACION, CODIGO, PLAZO, FECHA VENCIMIENTO, ESTADO | REQUEST ID, URL DOCUMENTO, DOC ESTADO, ACTUALIZADO EN, ELABORADO POR, ACTUALIZADO POR, DOC FILE ID |
-| `TAREAS_OIS` / `TAREAS_OIP` | tarea | ID TAREA, ID OIS / ID OIP, TAREA, RESPONSABLE, ID EMPLEADO, FECHA INICIO, FECHA ENTREGA, ESTADO, OBSERVACION | TIPO RESPONSABLE |
+| `TAREAS_OIS` / `TAREAS_OIP` | tarea | ID TAREA, ID OIS / ID OIP, TAREA, RESPONSABLE, ID EMPLEADO, FECHA INICIO, FECHA ENTREGA, ESTADO, OBSERVACION | TIPO RESPONSABLE, ACTUALIZADO POR, ACTUALIZADO EN |
+| `HISTORIAL_TAREAS` | cambio de una tarea | ID HISTORIAL, FECHA, TIPO ORDEN, ID ORDEN, CODIGO ORDEN, ID TAREA, TAREA, ACCION, DETALLE, USUARIO, CORREO USUARIO *(la crea `admin_prepararHistorialTareas()`)* | — |
 | `OIP_FACTURACION` | mes facturado | ID FACTURACION OIP, ID OIP, MES, YEAR, CUOTA, NUMERO FACTURA, ESTADO | FECHA NOTIFICACION |
 | `_ERRORES` | error | *(se crea sola)* | — |
 
@@ -250,9 +256,10 @@ Luego, desde el editor de Apps Script (**Ejecutar → seleccionar función**):
 1. `admin_convertTemplate()` — convierte la plantilla a Google Sheet nativo (una vez).
 2. `admin_crearHojasConfig()` — crea las hojas `CONFIG_*`; ajusta allí los IDs de la BD, carpetas, etc.
 3. `admin_health()` — verifica hojas, columnas y pestañas de la plantilla.
-4. `admin_installOipFacturacionTrigger()` — instala el recordatorio mensual de la OIP.
-5. **Implementar → Nueva implementación → Aplicación web** (Ejecutar como: Yo).
-6. En **Gestión de empleados**, registra al personal con el mismo correo con el que inicia sesión en Google (así se llena "Elaborado por").
+4. `admin_prepararHistorialTareas()` — crea la hoja `HISTORIAL_TAREAS` y las columnas de último cambio en las tareas (idempotente).
+5. `admin_installOipFacturacionTrigger()` — instala el recordatorio mensual de la OIP.
+6. **Implementar → Nueva implementación → Aplicación web** (Ejecutar como: Yo).
+7. En **Gestión de empleados**, registra al personal con el mismo correo con el que inicia sesión en Google (así se llena "Elaborado por").
 
 ## Despliegue y actualizaciones
 
@@ -273,6 +280,8 @@ Solo desde el editor de Apps Script, con la cuenta dueña del proyecto. Dejan su
 | `admin_smokeTestTemplate()` | Genera un documento vacío para validar visualmente la plantilla. |
 | `admin_health()` | Diagnóstico de hojas, columnas, catálogo y plantilla. |
 | `admin_setTemplateTabName / admin_setOisTabName / admin_setOipTabName(nombre)` | Fijan la pestaña de la plantilla de cada documento. |
+| `admin_prepararHistorialTareas()` | Crea `HISTORIAL_TAREAS` y agrega a `TAREAS_OIS/OIP` las columnas `TIPO RESPONSABLE`, `ACTUALIZADO POR` y `ACTUALIZADO EN` (idempotente, no toca datos). |
+| `admin_reiniciarDatos(confirmar, ignorarDatos)` | Tras vaciar las hojas a mano: borra contadores (`SEQ_*`), avisos (`NTF_*`) y cachés para empezar de cero. Sin argumentos es un simulacro; `admin_reiniciarDatos(true)` lo aplica. |
 | `admin_crearHojasConfig()` | Crea/completa las hojas `CONFIG_*` sin pisar valores. |
 | `admin_verConfig()` | Configuración efectiva y lo que se ignoró. |
 | `admin_probarCorreos(destino)` | Envía un ejemplo de cada correo. |

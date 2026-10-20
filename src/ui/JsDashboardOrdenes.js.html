@@ -37,7 +37,7 @@ window.KGP = window.KGP || {};
   // Constantes
   // ===================================================================
 
-  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG_().DASHBOARD_POLL_MS (hoja CONFIG_GENERAL)
+  var POLL_BASE_MS = KGP.cfg('DASHBOARD_POLL_MS', 30000); // = CFG_().DASHBOARD_POLL_MS (00_Config.js)
   // Tras errores seguidos se espera cada vez más (x1, x2, x4, x10 el intervalo base).
   var POLL_BACKOFF_MS = [1, 2, 4, 10].map(function (k) { return POLL_BASE_MS * k; });
   var SEARCH_DEBOUNCE_MS = 220;

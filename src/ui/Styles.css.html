@@ -991,6 +991,122 @@
     flex-wrap: wrap;
   }
 
+  /* ---------- Popup de copias (CC) de un correo (KGP.mailCc) ---------- */
+
+  .cc-desc { margin: 0 0 8px; color: var(--text-muted); font-size: 13px; }
+  .cc-para { margin: 0 0 14px; font-size: 13px; font-weight: 600; color: var(--primary-hover); }
+  .cc-section-title {
+    margin: 14px 0 6px;
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+  .cc-search {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    font-size: 13px;
+    background: var(--surface);
+  }
+  .cc-search:focus { outline: none; border-color: var(--primary); }
+  .cc-list {
+    margin-top: 8px;
+    max-height: 210px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-alt);
+  }
+  .cc-person {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .cc-person:last-child { border-bottom: none; }
+  .cc-person:hover { background: var(--primary-bg); }
+  .cc-person input { flex: none; width: 16px; height: 16px; accent-color: var(--primary); }
+  .cc-person-main { display: flex; flex-direction: column; min-width: 0; }
+  .cc-person-name { font-size: 13px; font-weight: 600; }
+  .cc-person-mail { font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+  .cc-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--primary-bg);
+    color: var(--primary-hover);
+    font-size: 10.5px;
+    font-weight: 600;
+  }
+  .cc-empty { padding: 14px; font-size: 12.5px; color: var(--text-muted); text-align: center; }
+  .cc-extra-row { display: flex; gap: 8px; align-items: center; }
+  .cc-extra-err { display: none; margin-top: 6px; font-size: 12px; color: var(--danger); }
+  .cc-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .cc-chips .chip { font-size: 12px; }
+  .cc-count { margin-top: 14px; font-size: 12px; color: var(--text-muted); }
+
+  /* ---------- Vista Configuración (ui/ViewConfig.html) ---------- */
+
+  .cfg-help { margin: 0 0 14px; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+  .cfg-panel > .cfg-help { margin-bottom: 16px; }
+
+  .cfg-correo-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .cfg-correo-nombre { font-size: 15.5px; font-weight: 700; letter-spacing: -0.01em; }
+  .cfg-correo-desc { font-size: 12.5px; color: var(--text-muted); margin-top: 3px; }
+  .cfg-correo.is-open { border-color: var(--primary-soft); box-shadow: 0 0 0 3px var(--primary-bg); }
+  .cfg-resumen {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 6px 14px;
+    margin: 14px 0 0;
+    font-size: 13px;
+  }
+  .cfg-resumen dt { color: var(--text-faint); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; padding-top: 1px; }
+  .cfg-resumen dd { margin: 0; overflow-wrap: anywhere; }
+  .cfg-correo-form { display: grid; gap: 14px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .cfg-correo-form textarea { resize: vertical; line-height: 1.5; }
+  .cfg-auto { font-size: 13px; color: var(--text-muted); padding: 8px 10px; background: var(--surface-alt); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
+  .cfg-vars { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px; background: var(--surface-alt); border-radius: var(--radius-sm); }
+  .cfg-vars-label { font-size: 12px; font-weight: 600; color: var(--text-muted); width: 100%; }
+  .cfg-vars .chip { font-family: ui-monospace, monospace; }
+  .cfg-vars-hint { width: 100%; font-size: 11.5px; color: var(--text-faint); margin-top: 4px; }
+
+  .cfg-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .cfg-actions-sep { flex: 1; }
+  .cfg-dirty { flex: 1; font-size: 12.5px; color: var(--warning); }
+  .card > .cfg-actions { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+
+  .cfg-ids-grupo + .cfg-ids-grupo { margin-top: 18px; }
+  .cfg-ids-grupo .section-title { margin-bottom: 8px; }
+  .cfg-id-row {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr);
+    gap: 8px 18px;
+    align-items: start;
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
+  }
+  .cfg-id-row.is-dirty .cfg-id-nombre::after { content: ' · sin guardar'; color: var(--warning); font-weight: 600; font-size: 11.5px; }
+  .cfg-id-nombre { font-size: 13.5px; font-weight: 600; }
+  .cfg-id-desc { font-size: 12px; color: var(--text-muted); margin-top: 3px; line-height: 1.45; }
+  .cfg-id-field input[readonly] { background: var(--surface-alt); color: var(--text-muted); }
+  .cfg-id-field .picker-row input { flex: 1; min-width: 0; }
+
+  .cfg-consec-form { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .cfg-consec-form .field { flex: 0 1 260px; }
+  .cfg-consec-form .btn { margin-top: 20px; }
+
+  .cfg-tipos-table td { vertical-align: middle; }
+  .cfg-tipos-table th:last-child, .cfg-tipos-table td:last-child { width: 1%; white-space: nowrap; }
+  .cfg-tipo-edit td { background: var(--primary-bg); }
+  .cfg-count { margin-top: 10px; font-size: 12px; color: var(--text-faint); }
+
   /* ---------- OIS: popup de aprobación y tareas ---------- */
 
   .modal-box.modal-box-sm { max-width: 460px; }
@@ -1814,6 +1930,46 @@
   .btn.btn-icon-view svg { width: 15px; height: 15px; }
   .btn.btn-icon-view:hover { background: var(--primary); color: #fff; }
 
+  /* Botones agrupados a la derecha de un .section-title-row (Gestionar OIP: Historial + Agregar tarea). */
+  .section-title-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+  /* ---------- Historial de cambios de tareas (KGP.historialTareas, #ht-modal-overlay) ---------- */
+
+  .ht-subtitle { margin: 0 0 14px; color: var(--text-muted); font-size: 13px; text-align: center; overflow-wrap: anywhere; }
+  .ht-loading { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 28px 0; color: var(--text-muted); }
+  .ht-aviso {
+    margin-bottom: 12px; padding: 9px 12px; border-radius: var(--radius-sm);
+    background: var(--warning-bg); color: var(--warning); font-size: 12.5px;
+  }
+  .ht-list { list-style: none; margin: 0; padding: 0 0 0 18px; position: relative; }
+  /* Línea de tiempo: una línea vertical oliva con un punto por cambio. */
+  .ht-list::before { content: ''; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 2px; background: var(--primary-soft); }
+  .ht-item { position: relative; padding: 0 0 16px 12px; text-align: left; }
+  .ht-item:last-child { padding-bottom: 0; }
+  .ht-item::before {
+    content: ''; position: absolute; left: -17px; top: 5px; width: 10px; height: 10px;
+    border-radius: 50%; background: var(--surface); border: 2px solid var(--primary);
+  }
+  .ht-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ht-accion {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase;
+  }
+  .ht-accion-creada { background: var(--primary-bg); color: var(--primary-hover); }
+  .ht-accion-editada { background: var(--edit-bg); color: #8a6a04; }
+  .ht-accion-finalizada { background: var(--success-bg); color: var(--success); }
+  .ht-accion-reabierta { background: var(--warning-bg); color: var(--warning); }
+  .ht-accion-eliminada { background: var(--danger-bg); color: var(--danger); }
+  .ht-fecha { font-size: 12px; color: var(--text-faint); }
+  .ht-quien { margin-top: 4px; font-size: 13px; color: var(--text); }
+  .ht-correo { color: var(--text-faint); font-size: 12px; }
+  .ht-tarea { margin-top: 2px; font-size: 12.5px; font-weight: 600; color: var(--text-muted); overflow-wrap: anywhere; }
+  .ht-detalle {
+    margin-top: 6px; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--surface-alt); font-size: 12.5px; color: var(--text-muted);
+    white-space: pre-line; overflow-wrap: anywhere;
+  }
+
   .empty-state .btn { margin-left: 8px; }
 
   /* ---------- Topbar móvil + menú lateral (hamburguesa) ---------- */
@@ -1922,6 +2078,19 @@
     .modal-close { position: absolute; top: 14px; right: 14px; }
     .modal-header h2 { width: 100%; }
     .modal-footer { justify-content: center; flex-wrap: wrap; }
+    .cc-person { justify-content: center; text-align: center; }
+    .cc-extra-row { flex-direction: column; }
+    .cc-chips { justify-content: center; }
+    .cfg-correo-head { flex-direction: column; align-items: center; text-align: center; }
+    .cfg-resumen { grid-template-columns: 1fr; text-align: center; }
+    .cfg-vars { justify-content: center; text-align: center; }
+    .cfg-actions { justify-content: center; }
+    .cfg-actions-sep { display: none; }
+    .cfg-dirty { flex-basis: 100%; text-align: center; }
+    .cfg-id-row { grid-template-columns: 1fr; text-align: center; }
+    .cfg-consec-form { flex-direction: column; align-items: center; }
+    .cfg-consec-form .field { flex-basis: auto; width: 100%; }
+    .cfg-consec-form .btn { margin-top: 0; }
 
     .filters-row { justify-content: center; }
     .pagination-row { flex-direction: column; gap: 10px; text-align: center; }
@@ -1951,6 +2120,14 @@
     .tg-actions, .tg-confirm { justify-content: center; }
     .tg-confirm { margin: 0 auto; }
     .dash-header-actions .tg-doc-status { width: 100%; justify-content: center; }
+
+    /* Historial de tareas: sin línea de tiempo lateral, todo centrado (regla general en móvil). */
+    .section-title-actions { width: 100%; justify-content: center; }
+    .ht-list { padding-left: 0; }
+    .ht-list::before, .ht-item::before { display: none; }
+    .ht-item { padding-left: 0; text-align: center; }
+    .ht-item + .ht-item { padding-top: 14px; border-top: 1px solid var(--border); }
+    .ht-item-head { justify-content: center; }
 
     .kpi-card { text-align: center; }
 

@@ -179,7 +179,7 @@
         <button type="button" class="btn btn-sm btn-ghost-primary" id="oi-establecimiento-nuevo-btn">+ Agregar establecimiento</button>
       </div>
       <div class="field" data-field="establecimiento">
-        <label for="oi-establecimiento-select">Selecciona un establecimiento <span class="req">*</span></label>
+        <label for="oi-establecimiento-select">Selecciona un establecimiento (opcional)</label>
         <div class="picker-row">
           <select id="oi-establecimiento-select"><option value="">— Selecciona —</option></select>
           <button type="button" class="btn btn-sm btn-icon-edit" id="oi-establecimiento-editar-btn" disabled title="Editar establecimiento"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
@@ -215,8 +215,11 @@
     </div>
 
     <div class="card">
-      <div class="section-title">
-        Tareas <span class="badge-count" id="oi-tareas-count">(0/20)</span>
+      <div class="section-title-row">
+        <div class="section-title">
+          Tareas <span class="badge-count" id="oi-tareas-count">(0/20)</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost-primary" id="oi-historial-tareas" title="Quién creó, cambió, finalizó o eliminó tareas de esta OIS">Historial de cambios</button>
       </div>
       <div class="hint" style="margin-bottom:12px;">Las tareas nuevas, editadas, finalizadas o eliminadas solo se guardan en la base de datos al oprimir "Guardar cambios".</div>
       <div id="oi-tareas-list"></div>
@@ -232,8 +235,10 @@
   </div>
 </section>
 
-<!-- Fila compacta de una tarea (clonada por JS). Tres acciones con ícono:
-     finalizar / reabrir (check), editar (lápiz) y eliminar (caneca).
+<!-- Fila compacta de una tarea (clonada por JS). Acciones con ícono:
+     finalizar / reabrir (check), editar (lápiz), eliminar (caneca) e
+     historial de cambios (reloj; solo en tareas ya guardadas, y es la única
+     que sigue visible en una OIS finalizada).
      GLOBAL, no atada a esta vista: la usan "Gestionar OIS" y "Gestionar OIP"
      (mismo criterio que tpl-servicio en ui/ViewCotizacion.html, CLAUDE.md §2.1). -->
 <template id="tpl-tarea">
@@ -247,6 +252,7 @@
       <span class="badge" data-tarea-estado></span>
     </div>
     <div class="servicio-row-actions">
+      <button type="button" class="btn btn-sm btn-icon-view" data-historial-tarea title="Historial de cambios" aria-label="Historial de cambios"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg></button>
       <button type="button" class="btn btn-sm btn-icon-done" data-finalizar-tarea title="Marcar como finalizada"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
       <button type="button" class="btn btn-sm btn-icon-edit" data-edit-tarea title="Editar tarea"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
       <button type="button" class="btn btn-sm btn-icon-delete" data-remove-tarea title="Eliminar tarea"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg></button>

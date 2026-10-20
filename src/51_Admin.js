@@ -143,7 +143,8 @@ function admin_health() {
     { tabKey: 'TAREAS_OIS', schemaKey: 'TAREAS_OIS' },
     { tabKey: 'OIP', schemaKey: 'OIP' },
     { tabKey: 'TAREAS_OIP', schemaKey: 'TAREAS_OIP' },
-    { tabKey: 'OIP_FACTURACION', schemaKey: 'OIP_FACTURACION' }
+    { tabKey: 'OIP_FACTURACION', schemaKey: 'OIP_FACTURACION' },
+    { tabKey: 'HISTORIAL_TAREAS', schemaKey: 'HISTORIAL_TAREAS' }
   ];
 
   checks.forEach(function (c) {
@@ -316,7 +317,7 @@ function admin_probarRecordatorioOip() {
 /**
  * Envía a `destino` un ejemplo de cada correo de la app (todas las claves de
  * mail_textosDefault_), con la plantilla única y los textos VIGENTES (hoja
- * CONFIG_CORREO_TEXTOS si tiene valor) sobre datos de muestra: NO lee ni
+ * CONFIG_CORREOS si tiene valor) sobre datos de muestra: NO lee ni
  * escribe la BD. Para revisar cómo se ven después de cambiar la plantilla o
  * los textos. Ejecutar a mano desde el editor, p. ej.
  * admin_probarCorreos('alguien@dominio.com'). Sin argumento usa
@@ -333,6 +334,7 @@ function admin_probarCorreos(destino) {
     var m = muestras[clave] || { vars: {}, opciones: {} };
     var opts = mail_construir_(clave, m.vars, m.opciones);
     opts.asunto = '[Prueba] ' + opts.asunto;
+    opts.cc = []; // una prueba no le llega a la "copia siempre a" del correo
     mail_send_(destino, opts);
   });
   var msg = 'Se enviaron ' + claves.length + ' correos de prueba a ' + destino + '. Cuota restante hoy: ' + MailApp.getRemainingDailyQuota() + '.';
@@ -366,6 +368,13 @@ function admin_muestrasCorreo_() {
       },
       opciones: { url: url }
     },
+    OIS_FINALIZADA: {
+      vars: {
+        codigoOrden: 'OIS-KGP-001-26', nombreOrden: ntf_nombreOrden_('OIS'), codigoCotizacion: 'CTZ-KGP-001-26',
+        cliente: 'CLIENTE DE PRUEBA S.A.S.', numTareas: 4, fechaElaboracion: hoy, fechaFinalizacion: hoy
+      },
+      opciones: { url: url }
+    },
     OIP_RECORDATORIO: {
       vars: { mes: 'septiembre de 2026', total: 2, plural: 's', filasCreadas: 1, estadoPendiente: CFG_().FACT_ESTADO_PENDIENTE },
       opciones: {
@@ -379,19 +388,18 @@ function admin_muestrasCorreo_() {
 }
 
 /**
- * Crea (o completa) las hojas CONFIG_* en el spreadsheet de catálogo
- * (CFG_().CAT_SHEET_ID) con todos los parámetros de la app en forma de tabla:
- * IDs, nombres de hojas, parámetros generales, correo, textos de cada correo
- * y celdas de la plantilla, más CONFIG_LEEME con las instrucciones.
- *
- * EJECUTAR A MANO desde el editor de Apps Script. Se puede repetir cuando se
- * quiera: nunca pisa un VALOR ya escrito (ni un texto de correo); solo agrega
- * las filas que falten y refresca las columnas de ayuda (descripción, valor
- * por defecto, enlace). Ver 06_ConfigSheet.js / CLAUDE.md §15.
+ * Deja al día las hojas de configuración del spreadsheet de catálogo
+ * (CONFIG_IDS y CONFIG_CORREOS): migra y elimina las hojas CONFIG_* antiguas,
+ * agrega las filas de correos nuevos y refresca las columnas de ayuda
+ * (nombre, descripción, variables, enlaces). Nunca pisa un valor ni un texto
+ * ya escrito. Lo mismo ocurre solo al abrir la vista Configuración; esto es
+ * para hacerlo a mano desde el editor. Ver 06_ConfigSheet.js / CLAUDE.md §15.
  */
 function admin_crearHojasConfig() {
   admin_soloEditor_();
-  var resumen = cfgs_crearHojas_();
+  var res = tx_conLock_('admin_crearHojasConfig', function () { return ok_(cfgs_asegurarHojas_(true)); });
+  if (!res.ok) throw new Error(res.error.message);
+  var resumen = res.data;
   cfgs_refresh_();
   var msg = 'Hojas de configuración listas en https://docs.google.com/spreadsheets/d/' + cfgs_sheetId_() + '/edit\n' + resumen.join('\n');
   Logger.log(msg);
@@ -399,9 +407,85 @@ function admin_crearHojasConfig() {
 }
 
 /**
- * Relee las hojas CONFIG_* y muestra en el registro: qué claves se ignoraron
- * (desconocidas o con un valor no válido) y la configuración efectiva que
- * está usando la app. No escribe nada.
+ * Prepara la BD para el historial de cambios de las tareas
+ * (42_HistorialTareas.js). Ejecutar UNA vez desde el editor; es idempotente
+ * (volver a correrla no duplica nada) y nunca borra, mueve ni reescribe
+ * datos existentes:
+ *   1. Crea la hoja HISTORIAL_TAREAS con sus encabezados (o le agrega los
+ *      que le falten, al final).
+ *   2. Agrega al final de TAREAS_OIS y TAREAS_OIP las columnas opcionales que
+ *      falten: TIPO RESPONSABLE, ACTUALIZADO POR, ACTUALIZADO EN.
+ * Mientras no se ejecute, la app sigue funcionando: los cambios no quedan
+ * registrados (el intento queda en _ERRORES) y el popup de historial avisa.
+ */
+function admin_prepararHistorialTareas() {
+  admin_soloEditor_();
+  var res = tx_conLock_('admin_prepararHistorialTareas', function () {
+    var cfg = CFG_();
+    var schema = SCHEMA_();
+    var ss = SpreadsheetApp.openById(cfg.DB_SHEET_ID);
+    var resumen = [];
+
+    var tabHist = cfg.TABS.HISTORIAL_TAREAS;
+    var hist = ss.getSheetByName(tabHist);
+    var columnasHist = schema.HISTORIAL_TAREAS.required;
+    if (!hist) {
+      hist = ss.insertSheet(tabHist, ss.getSheets().length);
+      hist.getRange(1, 1, 1, columnasHist.length).setValues([columnasHist])
+        .setFontWeight('bold').setBackground('#6b7c3f').setFontColor('#ffffff');
+      hist.setFrozenRows(1);
+      resumen.push('Hoja ' + tabHist + ' creada con ' + columnasHist.length + ' columnas.');
+    } else {
+      var faltanHist = admin_asegurarColumnas_(hist, columnasHist);
+      resumen.push('Hoja ' + tabHist + ' ya existía' + (faltanHist.length ? '; columnas agregadas: ' + faltanHist.join(', ') : ', sin cambios') + '.');
+    }
+    var hmapHist = repo_headerMap_(hist);
+    if (hist.getMaxRows() > 1) hist.getRange(2, hmapHist[normText_('FECHA')], hist.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+    hist.getRange(1, hmapHist[normText_('DETALLE')], hist.getMaxRows(), 1).setWrap(true);
+    hist.setColumnWidth(hmapHist[normText_('DETALLE')], 380);
+    hist.setColumnWidth(hmapHist[normText_('TAREA')], 220);
+
+    ['TAREAS_OIS', 'TAREAS_OIP'].forEach(function (key) {
+      var tab = cfg.TABS[key];
+      var sheet = ss.getSheetByName(tab);
+      if (!sheet) { resumen.push('⚠ No existe la hoja ' + tab + ': no se modificó.'); return; }
+      var agregadas = admin_asegurarColumnas_(sheet, schema[key].optional);
+      var colEn = repo_headerMap_(sheet)[normText_('ACTUALIZADO EN')];
+      if (colEn && sheet.getMaxRows() > 1) sheet.getRange(2, colEn, sheet.getMaxRows() - 1, 1).setNumberFormat('yyyy-mm-dd hh:mm');
+      resumen.push('Hoja ' + tab + ': ' + (agregadas.length ? 'columnas agregadas: ' + agregadas.join(', ') : 'ya tenía todas las columnas') + '.');
+    });
+    return ok_(resumen);
+  });
+  if (!res.ok) throw new Error(res.error.message);
+  var msg = 'Historial de tareas listo en https://docs.google.com/spreadsheets/d/' + CFG_().DB_SHEET_ID + '/edit\n' + res.data.join('\n');
+  Logger.log(msg);
+  return msg;
+}
+
+/**
+ * Agrega al final de la fila 1 de `sheet` los encabezados de `columnas` que
+ * no estén (comparando normalizado), con el formato del último encabezado.
+ * @param {!GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {!Array<string>} columnas
+ * @return {!Array<string>} Las columnas agregadas.
+ */
+function admin_asegurarColumnas_(sheet, columnas) {
+  var hmap = repo_headerMap_(sheet);
+  var faltan = columnas.filter(function (c) { return !hmap[normText_(c)]; });
+  if (!faltan.length) return [];
+  var ultima = sheet.getLastColumn();
+  var libres = sheet.getMaxColumns() - ultima;
+  if (libres < faltan.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), faltan.length - libres);
+  var destino = sheet.getRange(1, ultima + 1, 1, faltan.length);
+  if (ultima >= 1) sheet.getRange(1, ultima).copyFormatToRange(sheet, ultima + 1, ultima + faltan.length, 1, 1);
+  destino.setValues([faltan]);
+  return faltan;
+}
+
+/**
+ * Relee CONFIG_IDS / CONFIG_CORREOS y muestra en el registro: qué claves se
+ * ignoraron (desconocidas) y la configuración efectiva que está usando la
+ * app. No escribe nada.
  */
 function admin_verConfig() {
   admin_soloEditor_();
@@ -462,14 +546,83 @@ function admin_cleanTempFiles() {
 
 /**
  * Invalida todas las cachés: incrementa dataVersion (listados, dashboard,
- * empleados...) y relee las hojas CONFIG_* (la copia de la configuración no
- * depende de dataVersion). El catálogo TIPOS DE SERVICIOS nunca se cachea.
+ * empleados...) y relee CONFIG_IDS / CONFIG_CORREOS (la copia de la
+ * configuración no depende de dataVersion). El catálogo TIPOS DE SERVICIOS
+ * nunca se cachea.
  */
 function admin_clearCaches() {
   admin_soloEditor_();
   bumpDataVersion_();
   cfgs_refresh_();
-  var msg = 'Cachés invalidadas: dataVersion incrementada y configuración releída de las hojas CONFIG_*.';
+  var msg = 'Cachés invalidadas: dataVersion incrementada y configuración releída (CONFIG_IDS / CONFIG_CORREOS).';
   Logger.log(msg);
   return { ok: true, message: msg };
+}
+
+/**
+ * Deja la app "como nueva" DESPUÉS de vaciar a mano las hojas de la BD (y el
+ * historial de correos). No borra ni escribe ninguna hoja: solo
+ *   1. revisa cada hoja de la BD (encabezados en la fila 1 y filas de datos
+ *      que queden) y avisa de lo que falte;
+ *   2. borra de ScriptProperties lo que arrastraría estado viejo: las marcas
+ *      de agua de los consecutivos (SEQ_YY, SEQ_OIS_YY, SEQ_OIP), los avisos
+ *      ya enviados / pendientes (NTF_*) y el último recordatorio de
+ *      facturación OIP (OIP_NOTIF_LAST);
+ *   3. invalida las cachés (dataVersion + configuración).
+ * Conserva TEMPLATE_SHEET_ID / TEMPLATE_TAB_* (la plantilla sigue igual).
+ *
+ * Con `confirmar` distinto de true solo MUESTRA qué haría (simulacro). Para
+ * aplicarlo: admin_reiniciarDatos(true). Si alguna hoja aún tiene datos,
+ * se niega (para no reiniciar los consecutivos con códigos ya usados) salvo
+ * admin_reiniciarDatos(true, true).
+ * @param {boolean=} confirmar
+ * @param {boolean=} ignorarDatos
+ * @return {string}
+ */
+function admin_reiniciarDatos(confirmar, ignorarDatos) {
+  admin_soloEditor_();
+  var cfg = CFG_();
+  var lineas = [];
+  var conDatos = [];
+
+  var ss = SpreadsheetApp.openById(cfg.DB_SHEET_ID);
+  Object.keys(cfg.TABS).forEach(function (key) {
+    var tab = cfg.TABS[key];
+    if (key === 'TIPOS_SERVICIO') return; // vive en el spreadsheet de catálogo
+    var sheet = ss.getSheetByName(tab);
+    if (!sheet) { lineas.push('· ' + tab + ': no existe' + (key === 'HISTORIAL_TAREAS' ? ' (ejecuta admin_prepararHistorialTareas)' : '') + '.'); return; }
+    var filas = Math.max(0, sheet.getLastRow() - 1);
+    var tieneEnc = sheet.getLastColumn() > 0 && String(sheet.getRange(1, 1).getValue()).trim() !== '';
+    if (!tieneEnc && key !== 'ERRORES') lineas.push('⚠ ' + tab + ': SIN ENCABEZADOS en la fila 1 (la app los necesita).');
+    if (filas > 0 && key !== 'ERRORES') conDatos.push(tab + ' (' + filas + ')');
+    lineas.push('· ' + tab + ': ' + filas + ' filas de datos' + (tieneEnc ? '' : ', sin encabezados') + '.');
+  });
+
+  var props = PropertiesService.getScriptProperties();
+  var todas = props.getProperties();
+  var borrar = Object.keys(todas).filter(function (k) {
+    return /^SEQ_/.test(k) || /^NTF_/.test(k) || k === 'OIP_NOTIF_LAST';
+  });
+  lineas.push('');
+  lineas.push('Propiedades a borrar (' + borrar.length + '): ' + (borrar.length ? borrar.map(function (k) { return k + '=' + todas[k]; }).join(', ') : 'ninguna'));
+
+  if (conDatos.length && !ignorarDatos) {
+    var m = lineas.join('\n') + '\n\nNO SE HIZO NADA: aún hay datos en ' + conDatos.join(', ') +
+      '. Vacíalas (dejando la fila de encabezados) o usa admin_reiniciarDatos(true, true).';
+    Logger.log(m);
+    return m;
+  }
+  if (confirmar !== true) {
+    var s = lineas.join('\n') + '\n\nSIMULACRO: no se cambió nada. Para aplicarlo: admin_reiniciarDatos(true).';
+    Logger.log(s);
+    return s;
+  }
+
+  borrar.forEach(function (k) { props.deleteProperty(k); });
+  bumpDataVersion_();
+  cfgs_refresh_();
+  var msg = lineas.join('\n') + '\n\nListo: consecutivos reiniciados (siguiente: ' +
+    cfg.CODIGO_PREFIJO_COTIZACION + '001-' + fmtDate_(new Date(), 'yy') + '), avisos reiniciados y cachés invalidadas.';
+  Logger.log(msg);
+  return msg;
 }

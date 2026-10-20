@@ -56,7 +56,7 @@ window.KGP = window.KGP || {};
     oip: null  // {idOip, codigo} si se aprobó creando una OIP (botón "Ver OIP"). Nunca las dos a la vez.
   };
 
-  var IVA_TASA = KGP.cfg('IVA_TASA', 0.19); // = CFG_().IVA_TASA (hoja CONFIG_GENERAL); el servidor recalcula y es la fuente de verdad al guardar
+  var IVA_TASA = KGP.cfg('IVA_TASA', 0.19); // = CFG_().IVA_TASA (00_Config.js); el servidor recalcula y es la fuente de verdad al guardar
   var MAX_SERVICIOS = KGP.cfg('MAX_SERVICIOS', 10); // = CFG_().LIMITS.MAX_SERVICIOS
   var ESTADO_INICIAL = 'En revisión';
   var ESTADO_APROBADA = 'Aprobada';
@@ -901,7 +901,6 @@ window.KGP = window.KGP || {};
     if (!document.getElementById('ge-descripcion').value.trim()) { markInvalid('descripcion'); hasError = true; }
     if (!currentClienteId()) { markInvalid('cliente'); hasError = true; }
     if (!document.getElementById('ge-solicitante-select').value) { markInvalid('solicitante'); hasError = true; }
-    if (!document.getElementById('ge-establecimiento-select').value) { markInvalid('establecimiento'); hasError = true; }
     return !hasError;
   }
 
@@ -988,6 +987,25 @@ window.KGP = window.KGP || {};
     var payload = buildPayload(opts.estado);
     if (!payload) return;
 
+    // Rechazar envía un correo al creador: antes se elige quién más recibe
+    // copia (payload.cc). Cancelar = no se guarda nada.
+    if (opts.estado === ESTADO_RECHAZADA) {
+      KGP.mailCc.pedir({
+        titulo: 'Rechazar cotización',
+        descripcion: 'Se avisará por correo a quien creó la cotización que fue rechazada. Elige quién más recibe una copia.',
+        para: 'quien creó la cotización',
+        confirmar: 'Rechazar cotización'
+      }).then(function (cc) {
+        if (!cc) return;
+        payload.cc = cc;
+        guardarCotizacion(opts, payload);
+      });
+      return;
+    }
+    guardarCotizacion(opts, payload);
+  }
+
+  function guardarCotizacion(opts, payload) {
     var idCotizacion = detail.idCotizacion;
     setDetailBusy(true, 'Guardando cambios en la base de datos…');
 
@@ -1056,7 +1074,22 @@ window.KGP = window.KGP || {};
     var payload = buildPayload(ESTADO_APROBADA);
     closeAprobarModal();
     if (!payload) return;
+    pedirCopiasAprobacion('OIS').then(function (cc) {
+      if (cc) aprobarConOis(payload, cc);
+    });
+  }
 
+  /** Antes de aprobar: ¿quién más recibe copia del correo "cotización aprobada"? null = cancelado. */
+  function pedirCopiasAprobacion(tipo) {
+    return KGP.mailCc.pedir({
+      titulo: 'Aprobar con ' + tipo,
+      descripcion: 'Se avisará por correo a quien creó la cotización que fue aprobada, con el enlace al documento de la ' + tipo + '. Elige quién más recibe una copia.',
+      para: 'quien creó la cotización',
+      confirmar: 'Aprobar y crear ' + tipo
+    });
+  }
+
+  function aprobarConOis(payload, cc) {
     var idCotizacion = detail.idCotizacion;
     var requestId = KGP.uuid();
     setDetailBusy(true, 'Aprobando la cotización y creando la OIS…');
@@ -1081,7 +1114,7 @@ window.KGP = window.KGP || {};
         return regenerarDoc(idCotizacion);
       }).then(function () {
         setDetailBusy(true, 'Generando el documento de la OIS…');
-        return KGP.apiCall('api_generateOisDocument', [res.idOis, requestId]).then(function () {
+        return KGP.apiCall('api_generateOisDocument', [res.idOis, requestId, cc]).then(function () {
           KGP.toast('Documento de la OIS ' + res.codigoOis + ' generado.', 'success');
         }).catch(function (err) {
           // No bloquea: la OIS ya existe y "Gestionar OIS" permite reintentar.
@@ -1109,7 +1142,12 @@ window.KGP = window.KGP || {};
     var payload = buildPayload(ESTADO_APROBADA);
     closeAprobarModal();
     if (!payload) return;
+    pedirCopiasAprobacion('OIP').then(function (cc) {
+      if (cc) aprobarConOip(payload, cc);
+    });
+  }
 
+  function aprobarConOip(payload, cc) {
     var idCotizacion = detail.idCotizacion;
     var requestId = KGP.uuid();
     setDetailBusy(true, 'Aprobando la cotización y creando la OIP…');
@@ -1134,7 +1172,7 @@ window.KGP = window.KGP || {};
         return regenerarDoc(idCotizacion);
       }).then(function () {
         setDetailBusy(true, 'Generando el documento de la OIP…');
-        return KGP.apiCall('api_generateOipDocument', [res.idOip, requestId]).then(function () {
+        return KGP.apiCall('api_generateOipDocument', [res.idOip, requestId, cc]).then(function () {
           KGP.toast('Documento de la OIP ' + res.codigoOip + ' generado.', 'success');
         }).catch(function (err) {
           // No bloquea: la OIP ya existe y "Gestionar OIP" permite reintentar.

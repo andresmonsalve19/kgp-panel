@@ -189,7 +189,7 @@
         <button type="button" class="btn btn-sm btn-ghost-primary" id="op-establecimiento-nuevo-btn">+ Agregar establecimiento</button>
       </div>
       <div class="field" data-field="establecimiento">
-        <label for="op-establecimiento-select">Selecciona un establecimiento <span class="req">*</span></label>
+        <label for="op-establecimiento-select">Selecciona un establecimiento (opcional)</label>
         <div class="picker-row">
           <select id="op-establecimiento-select"><option value="">— Selecciona —</option></select>
           <button type="button" class="btn btn-sm btn-icon-edit" id="op-establecimiento-editar-btn" disabled title="Editar establecimiento"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
@@ -230,7 +230,10 @@
         <div class="section-title">
           Tareas <span class="badge-count" id="op-tareas-count">(0/200)</span>
         </div>
-        <button type="button" class="btn btn-sm btn-ghost-primary" id="op-add-tarea">+ Agregar tarea</button>
+        <div class="section-title-actions">
+          <button type="button" class="btn btn-sm btn-ghost-primary" id="op-historial-tareas" title="Quién creó, cambió, finalizó o eliminó tareas de esta OIP">Historial de cambios</button>
+          <button type="button" class="btn btn-sm btn-ghost-primary" id="op-add-tarea">+ Agregar tarea</button>
+        </div>
       </div>
       <div class="hint" style="margin-bottom:12px;">Las tareas nuevas, editadas, finalizadas o eliminadas solo se guardan en la base de datos al oprimir "Guardar cambios". Una tarea pertenece al mes de su fecha de entrega.</div>
 

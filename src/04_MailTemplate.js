@@ -20,11 +20,12 @@
  * Las imágenes (logo e íconos del pie) viven en 05_MailAssets.js y viajan
  * como inlineImages ("cid:"), porque Gmail no muestra imágenes data:.
  *
- * Parametrizable (CLAUDE.md §15): firma, nota y pie salen de CFG_().CORREO
- * (hoja CONFIG_CORREO); los textos de cada correo, de mail_textos_(clave)
- * (hoja CONFIG_CORREO_TEXTOS, con mail_textosDefault_ como respaldo). Un
- * correo de la app se envía con mail_enviar_(clave, destino, vars, opciones);
- * mail_send_(destino, opts) queda para armar opts a mano.
+ * Firma, nota y pie salen de CFG_().CORREO (solo código). Los textos de cada
+ * correo (asunto y cuerpo) y su "copia siempre a" salen de mail_textos_(clave):
+ * hoja CONFIG_CORREOS (editable desde la vista Configuración, CLAUDE.md §15)
+ * con mail_textosDefault_ como respaldo. Un correo de la app se envía con
+ * mail_enviar_(clave, destino, vars, opciones); mail_send_(destino, opts)
+ * queda para armar opts a mano.
  *
  * opts:
  *   asunto      (obligatorio) asunto del correo.
@@ -36,6 +37,7 @@
  *   parrafos    [string] párrafos del cuerpo, texto plano.
  *   boton       {texto, url} botón centrado (opcional; sin url no se pinta).
  *   destacados  [{titulo, texto}] bloque "Dato destacado" (opcional).
+ *   cc          correos en copia (ver mail_normalizarCc_).
  *   firma       por defecto "Equipo KGP".
  *   nota        texto legal pequeño del pie (por defecto, aviso de correo
  *               automático).
@@ -67,7 +69,7 @@ function mail_render_(opts) {
   var parrafos = (opts.parrafos || []).filter(function (p) { return String(p == null ? '' : p).trim(); });
   var destacados = (opts.destacados || []).filter(function (d) { return d && (d.titulo || d.texto); });
   var boton = (opts.boton && opts.boton.url) ? opts.boton : null;
-  var pie = CFG_().CORREO; // firma, nota y pie: hoja CONFIG_CORREO
+  var pie = CFG_().CORREO; // firma, nota y pie: 00_Config.js (solo código)
   var firma = opts.firma || pie.FIRMA;
   var nota = opts.nota || pie.NOTA_PIE;
   var webUrl = mail_attr_(pie.SITIO_WEB_URL);
@@ -256,20 +258,49 @@ function mail_send_(destino, opts) {
   destino = String(destino || '').trim();
   if (!destino) throw new AppError_('MAIL', 'Correo sin destinatario: ' + (opts && opts.asunto));
   if (!opts || !opts.asunto) throw new AppError_('MAIL', 'Correo sin asunto.');
-  if (MailApp.getRemainingDailyQuota() < 1) {
+  // Copias (opts.cc, ver mail_normalizarCc_): quien ya es destinatario no se repite.
+  var enDestino = destino.toLowerCase().split(/[,;]\s*/);
+  var cc = mail_normalizarCc_(opts.cc).filter(function (c) { return enDestino.indexOf(c.toLowerCase()) === -1; });
+  var cuota = 1 + cc.length + (destino.match(/[,;]/g) || []).length; // MailApp cuenta cada destinatario
+  if (MailApp.getRemainingDailyQuota() < cuota) {
     throw new AppError_('MAIL', 'Se agotó la cuota diaria de correos de Apps Script; no se envió "' + opts.asunto + '".');
   }
   var texto = mail_text_(opts);
-  MailApp.sendEmail({
+  var msg = {
     to: destino,
     subject: opts.asunto,
     htmlBody: mail_render_(opts),
     body: texto,
     name: CFG_().CORREO.REMITENTE_NOMBRE || 'KGP',
     inlineImages: mail_inlineImages_()
-  });
+  };
+  if (cc.length) msg.cc = cc.join(',');
+  MailApp.sendEmail(msg);
   // Solo si MailApp NO lanzó: el historial lista correos realmente enviados.
-  mail_log_(destino, opts.asunto, texto);
+  mail_log_(cc.length ? destino + ' (CC: ' + cc.join(', ') + ')' : destino, opts.asunto, texto);
+}
+
+/**
+ * Lista de copias (CC) depurada: acepta un arreglo o un texto con correos
+ * separados por coma/punto y coma; descarta lo que no parezca un correo y los
+ * repetidos (sin distinguir mayúsculas) y corta en LIMITS.MAX_CC. Nunca lanza.
+ * Vive aquí (y no en 39_NotifyService.js) porque mail_send_ la usa también.
+ * @param {*} cc
+ * @return {!Array<string>}
+ */
+function mail_normalizarCc_(cc) {
+  var crudo = Array.isArray(cc) ? cc : String(cc == null ? '' : cc).split(/[,;\s]+/);
+  var vistos = {};
+  var out = [];
+  crudo.forEach(function (c) {
+    if (typeof c !== 'string') return;
+    c = c.trim();
+    if (!c || c.length > 254 || !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(c)) return;
+    if (vistos[c.toLowerCase()]) return;
+    vistos[c.toLowerCase()] = true;
+    out.push(c);
+  });
+  return out.slice(0, CFG_().LIMITS.MAX_CC);
 }
 
 /**
@@ -336,8 +367,10 @@ function mail_log_(destino, asunto, cuerpo) {
 
 /**
  * Textos POR DEFECTO de cada correo de la app, por clave. La hoja
- * CONFIG_CORREO_TEXTOS (06_ConfigSheet.js) tiene una fila por clave y puede
- * reemplazar cualquier campo: una celda vacía = se usa el texto de aquí.
+ * CONFIG_CORREOS (06_ConfigSheet.js, editable desde la vista Configuración)
+ * tiene una fila por clave y puede reemplazar los campos de
+ * mail_camposTexto_ (asunto y cuerpo): una celda vacía = se usa el texto de
+ * aquí. PREHEADER y ETIQUETA solo se cambian en el código.
  *
  * Formato de los campos (el mismo en la hoja):
  *   {{variable}}                  se reemplaza por su valor.
@@ -349,13 +382,17 @@ function mail_log_(destino, asunto, cuerpo) {
  *               quede vacío no se muestra.
  *   BOTON       texto del botón; el enlace lo pone el código (sin enlace no
  *               hay botón).
- * DESCRIPCION / DESTINATARIO / VARIABLES son solo informativos (columnas de
- * ayuda en la hoja); el código no los usa para enviar.
+ * NOMBRE / DESCRIPCION / DESTINATARIO / VARIABLES son solo informativos (vista
+ * Configuración y columnas de ayuda de la hoja); el código no los usa para
+ * enviar. DESTINO_CFG: solo en los correos con destinatario FIJO — la clave de
+ * CFG_() con sus correos, editable desde la vista (columna DESTINATARIOS); los
+ * demás van a un destinatario automático (creador, responsable...).
  */
 function mail_textosDefault_() {
   var saludo = 'Hola{{#nombre}} {{nombre}}{{/nombre}},';
   return {
     COTIZACION_CREADA: {
+      NOMBRE: 'Cotización creada',
       DESCRIPCION: 'Se envía cuando termina de generarse el documento de una cotización recién creada.',
       DESTINATARIO: 'Quien creó la cotización (CREADO POR o, si está vacío, el correo de ELABORADO POR).',
       VARIABLES: 'nombre, codigo, cliente, estado, fechaElaboracion',
@@ -370,6 +407,7 @@ function mail_textosDefault_() {
       DESTACADOS: 'Código de la cotización | {{codigo}}\nCliente | {{cliente}}\nFecha de elaboración | {{fechaElaboracion}}'
     },
     COTIZACION_APROBADA: {
+      NOMBRE: 'Cotización aprobada',
       DESCRIPCION: 'Se envía cuando se aprueba una cotización y termina de generarse el documento de su OIS u OIP.',
       DESTINATARIO: 'Quien creó la cotización.',
       VARIABLES: 'nombre, codigo, cliente, tipoOrden (OIS/OIP), nombreOrden, codigoOrden, fechaAprobacion',
@@ -384,6 +422,7 @@ function mail_textosDefault_() {
       DESTACADOS: 'Código de la {{tipoOrden}} | {{codigoOrden}}\nCotización | {{codigo}}\nCliente | {{cliente}}\nFecha de aprobación | {{fechaAprobacion}}'
     },
     COTIZACION_RECHAZADA: {
+      NOMBRE: 'Cotización rechazada',
       DESCRIPCION: 'Se envía cuando una cotización se marca como rechazada en "Gestionar cotización".',
       DESTINATARIO: 'Quien creó la cotización.',
       VARIABLES: 'nombre, codigo, cliente, fecha, tieneDocumento (vacía si la cotización no tiene documento)',
@@ -399,6 +438,7 @@ function mail_textosDefault_() {
       DESTACADOS: 'Código de la cotización | {{codigo}}\nCliente | {{cliente}}\nFecha de la decisión | {{fecha}}'
     },
     TAREA_ASIGNADA: {
+      NOMBRE: 'Nueva tarea asignada',
       DESCRIPCION: 'Se envía al crear una tarea (Gestionar tareas, o tareas nuevas al guardar una OIS/OIP). Editar una tarea no envía nada.',
       DESTINATARIO: 'El responsable de la tarea (CORREO en PERSONAL_KGP).',
       VARIABLES: 'nombre, tarea, descripcion, tipoOrden (OIS/OIP), nombreOrden, codigoOrden, cliente, fechaInicio, fechaEntrega',
@@ -413,9 +453,27 @@ function mail_textosDefault_() {
       DESTACADOS: 'Tarea | {{tarea}}\nDescripción | {{descripcion}}{{^descripcion}}Sin descripción adicional.{{/descripcion}}\n' +
         'Pertenece a | {{tipoOrden}} {{codigoOrden}}{{#cliente}} — {{cliente}}{{/cliente}}\nFecha de entrega | {{fechaEntrega}}'
     },
+    OIS_FINALIZADA: {
+      NOMBRE: 'OIS finalizada (aviso a contabilidad)',
+      DESTINO_CFG: 'OIS_FINALIZADA_EMAIL',
+      DESCRIPCION: 'Se envía cuando una OIS queda Finalizada (todas sus tareas cerradas): avisa a contabilidad que ya se puede facturar.',
+      DESTINATARIO: 'Contabilidad (destinatario fijo, editable en Configuración).',
+      VARIABLES: 'codigoOrden, nombreOrden, codigoCotizacion, cliente, fechaFinalizacion, fechaElaboracion, numTareas',
+      ASUNTO: 'OIS {{codigoOrden}} finalizada — lista para facturar',
+      PREHEADER: 'La OIS {{codigoOrden}}{{#cliente}} de {{cliente}}{{/cliente}} terminó y está lista para facturar.',
+      ETIQUETA: 'OIS finalizada',
+      TITULO: 'La OIS {{codigoOrden}} está lista para facturar',
+      SALUDO: 'Hola,',
+      PARRAFOS: 'Les informamos que la {{nombreOrden}} (OIS) {{codigoOrden}}{{#cliente}} del cliente {{cliente}}{{/cliente}} terminó: todas sus tareas fueron finalizadas, por lo que ya está lista para facturar.\n\n' +
+        'Pueden consultar el detalle en el documento de la OIS con el botón de abajo.',
+      BOTON: 'Abrir documento de la OIS',
+      DESTACADOS: 'Código de la OIS | {{codigoOrden}}\nCotización | {{codigoCotizacion}}\nCliente | {{cliente}}\nTareas finalizadas | {{numTareas}}\nFecha de elaboración | {{fechaElaboracion}}\nFecha de finalización | {{fechaFinalizacion}}'
+    },
     OIP_RECORDATORIO: {
+      NOMBRE: 'Recordatorio mensual de facturación OIP',
+      DESTINO_CFG: 'OIP_NOTIF_EMAIL',
       DESCRIPCION: 'Recordatorio mensual de facturación de las OIP (día 1 de cada mes; disparador instalado con admin_installOipFacturacionTrigger).',
-      DESTINATARIO: 'OIP_NOTIF_EMAIL (hoja CONFIG_CORREO).',
+      DESTINATARIO: 'Destinatario fijo, editable en Configuración.',
       VARIABLES: 'mes (p. ej. "septiembre de 2026"), total, plural ("s" si son varias), filasCreadas, estadoPendiente. DESTACADOS se repite por cada OIP pendiente con: codigo, cliente, estado, nueva',
       ASUNTO: 'Recordatorio de facturación OIP — {{mes}} ({{total}} pendiente{{plural}})',
       PREHEADER: '{{total}} OIP pendiente{{plural}} de facturar del mes de {{mes}}.',
@@ -431,20 +489,34 @@ function mail_textosDefault_() {
   };
 }
 
-/** Campos de texto de un correo que se pueden editar (columnas de CONFIG_CORREO_TEXTOS). */
+/**
+ * Campos de texto de un correo editables desde la vista Configuración
+ * (columnas de CONFIG_CORREOS): asunto y cuerpo. Decisión del usuario:
+ * PREHEADER y ETIQUETA quedan solo en el código.
+ */
 function mail_camposTexto_() {
-  return ['ASUNTO', 'PREHEADER', 'ETIQUETA', 'TITULO', 'SALUDO', 'PARRAFOS', 'BOTON', 'DESTACADOS'];
+  return ['ASUNTO', 'TITULO', 'SALUDO', 'PARRAFOS', 'BOTON', 'DESTACADOS'];
 }
 
-/** Textos efectivos de un correo: los de la hoja de config donde tengan valor; si no, los de mail_textosDefault_. */
+/**
+ * Textos efectivos de un correo. Si el correo tiene fila en CONFIG_CORREOS,
+ * manda la fila: un campo vacío queda vacío (p. ej. sin botón), salvo ASUNTO
+ * y PARRAFOS, que sin texto vuelven al de mail_textosDefault_ (un correo sin
+ * asunto o sin cuerpo no tiene sentido). Sin fila, todo sale del código.
+ * Incluye CC = "copia siempre a" de la hoja ('' si no hay).
+ */
 function mail_textos_(clave) {
   var base = mail_textosDefault_()[clave];
   if (!base) throw new AppError_('MAIL', 'No existe el correo "' + clave + '" en mail_textosDefault_.');
   var hoja = (cfgs_overrides_().correos || {})[clave] || {};
   var out = Object.assign({}, base);
+  var obligatorios = ['ASUNTO', 'PARRAFOS'];
   mail_camposTexto_().forEach(function (campo) {
-    if (hoja[campo] != null && String(hoja[campo]).trim() !== '') out[campo] = String(hoja[campo]);
+    if (!Object.prototype.hasOwnProperty.call(hoja, campo)) return;
+    var v = String(hoja[campo] == null ? '' : hoja[campo]);
+    if (v.trim() !== '' || obligatorios.indexOf(campo) === -1) out[campo] = v;
   });
+  out.CC = hoja.CC || '';
   return out;
 }
 
@@ -474,6 +546,8 @@ function mail_tpl_(texto, vars) {
  * opciones.url: enlace del botón (sin url no hay botón).
  * opciones.items: [vars] — las líneas de DESTACADOS se repiten por item (con
  * las variables del item sobre las generales); lo usa el recordatorio OIP.
+ * opciones.cc: correos en copia (arreglo o texto; ver mail_normalizarCc_).
+ * Se suman a la "copia siempre a" del correo (CONFIG_CORREOS).
  */
 function mail_construir_(clave, vars, opciones) {
   opciones = opciones || {};
@@ -505,7 +579,8 @@ function mail_construir_(clave, vars, opciones) {
     saludo: mail_tpl_(t.SALUDO, vars).trim(),
     parrafos: parrafos,
     boton: (opciones.url && botonTexto) ? { texto: botonTexto, url: opciones.url } : null,
-    destacados: destacados
+    destacados: destacados,
+    cc: mail_normalizarCc_(mail_normalizarCc_(opciones.cc).concat(mail_normalizarCc_(t.CC)))
   };
 }
 

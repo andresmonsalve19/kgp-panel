@@ -186,6 +186,7 @@ function qs_resolveContacto_(contactoInput, idCliente, idsGenerados, label) {
  * @throws {AppError_} NOT_FOUND si el establecimiento existente no está.
  */
 function qs_resolveEstablecimiento_(estInput, idCliente, idsGenerados) {
+  if (!estInput) return ''; // el establecimiento es opcional
   if (estInput.modo === 'existente') {
     var existing = est_getEstablecimiento_(estInput.idEstablecimiento);
     if (!existing) throw new AppError_('NOT_FOUND', 'No existe el establecimiento ' + estInput.idEstablecimiento + '.');
@@ -213,7 +214,8 @@ function qs_resolveEstablecimiento_(estInput, idCliente, idsGenerados) {
  * NO pasa por aquí: va con api_aprobarConOis/Oip para que nunca exista una
  * cotización aprobada sin su orden.
  *
- * Fuera del lock, si acaba de rechazarse, avisa por correo al creador.
+ * Fuera del lock, si acaba de rechazarse, avisa por correo al creador,
+ * con copia a quienes el usuario eligió (payload.cc).
  *
  * @param {string} idCotizacion
  * @param {!Object} payload Ver validateUpdatePayload_.
@@ -240,7 +242,7 @@ function qs_updateQuotation(idCotizacion, payload) {
   // Ya fuera del lock (39_NotifyService.js; nunca lanza). La aprobación avisa
   // al generarse el documento de su OIS/OIP, porque el correo lleva ese enlace.
   if (res.ok && res.data.estadoCambio && res.data.estado === CFG_().ESTADO_RECHAZADA) {
-    ntf_cotizacionRechazada_(idCotizacion);
+    ntf_cotizacionRechazada_(idCotizacion, payload.cc);
   }
   return res;
 }
@@ -306,7 +308,7 @@ function qs_applyQuotationUpdate_(idCotizacion, clean, opts) {
 
   if (!cli_getCliente_(clean.idCliente)) return fail_('NOT_FOUND', 'No existe el cliente ' + clean.idCliente + '.');
   if (!con_getContacto_(clean.idSolicitante)) return fail_('NOT_FOUND', 'No existe el solicitante ' + clean.idSolicitante + '.');
-  if (!est_getEstablecimiento_(clean.idEstablecimiento)) return fail_('NOT_FOUND', 'No existe el establecimiento ' + clean.idEstablecimiento + '.');
+  if (clean.idEstablecimiento && !est_getEstablecimiento_(clean.idEstablecimiento)) return fail_('NOT_FOUND', 'No existe el establecimiento ' + clean.idEstablecimiento + '.');
 
   var codigo = filaBase[normText_('CODIGO')];
   var fechaElaboracion = qs_aFecha_(filaBase[normText_('FECHA ELABORACION')]);

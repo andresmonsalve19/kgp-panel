@@ -1,0 +1,733 @@
+<script>
+/**
+ * Lógica de la vista "Configuración" (ui/ViewConfig.html, CLAUDE.md §15).
+ * Tres pestañas, cada una guarda al instante en el spreadsheet de catálogo:
+ *
+ *   - Correos: una tarjeta por correo de mail_textosDefault_. "Editar" abre su
+ *     formulario (uno a la vez): destinatarios (solo los de destinatario
+ *     fijo), "copia siempre a", asunto, título, saludo, párrafos, botón y
+ *     datos destacados. Las variables {{...}} se insertan con un clic en el
+ *     último campo enfocado. "Restaurar texto original" rellena el formulario
+ *     con los textos del código (no guarda hasta "Guardar").
+ *     -> api_saveConfigCorreo
+ *   - Archivos y carpetas: un campo por ID (acepta el enlace completo). Se
+ *     guardan juntos los que cambiaron; el servidor comprueba el acceso a cada
+ *     uno antes de escribir. Cambiar la base de datos pide confirmación.
+ *     -> api_saveConfigIds
+ *   - Tipos de servicio: tabla con edición en la fila, alta arriba y baja con
+ *     confirmación en dos pasos. -> api_saveTipoServicio / api_deleteTipoServicio
+ *     Tras cada cambio se refresca KGP.catalog (desplegables de las
+ *     cotizaciones).
+ *   - Consecutivos: una tarjeta por contador (cotización, OIS, OIP) con el
+ *     último número usado y el próximo código; se puede subir el contador
+ *     (el siguiente será ese + 1). -> api_saveConsecutivo
+ *
+ * Se lee fresco (api_getConfiguracion) al entrar por primera vez en la sesión
+ * y con "Actualizar"; nunca de KGP.localCache.
+ */
+window.KGP = window.KGP || {};
+
+(function (KGP) {
+  'use strict';
+
+  var esc = KGP.escapeHtml;
+  var CAMPOS = [
+    { k: 'ASUNTO', label: 'Asunto', req: true, hint: 'Una sola línea.' },
+    { k: 'TITULO', label: 'Título', hint: 'El encabezado grande del correo. Vacío = sin título.' },
+    { k: 'SALUDO', label: 'Saludo', hint: 'Ej.: Hola{{#nombre}} {{nombre}}{{/nombre}},' },
+    { k: 'PARRAFOS', label: 'Párrafos (cuerpo)', req: true, multi: 8, hint: 'Separa los párrafos con una línea en blanco. Un salto de línea simple se respeta dentro del párrafo.' },
+    { k: 'BOTON', label: 'Texto del botón', hint: 'El enlace lo pone la app (documento correspondiente). Vacío = sin botón.' },
+    { k: 'DESTACADOS', label: 'Datos destacados', multi: 5, hint: 'Una línea por dato: "Título | valor". Un dato cuyo valor quede vacío no se muestra.' }
+  ];
+
+  var state = {
+    loaded: false,
+    loading: false,
+    tab: 'correos',
+    data: null,             // {hojaUrl, ids, correos, tipos}
+    correoAbierto: null,    // clave del correo en edición
+    correoGuardando: false,
+    ultimoCampo: null,      // input/textarea donde se inserta una variable
+    idsDraft: {},           // clave -> valor escrito (solo los que cambiaron)
+    idsErrores: {},
+    idsConfirmarDb: false,
+    idsGuardando: false,
+    tipoEditando: null,     // fila | 'nuevo'
+    tipoConfirmDelete: null,
+    tipoGuardando: false,
+    tiposQ: '',
+    consecDraft: {},        // tipo -> valor escrito
+    consecErrores: {},
+    consecGuardando: null   // tipo que se está guardando
+  };
+  var eventsWired = false;
+  var loadingHtml = null; // contenido original de #cfg-loading (se restaura al reintentar tras un error)
+
+  KGP.config.onEnter = function () {
+    wireEvents();
+    if (state.loaded || state.loading) return; // misma sesión: no repetir la consulta (botón Actualizar)
+    fetchConfig();
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  function fetchConfig(opts) {
+    opts = opts || {};
+    state.loading = true;
+    if (!state.loaded) {
+      if (loadingHtml === null) loadingHtml = $('cfg-loading').innerHTML;
+      else $('cfg-loading').innerHTML = loadingHtml;
+      $('cfg-loading').hidden = false;
+      $('cfg-content').hidden = true;
+    }
+    setRefreshSpinner(true);
+    return KGP.apiCall('api_getConfiguracion', []).then(function (d) {
+      state.data = d;
+      state.loaded = true;
+      state.correoAbierto = null;
+      state.idsDraft = {};
+      state.idsErrores = {};
+      state.idsConfirmarDb = false;
+      state.tipoEditando = null;
+      state.tipoConfirmDelete = null;
+      state.consecDraft = {};
+      state.consecErrores = {};
+      $('cfg-hoja-link').href = d.hojaUrl;
+      $('cfg-hoja-link').hidden = false;
+      $('cfg-loading').hidden = true;
+      $('cfg-content').hidden = false;
+      renderAll();
+      (d.avisos || []).forEach(function (a) { KGP.toast(a, 'warning', 7000); });
+      if (opts.manual) KGP.toast('Configuración actualizada.', 'success');
+    }).catch(function (err) {
+      KGP.toast('No se pudo cargar la configuración: ' + KGP.friendlyError(err), 'error', 7000);
+      if (!state.loaded) $('cfg-loading').innerHTML = '<div class="page-loader-text">No se pudo cargar la configuración. Usa "Actualizar" para reintentar.</div>';
+    }).finally(function () {
+      state.loading = false;
+      setRefreshSpinner(false);
+    });
+  }
+
+  function setRefreshSpinner(show) {
+    var el = $('cfg-refresh-spinner');
+    if (el) el.style.display = show ? 'inline-block' : 'none';
+  }
+
+  function renderAll() {
+    renderCorreos();
+    renderIds();
+    renderTipos();
+    renderConsecutivos();
+  }
+
+  function setTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('#cfg-tabs .seg-option').forEach(function (b) {
+      var on = b.getAttribute('data-tab') === tab;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('#view-config .cfg-panel').forEach(function (p) {
+      p.hidden = p.getAttribute('data-panel') !== tab;
+    });
+  }
+
+  function fieldErrors(contenedor, errores) {
+    contenedor.querySelectorAll('.field.invalid').forEach(function (f) { f.classList.remove('invalid'); });
+    Object.keys(errores || {}).forEach(function (k) {
+      var f = contenedor.querySelector('.field[data-field="' + k + '"]');
+      if (!f) return;
+      f.classList.add('invalid');
+      var e = f.querySelector('.err');
+      if (e) e.textContent = errores[k];
+    });
+  }
+
+  // =====================================================================
+  // Correos
+  // =====================================================================
+
+  function correoDe(clave) {
+    return (state.data.correos || []).filter(function (c) { return c.clave === clave; })[0] || null;
+  }
+
+  /** Nombres de variable a partir del texto VARIABLES ("nombre, codigo, tipoOrden (OIS/OIP)..."). */
+  function variablesDe(texto) {
+    var vistos = {};
+    return String(texto || '').replace(/\([^)]*\)/g, '').split(/[,:.]\s*/).map(function (s) { return s.trim(); })
+      .filter(function (s) {
+        if (!/^[a-zA-Z]\w*$/.test(s) || vistos[s]) return false;
+        vistos[s] = true;
+        return true;
+      });
+  }
+
+  function renderCorreos() {
+    var list = $('cfg-correos-list');
+    list.innerHTML = (state.data.correos || []).map(function (c) {
+      var abierto = state.correoAbierto === c.clave;
+      var para = c.destinatarioFijo ? (c.destinatarios || '—') : 'Automático: ' + c.destinatarios;
+      return '<div class="card cfg-correo' + (abierto ? ' is-open' : '') + '" data-clave="' + esc(c.clave) + '">' +
+        '<div class="cfg-correo-head">' +
+        '<div class="cfg-correo-titulos">' +
+        '<div class="cfg-correo-nombre">' + esc(c.nombre) + '</div>' +
+        '<div class="cfg-correo-desc">' + esc(c.descripcion) + '</div>' +
+        '</div>' +
+        (abierto ? '' : '<button type="button" class="btn btn-sm" data-action="editar-correo">Editar</button>') +
+        '</div>' +
+        (abierto ? correoFormHtml(c) :
+          '<dl class="cfg-resumen">' +
+          '<dt>Para</dt><dd>' + esc(para) + '</dd>' +
+          '<dt>Copia siempre a</dt><dd>' + esc(c.cc || 'Nadie') + '</dd>' +
+          '<dt>Asunto</dt><dd>' + esc(c.campos.ASUNTO) + '</dd>' +
+          '</dl>') +
+        '</div>';
+    }).join('');
+  }
+
+  function correoFormHtml(c) {
+    var html = '<div class="cfg-correo-form">';
+    if (c.destinatarioFijo) {
+      html += campoHtml('destinatarios', 'Destinatarios', c.destinatarios, { req: true, hint: 'A quién le llega este correo. Varios: separados por coma.' });
+    } else {
+      html += '<div class="field"><label>Destinatario</label><div class="cfg-auto">Automático: ' + esc(c.destinatarios) + '</div></div>';
+    }
+    html += campoHtml('cc', 'Copia siempre a', c.cc, { hint: 'Reciben copia de TODOS los envíos de este correo, además de las copias que se elijan al enviar. Varios: separados por coma.' });
+    CAMPOS.forEach(function (f) { html += campoHtml(f.k, f.label, c.campos[f.k], f); });
+
+    var vars = variablesDe(c.variables);
+    if (vars.length) {
+      html += '<div class="cfg-vars"><span class="cfg-vars-label">Variables (clic para insertar en el campo seleccionado):</span>' +
+        vars.map(function (v) { return '<button type="button" class="chip" data-var="' + esc(v) + '">{{' + esc(v) + '}}</button>'; }).join('') +
+        '<div class="cfg-vars-hint">{{#variable}}texto{{/variable}} = el texto solo aparece si la variable tiene valor; {{^variable}}texto{{/variable}} = solo si está vacía.</div>' +
+        '</div>';
+    }
+    html += '<div class="cfg-actions">' +
+      '<button type="button" class="btn btn-sm btn-ghost" data-action="restaurar-correo">Restaurar texto original</button>' +
+      '<span class="cfg-actions-sep"></span>' +
+      '<button type="button" class="btn btn-sm" data-action="cancelar-correo"' + (state.correoGuardando ? ' disabled' : '') + '>Cancelar</button>' +
+      '<button type="button" class="btn btn-primary" data-action="guardar-correo"' + (state.correoGuardando ? ' disabled' : '') + '>' +
+      (state.correoGuardando ? '<span class="spinner"></span> Guardando…' : 'Guardar correo') + '</button>' +
+      '</div></div>';
+    return html;
+  }
+
+  function campoHtml(k, label, valor, f) {
+    f = f || {};
+    var control = f.multi
+      ? '<textarea data-f="' + k + '" rows="' + f.multi + '" spellcheck="true">' + esc(valor || '') + '</textarea>'
+      : '<input type="text" data-f="' + k + '" value="' + esc(valor || '') + '" autocomplete="off">';
+    return '<div class="field" data-field="' + k + '">' +
+      '<label>' + esc(label) + (f.req ? ' <span class="req">*</span>' : '') + '</label>' +
+      control +
+      (f.hint ? '<div class="hint">' + esc(f.hint) + '</div>' : '') +
+      '<div class="err"></div></div>';
+  }
+
+  function formCorreo() {
+    return document.querySelector('#cfg-correos-list .cfg-correo.is-open');
+  }
+
+  function correoDirty() {
+    var form = formCorreo();
+    if (!form) return false;
+    var c = correoDe(state.correoAbierto);
+    var datos = leerFormCorreo(form);
+    if (c.destinatarioFijo && datos.destinatarios !== c.destinatarios) return true;
+    if (datos.cc !== (c.cc || '')) return true;
+    return CAMPOS.some(function (f) { return datos[f.k] !== (c.campos[f.k] || ''); });
+  }
+
+  function leerFormCorreo(form) {
+    var datos = {};
+    form.querySelectorAll('[data-f]').forEach(function (el) { datos[el.getAttribute('data-f')] = el.value; });
+    return datos;
+  }
+
+  function abrirCorreo(clave) {
+    if (state.correoAbierto && state.correoAbierto !== clave && correoDirty()) {
+      KGP.toast('Guarda o cancela primero los cambios de "' + correoDe(state.correoAbierto).nombre + '".', 'warning', 5000);
+      var abierto = formCorreo();
+      if (abierto) abierto.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    state.correoAbierto = clave;
+    state.ultimoCampo = null;
+    renderCorreos();
+    var form = formCorreo();
+    if (form) {
+      form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      var primero = form.querySelector('[data-f]');
+      if (primero) primero.focus({ preventScroll: true });
+    }
+  }
+
+  function cerrarCorreo() {
+    state.correoAbierto = null;
+    state.ultimoCampo = null;
+    renderCorreos();
+  }
+
+  function restaurarCorreo() {
+    var form = formCorreo();
+    var c = correoDe(state.correoAbierto);
+    if (!form || !c) return;
+    CAMPOS.forEach(function (f) {
+      var el = form.querySelector('[data-f="' + f.k + '"]');
+      if (el) el.value = c.originales[f.k] || '';
+    });
+    var dest = form.querySelector('[data-f="destinatarios"]');
+    if (dest && c.destinatariosOriginal) dest.value = c.destinatariosOriginal;
+    KGP.toast('Se restauraron los textos originales en el formulario. Pulsa "Guardar correo" para aplicarlos.', 'info', 6000);
+  }
+
+  function guardarCorreo() {
+    var form = formCorreo();
+    var clave = state.correoAbierto;
+    if (!form || !clave || state.correoGuardando) return;
+    var datos = leerFormCorreo(form);
+    var errores = {};
+    if (!String(datos.ASUNTO || '').trim()) errores.ASUNTO = 'El asunto es obligatorio.';
+    if (!String(datos.PARRAFOS || '').trim()) errores.PARRAFOS = 'El cuerpo del correo no puede quedar vacío.';
+    if (correoDe(clave).destinatarioFijo && !String(datos.destinatarios || '').trim()) errores.destinatarios = 'Este correo necesita al menos un destinatario.';
+    if (Object.keys(errores).length) { fieldErrors(form, errores); return; }
+
+    state.correoGuardando = true;
+    setBotonesCorreo(form, true);
+    KGP.apiCall('api_saveConfigCorreo', [clave, datos], { retryOn: ['BUSY'] }).then(function (actualizado) {
+      state.data.correos = state.data.correos.map(function (c) { return c.clave === clave ? actualizado : c; });
+      state.correoGuardando = false;
+      state.correoAbierto = null;
+      renderCorreos();
+      KGP.toast('Correo "' + actualizado.nombre + '" guardado. Los próximos envíos ya usan estos textos.', 'success', 5000);
+    }).catch(function (err) {
+      state.correoGuardando = false;
+      setBotonesCorreo(form, false);
+      if (err.code === 'VALIDATION' && err.details && typeof err.details === 'object') fieldErrors(form, err.details);
+      KGP.toast('No se pudo guardar el correo: ' + KGP.friendlyError(err), 'error', 7000);
+    });
+  }
+
+  function setBotonesCorreo(form, guardando) {
+    var g = form.querySelector('[data-action="guardar-correo"]');
+    var c = form.querySelector('[data-action="cancelar-correo"]');
+    if (g) { g.disabled = guardando; g.innerHTML = guardando ? '<span class="spinner"></span> Guardando…' : 'Guardar correo'; }
+    if (c) c.disabled = guardando;
+  }
+
+  function insertarVariable(nombre) {
+    var el = state.ultimoCampo;
+    if (!el || !document.body.contains(el)) {
+      KGP.toast('Haz clic primero en el campo donde quieres insertar la variable.', 'info', 4000);
+      return;
+    }
+    var texto = '{{' + nombre + '}}';
+    var ini = el.selectionStart != null ? el.selectionStart : el.value.length;
+    var fin = el.selectionEnd != null ? el.selectionEnd : el.value.length;
+    el.value = el.value.slice(0, ini) + texto + el.value.slice(fin);
+    el.focus();
+    el.selectionStart = el.selectionEnd = ini + texto.length;
+  }
+
+  // =====================================================================
+  // Archivos y carpetas (IDs)
+  // =====================================================================
+
+  function renderIds() {
+    var grupos = [];
+    var porGrupo = {};
+    (state.data.ids || []).forEach(function (x) {
+      if (!porGrupo[x.grupo]) { porGrupo[x.grupo] = []; grupos.push(x.grupo); }
+      porGrupo[x.grupo].push(x);
+    });
+    $('cfg-ids-list').innerHTML = grupos.map(function (g) {
+      return '<div class="cfg-ids-grupo"><div class="section-title">' + esc(g) + '</div>' +
+        porGrupo[g].map(idRowHtml).join('') + '</div>';
+    }).join('');
+    syncIdsBar();
+  }
+
+  function idRowHtml(x) {
+    var draft = state.idsDraft.hasOwnProperty(x.clave) ? state.idsDraft[x.clave] : x.valor;
+    var err = state.idsErrores[x.clave];
+    return '<div class="cfg-id-row' + (state.idsDraft.hasOwnProperty(x.clave) ? ' is-dirty' : '') + '">' +
+      '<div class="cfg-id-info">' +
+      '<div class="cfg-id-nombre">' + esc(x.nombre) + ' <span class="cc-tag">' + esc(x.tipo === 'Carpeta' ? 'Carpeta' : x.tipo === 'Archivo' ? 'Archivo' : 'Hoja de cálculo') + '</span></div>' +
+      '<div class="cfg-id-desc">' + esc(x.descripcion) + '</div>' +
+      '</div>' +
+      '<div class="field cfg-id-field' + (err ? ' invalid' : '') + '" data-field="' + esc(x.clave) + '">' +
+      '<div class="picker-row">' +
+      '<input type="text" class="cell-mono" data-id-clave="' + esc(x.clave) + '" value="' + esc(draft) + '"' + (x.soloLectura ? ' readonly title="Fijo en el código: de este archivo se lee toda la configuración."' : '') + ' spellcheck="false" autocomplete="off" aria-label="' + esc(x.nombre) + '">' +
+      (x.url ? '<a class="btn btn-sm" href="' + esc(x.url) + '" target="_blank" rel="noopener" title="Abrir en Drive">Abrir ↗</a>' : '') +
+      '</div>' +
+      '<div class="err">' + esc(err || '') + '</div>' +
+      '</div></div>';
+  }
+
+  function idsCambiados() { return Object.keys(state.idsDraft); }
+
+  function syncIdsBar() {
+    var n = idsCambiados().length;
+    $('cfg-ids-dirty').textContent = n ? (n === 1 ? '1 cambio sin guardar' : n + ' cambios sin guardar') : '';
+    $('cfg-ids-save').disabled = !n || state.idsGuardando;
+    $('cfg-ids-reset').disabled = !n || state.idsGuardando;
+    $('cfg-ids-spinner').style.display = state.idsGuardando ? 'inline-block' : 'none';
+    $('cfg-ids-save-label').textContent = state.idsGuardando ? 'Comprobando y guardando…'
+      : state.idsConfirmarDb ? 'Sí, cambiar la base de datos' : 'Guardar cambios';
+    $('cfg-ids-save').classList.toggle('btn-danger', state.idsConfirmarDb && !state.idsGuardando);
+  }
+
+  function onIdInput(el) {
+    var clave = el.getAttribute('data-id-clave');
+    var original = (state.data.ids.filter(function (x) { return x.clave === clave; })[0] || {}).valor || '';
+    if (el.value.trim() === original) delete state.idsDraft[clave];
+    else state.idsDraft[clave] = el.value.trim();
+    delete state.idsErrores[clave];
+    state.idsConfirmarDb = false;
+    var row = el.closest('.cfg-id-row');
+    if (row) {
+      row.classList.toggle('is-dirty', state.idsDraft.hasOwnProperty(clave));
+      var f = row.querySelector('.field');
+      if (f) f.classList.remove('invalid');
+    }
+    syncIdsBar();
+  }
+
+  function guardarIds() {
+    var cambios = {};
+    idsCambiados().forEach(function (k) { cambios[k] = state.idsDraft[k]; });
+    if (!Object.keys(cambios).length || state.idsGuardando) return;
+    // Cambiar la BD principal mueve TODA la app a otro archivo: segundo clic para confirmar.
+    if (cambios.hasOwnProperty('DB_SHEET_ID') && !state.idsConfirmarDb) {
+      state.idsConfirmarDb = true;
+      syncIdsBar();
+      $('cfg-ids-dirty').textContent = 'Vas a cambiar la base de datos principal: la app leerá y guardará cotizaciones, clientes y órdenes en ese otro archivo. Pulsa de nuevo para confirmar.';
+      return;
+    }
+    state.idsGuardando = true;
+    state.idsConfirmarDb = false;
+    syncIdsBar();
+    KGP.apiCall('api_saveConfigIds', [cambios], { retryOn: ['BUSY'] }).then(function (res) {
+      state.data.ids = res.ids;
+      state.idsDraft = {};
+      state.idsErrores = {};
+      renderIds();
+      var nombres = Object.keys(res.nombres || {}).map(function (k) {
+        var x = res.ids.filter(function (i) { return i.clave === k; })[0];
+        return (x ? x.nombre : k) + ' → "' + res.nombres[k] + '"';
+      });
+      KGP.toast('IDs guardados.' + (nombres.length ? ' ' + nombres.join(' · ') : ''), 'success', 7000);
+    }).catch(function (err) {
+      if (err.code === 'VALIDATION' && err.details && typeof err.details === 'object') {
+        state.idsErrores = err.details;
+        renderIds();
+      }
+      KGP.toast('No se guardaron los IDs: ' + KGP.friendlyError(err), 'error', 7000);
+    }).finally(function () {
+      state.idsGuardando = false;
+      syncIdsBar();
+    });
+  }
+
+  function descartarIds() {
+    state.idsDraft = {};
+    state.idsErrores = {};
+    state.idsConfirmarDb = false;
+    renderIds();
+  }
+
+  // =====================================================================
+  // Tipos de servicio
+  // =====================================================================
+
+  var EDIT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+  var TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+
+  function tiposFiltrados() {
+    var q = String(state.tiposQ || '').toLowerCase().trim();
+    var lista = state.data.tipos || [];
+    if (!q) return lista;
+    return lista.filter(function (t) { return (t.tipo + ' ' + t.codigoUnspsc).toLowerCase().indexOf(q) !== -1; });
+  }
+
+  function renderTipos() {
+    var lista = tiposFiltrados();
+    var html = '';
+    if (state.tipoEditando === 'nuevo') html += tipoEditHtml({ fila: 'nuevo', tipo: '', codigoUnspsc: '' });
+    html += lista.map(function (t) {
+      return state.tipoEditando === t.fila ? tipoEditHtml(t) : tipoRowHtml(t);
+    }).join('');
+    if (!html) {
+      html = '<tr><td colspan="3" class="empty-state">' + ((state.data.tipos || []).length ? 'Ningún tipo coincide con la búsqueda.' : 'No hay tipos de servicio registrados.') + '</td></tr>';
+    }
+    $('cfg-tipos-tbody').innerHTML = html;
+    var total = (state.data.tipos || []).length;
+    $('cfg-tipos-count').textContent = total === 1 ? '1 tipo de servicio' : total + ' tipos de servicio';
+    $('cfg-tipo-nuevo-btn').disabled = state.tipoEditando === 'nuevo';
+    var foco = $('cfg-tipos-tbody').querySelector('input[data-t="tipo"]');
+    if (foco && state.tipoEditando != null) foco.focus();
+  }
+
+  function tipoRowHtml(t) {
+    var acciones = state.tipoConfirmDelete === t.fila
+      ? '<div class="picker-row"><span class="cell-muted">¿Eliminar?</span>' +
+        '<button type="button" class="btn btn-sm btn-danger" data-action="tipo-borrar-si" data-fila="' + t.fila + '">Sí</button>' +
+        '<button type="button" class="btn btn-sm btn-ghost" data-action="tipo-borrar-no">Cancelar</button></div>'
+      : '<div class="picker-row">' +
+        '<button type="button" class="btn btn-sm btn-icon-edit" data-action="tipo-editar" data-fila="' + t.fila + '" title="Editar tipo de servicio">' + EDIT_SVG + '</button>' +
+        '<button type="button" class="btn btn-sm btn-icon-delete" data-action="tipo-borrar" data-fila="' + t.fila + '" title="Eliminar tipo de servicio">' + TRASH_SVG + '</button></div>';
+    return '<tr><td>' + esc(t.tipo) + '</td><td class="cell-mono">' + esc(t.codigoUnspsc || '—') + '</td><td>' + acciones + '</td></tr>';
+  }
+
+  function tipoEditHtml(t) {
+    var g = state.tipoGuardando;
+    return '<tr class="cfg-tipo-edit" data-fila="' + t.fila + '">' +
+      '<td><div class="field" data-field="tipo"><input type="text" data-t="tipo" value="' + esc(t.tipo) + '" placeholder="Tipo de servicio" maxlength="200" aria-label="Tipo de servicio"><div class="err"></div></div></td>' +
+      '<td><div class="field" data-field="codigoUnspsc"><input type="text" class="cell-mono" data-t="codigoUnspsc" value="' + esc(t.codigoUnspsc) + '" placeholder="Código UNSPSC" maxlength="40" aria-label="Código UNSPSC"><div class="err"></div></div></td>' +
+      '<td><div class="picker-row">' +
+      '<button type="button" class="btn btn-sm btn-primary" data-action="tipo-guardar"' + (g ? ' disabled' : '') + '>' + (g ? '<span class="spinner"></span> Guardando…' : 'Guardar') + '</button>' +
+      '<button type="button" class="btn btn-sm btn-ghost" data-action="tipo-cancelar"' + (g ? ' disabled' : '') + '>Cancelar</button>' +
+      '</div></td></tr>';
+  }
+
+  function tipoPorFila(fila) {
+    return (state.data.tipos || []).filter(function (t) { return t.fila === fila; })[0] || null;
+  }
+
+  function editarTipo(fila) {
+    if (state.tipoGuardando) return;
+    state.tipoEditando = fila;
+    state.tipoConfirmDelete = null;
+    renderTipos();
+  }
+
+  function guardarTipo() {
+    var row = $('cfg-tipos-tbody').querySelector('.cfg-tipo-edit');
+    if (!row || state.tipoGuardando) return;
+    var esNuevo = state.tipoEditando === 'nuevo';
+    var previo = esNuevo ? null : tipoPorFila(state.tipoEditando);
+    var datos = {
+      fila: esNuevo ? '' : state.tipoEditando,
+      tipoAnterior: previo ? previo.tipo : '',
+      tipo: row.querySelector('[data-t="tipo"]').value,
+      codigoUnspsc: row.querySelector('[data-t="codigoUnspsc"]').value
+    };
+    var errores = {};
+    if (!datos.tipo.trim()) errores.tipo = 'Obligatorio.';
+    if (!datos.codigoUnspsc.trim()) errores.codigoUnspsc = 'Obligatorio.';
+    if (Object.keys(errores).length) { fieldErrors(row, errores); return; }
+
+    state.tipoGuardando = true;
+    setBotonesTipo(row, true);
+    KGP.apiCall('api_saveTipoServicio', [datos], { retryOn: ['BUSY'] }).then(function (lista) {
+      state.data.tipos = lista;
+      state.tipoEditando = null;
+      state.tipoGuardando = false;
+      renderTipos();
+      KGP.toast(esNuevo ? 'Tipo de servicio agregado.' : 'Tipo de servicio actualizado.', 'success');
+      avisarCatalogo();
+    }).catch(function (err) {
+      state.tipoGuardando = false;
+      setBotonesTipo(row, false);
+      if (err.code === 'VALIDATION' && err.details && typeof err.details === 'object') fieldErrors(row, err.details);
+      KGP.toast('No se pudo guardar: ' + KGP.friendlyError(err), 'error', 7000);
+    });
+  }
+
+  function setBotonesTipo(row, guardando) {
+    var g = row.querySelector('[data-action="tipo-guardar"]');
+    var c = row.querySelector('[data-action="tipo-cancelar"]');
+    if (g) { g.disabled = guardando; g.innerHTML = guardando ? '<span class="spinner"></span> Guardando…' : 'Guardar'; }
+    if (c) c.disabled = guardando;
+  }
+
+  function borrarTipo(fila) {
+    var t = tipoPorFila(fila);
+    if (!t) return;
+    KGP.apiCall('api_deleteTipoServicio', [fila, t.tipo], { retryOn: ['BUSY'] }).then(function (lista) {
+      state.data.tipos = lista;
+      state.tipoConfirmDelete = null;
+      renderTipos();
+      KGP.toast('Tipo de servicio "' + t.tipo + '" eliminado.', 'success');
+      avisarCatalogo();
+    }).catch(function (err) {
+      state.tipoConfirmDelete = null;
+      renderTipos();
+      KGP.toast('No se pudo eliminar: ' + KGP.friendlyError(err), 'error', 7000);
+    });
+  }
+
+  /** Los desplegables de tipo de servicio (Crear/Gestionar cotización) salen de KGP.catalog. */
+  function avisarCatalogo() {
+    KGP.catalog.load(true).catch(function () { /* no crítico: se reintenta al recargar */ });
+  }
+
+  // =====================================================================
+  // Consecutivos
+  // =====================================================================
+
+  function renderConsecutivos() {
+    $('cfg-consec-list').innerHTML = (state.data.consecutivos || []).map(function (c) {
+      var draft = state.consecDraft.hasOwnProperty(c.tipo) ? state.consecDraft[c.tipo] : String(c.ultimo);
+      var err = state.consecErrores[c.tipo];
+      var guardando = state.consecGuardando === c.tipo;
+      var cambiado = String(draft).trim() !== String(c.ultimo);
+      var nota = c.porAnio
+        ? 'Reinicia cada año: este contador es el de ' + esc(c.anio) + '. En enero arranca otra vez desde 1 (o desde donde lo dejes aquí).'
+        : 'No reinicia por año: es un solo contador global; solo cambia el sufijo del año.';
+      return '<div class="card cfg-consec" data-tipo="' + esc(c.tipo) + '">' +
+        '<div class="cfg-correo-head"><div class="cfg-correo-titulos">' +
+        '<div class="cfg-correo-nombre">' + esc(c.nombre) + '</div>' +
+        '<div class="cfg-correo-desc">' + nota + '</div></div></div>' +
+        '<dl class="cfg-resumen">' +
+        '<dt>Próximo código</dt><dd class="cell-mono">' + esc(c.proximo || 'Se alcanzó el máximo (999)') + '</dd>' +
+        '<dt>Ya existen hasta</dt><dd>' + (c.minimo ? 'el número ' + c.minimo : 'ninguno todavía') + '</dd>' +
+        '</dl>' +
+        '<div class="cfg-consec-form">' +
+        '<div class="field' + (err ? ' invalid' : '') + '" data-field="ultimo">' +
+        '<label>Último número usado</label>' +
+        '<input type="number" inputmode="numeric" min="' + c.minimo + '" max="999" step="1" data-consec="' + esc(c.tipo) + '" value="' + esc(draft) + '"' + (guardando ? ' disabled' : '') + '>' +
+        '<div class="hint">El siguiente código usará el número que sigue a este.</div>' +
+        '<div class="err">' + esc(err || '') + '</div></div>' +
+        '<button type="button" class="btn btn-primary" data-action="consec-guardar" data-tipo="' + esc(c.tipo) + '"' + (!cambiado || guardando ? ' disabled' : '') + '>' +
+        (guardando ? '<span class="spinner"></span> Guardando…' : 'Guardar contador') + '</button>' +
+        '</div></div>';
+    }).join('');
+  }
+
+  function guardarConsecutivo(tipo) {
+    if (state.consecGuardando) return;
+    var c = (state.data.consecutivos || []).filter(function (x) { return x.tipo === tipo; })[0];
+    if (!c) return;
+    var valor = state.consecDraft.hasOwnProperty(tipo) ? state.consecDraft[tipo] : String(c.ultimo);
+    var n = Number(String(valor).trim());
+    if (String(valor).trim() === '' || !isFinite(n) || n !== Math.trunc(n) || n < c.minimo || n > 999) {
+      state.consecErrores[tipo] = (isFinite(n) && n < c.minimo && String(valor).trim() !== '')
+        ? 'Ya existen códigos hasta el ' + c.minimo + '; no puede quedar por debajo.'
+        : 'Escribe un número entero entre ' + c.minimo + ' y 999.';
+      renderConsecutivos();
+      return;
+    }
+    state.consecGuardando = tipo;
+    delete state.consecErrores[tipo];
+    renderConsecutivos();
+    KGP.apiCall('api_saveConsecutivo', [tipo, n], { retryOn: ['BUSY'] }).then(function (lista) {
+      state.data.consecutivos = lista;
+      delete state.consecDraft[tipo];
+      var nuevo = lista.filter(function (x) { return x.tipo === tipo; })[0];
+      KGP.toast('Contador de ' + nuevo.nombre + ' actualizado. El próximo código será ' + nuevo.proximo + '.', 'success', 6000);
+    }).catch(function (err) {
+      if (err.code === 'VALIDATION' && err.details && typeof err.details === 'object') state.consecErrores[tipo] = err.details.ultimo || err.message;
+      KGP.toast('No se pudo guardar el contador: ' + KGP.friendlyError(err), 'error', 7000);
+    }).finally(function () {
+      state.consecGuardando = null;
+      renderConsecutivos();
+    });
+  }
+
+  // =====================================================================
+  // Wiring
+  // =====================================================================
+
+  function wireEvents() {
+    if (eventsWired) return;
+    eventsWired = true;
+
+    $('cfg-tabs').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-tab]');
+      if (b) setTab(b.getAttribute('data-tab'));
+    });
+    $('cfg-refresh-btn').addEventListener('click', function () {
+      if (state.loading) return;
+      if ((state.correoAbierto && correoDirty()) || idsCambiados().length || state.tipoEditando != null || Object.keys(state.consecDraft).length) {
+        KGP.toast('Tienes cambios sin guardar: guárdalos o cancélalos antes de actualizar.', 'warning', 5000);
+        return;
+      }
+      fetchConfig({ manual: true });
+    });
+
+    // Correos
+    var correos = $('cfg-correos-list');
+    correos.addEventListener('click', function (e) {
+      var chip = e.target.closest('[data-var]');
+      if (chip) { insertarVariable(chip.getAttribute('data-var')); return; }
+      var btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      var card = btn.closest('.cfg-correo');
+      var a = btn.getAttribute('data-action');
+      if (a === 'editar-correo') abrirCorreo(card.getAttribute('data-clave'));
+      else if (a === 'cancelar-correo') cerrarCorreo();
+      else if (a === 'restaurar-correo') restaurarCorreo();
+      else if (a === 'guardar-correo') guardarCorreo();
+    });
+    correos.addEventListener('focusin', function (e) {
+      if (e.target.matches && e.target.matches('.cfg-correo-form [data-f]')) state.ultimoCampo = e.target;
+    });
+    correos.addEventListener('input', function (e) {
+      var f = e.target.closest('.field.invalid');
+      if (f) f.classList.remove('invalid');
+    });
+
+    // IDs
+    $('cfg-ids-list').addEventListener('input', function (e) {
+      if (e.target.matches('[data-id-clave]') && !e.target.readOnly) onIdInput(e.target);
+    });
+    $('cfg-ids-save').addEventListener('click', guardarIds);
+    $('cfg-ids-reset').addEventListener('click', descartarIds);
+
+    // Consecutivos
+    var consec = $('cfg-consec-list');
+    consec.addEventListener('input', function (e) {
+      if (!e.target.matches('[data-consec]')) return;
+      var tipo = e.target.getAttribute('data-consec');
+      state.consecDraft[tipo] = e.target.value;
+      delete state.consecErrores[tipo];
+      var card = e.target.closest('.cfg-consec');
+      var c = state.data.consecutivos.filter(function (x) { return x.tipo === tipo; })[0];
+      card.querySelector('.field').classList.remove('invalid');
+      card.querySelector('[data-action="consec-guardar"]').disabled = String(e.target.value).trim() === String(c.ultimo);
+    });
+    consec.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-action="consec-guardar"]');
+      if (btn) guardarConsecutivo(btn.getAttribute('data-tipo'));
+    });
+    consec.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && e.target.matches('[data-consec]')) { e.preventDefault(); guardarConsecutivo(e.target.getAttribute('data-consec')); }
+    });
+
+    // Tipos
+    $('cfg-tipos-search').addEventListener('input', function (e) {
+      state.tiposQ = e.target.value;
+      renderTipos();
+    });
+    $('cfg-tipo-nuevo-btn').addEventListener('click', function () {
+      state.tiposQ = '';
+      $('cfg-tipos-search').value = '';
+      editarTipo('nuevo');
+    });
+    var tbody = $('cfg-tipos-tbody');
+    tbody.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      var a = btn.getAttribute('data-action');
+      var fila = Number(btn.getAttribute('data-fila'));
+      if (a === 'tipo-editar') editarTipo(fila);
+      else if (a === 'tipo-cancelar') { state.tipoEditando = null; renderTipos(); }
+      else if (a === 'tipo-guardar') guardarTipo();
+      else if (a === 'tipo-borrar') { state.tipoConfirmDelete = fila; state.tipoEditando = null; renderTipos(); }
+      else if (a === 'tipo-borrar-no') { state.tipoConfirmDelete = null; renderTipos(); }
+      else if (a === 'tipo-borrar-si') borrarTipo(fila);
+    });
+    tbody.addEventListener('keydown', function (e) {
+      if (!e.target.matches('.cfg-tipo-edit input')) return;
+      if (e.key === 'Enter') { e.preventDefault(); guardarTipo(); }
+      else if (e.key === 'Escape' && !state.tipoGuardando) { state.tipoEditando = null; renderTipos(); }
+    });
+    tbody.addEventListener('input', function (e) {
+      var f = e.target.closest('.field.invalid');
+      if (f) f.classList.remove('invalid');
+    });
+  }
+
+}(window.KGP));
+</script>

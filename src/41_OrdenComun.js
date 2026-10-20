@@ -13,6 +13,8 @@
  * "corrijas" por simetría) — están en el spec, no en if/else sueltos:
  *   - cierraAlFinalizar: una OIS Finalizada es de solo lectura; una OIP no
  *     (factura ~1 año).
+ *   - avisaFinalizada: al pasar a Finalizada la OIS avisa a contabilidad que
+ *     está lista para facturar (la OIP no: ella factura mes a mes).
  *   - plazoInicial: la OIS hereda el plazo de la cotización; la OIP nace con
  *     CFG_().OIP_PLAZO_DEFAULT.
  *   - maxTareas: MAX_TAREAS (la plantilla OIS tiene 20 filas) vs MAX_TAREAS_OIP.
@@ -46,6 +48,7 @@ function ord_spec_(tipo) {
       tabTareas: cfg.TABS.TAREAS_OIS,
       maxTareas: cfg.LIMITS.MAX_TAREAS,
       cierraAlFinalizar: true,
+      avisaFinalizada: true,   // al quedar Finalizada, el cliente pide el aviso a contabilidad (ntf_oisFinalizada_)
       verificarOis: false,
       estados: { inicial: cfg.OIS_ESTADO_INICIAL, finalizada: cfg.OIS_ESTADO_FINALIZADA, vencida: cfg.OIS_ESTADO_VENCIDA },
       plazoInicial: function (clean) { return clean.plazo; },
@@ -77,6 +80,7 @@ function ord_spec_(tipo) {
       tabTareas: cfg.TABS.TAREAS_OIP,
       maxTareas: cfg.LIMITS.MAX_TAREAS_OIP,
       cierraAlFinalizar: false,
+      avisaFinalizada: false,
       verificarOis: true,
       estados: { inicial: cfg.OIP_ESTADO_INICIAL, finalizada: cfg.OIP_ESTADO_FINALIZADA, vencida: cfg.OIP_ESTADO_VENCIDA },
       plazoInicial: function () { return CFG_().OIP_PLAZO_DEFAULT; },
@@ -145,7 +149,10 @@ function ord_tareaToDto_(t) {
     fechaInicio: qs_dateToISO_(t.fechaInicio),
     fechaEntrega: qs_dateToISO_(t.fechaEntrega),
     estado: t.estado === cfg.TAREA_ESTADO_FINALIZADA ? cfg.TAREA_ESTADO_FINALIZADA : cfg.TAREA_ESTADO_INICIAL,
-    observacion: t.observacion
+    observacion: t.observacion,
+    // Último cambio ('' en tareas anteriores al historial). Ver 42_HistorialTareas.js.
+    actualizadoPor: String(t.actualizadoPor || ''),
+    actualizadoEn: htar_fechaHora_(t.actualizadoEn)
   };
 }
 
@@ -494,7 +501,6 @@ function ord_validarPayload_(payload, spec) {
   var idSolicitante = String((payload.solicitante && payload.solicitante.idContacto) || '').trim();
   if (!idSolicitante) errors.push('solicitante es obligatorio.');
   var idEstablecimiento = String((payload.establecimiento && payload.establecimiento.idEstablecimiento) || '').trim();
-  if (!idEstablecimiento) errors.push('establecimiento es obligatorio.');
 
   var tareasRaw = Array.isArray(payload.tareas) ? payload.tareas : [];
   if (tareasRaw.length > spec.maxTareas) {
@@ -571,7 +577,7 @@ function ord_actualizar_(spec, etapa, idOrden, payload) {
     var padre = ord_actualizarCotizacionPadre_(orden.idCotizacion, clean);
     if (padre.error) return padre.error;
 
-    nuevas = ord_sincronizarTareas_(spec, idOrden, clean.tareas);
+    nuevas = ord_sincronizarTareas_(spec, idOrden, orden, clean.tareas);
 
     var fechaElab = qs_aFecha_(orden.fechaElaboracion);
     var fechaVenc = fechaElab ? addDays_(fechaElab, clean.plazo) : '';
@@ -589,12 +595,16 @@ function ord_actualizar_(spec, etapa, idOrden, payload) {
     data.estado = estado;
     data.fechaVencimiento = fechaVenc ? toISODate_(fechaVenc) : '';
     data.cotizacionCambio = padre.cambio;
+    // true solo en la transición a Finalizada: el cliente pide entonces el
+    // aviso a contabilidad (con las copias que elija el usuario).
+    data.ordenFinalizada = !!spec.avisaFinalizada && String(orden.estado) !== spec.estados.finalizada && estado === spec.estados.finalizada;
     data.tareas = spec.getTareaRows(idOrden).map(function (r) { return ord_tareaToDto_(r.obj); });
     return ok_(data);
   }, { ids: ids, payload: payload });
 
-  // Fuera del lock: correo a cada responsable de una tarea nueva. Nunca lanza.
-  if (resultado.ok) ntf_tareasCreadas_(spec.tipo, orden, nuevas);
+  // Fuera del lock: correo a cada responsable de una tarea nueva (con las
+  // copias que el usuario eligió). Nunca lanza.
+  if (resultado.ok) ntf_tareasCreadas_(spec.tipo, orden, nuevas, payload.cc);
   return resultado;
 }
 
@@ -638,7 +648,7 @@ function ord_actualizarCotizacionPadre_(idCotizacion, clean) {
   var cambio = clean.entidadesEditadas ||
     clean.idCliente !== c.idCliente ||
     clean.idSolicitante !== c.idSolicitante ||
-    clean.idEstablecimiento !== c.idEstablecimiento ||
+    clean.idEstablecimiento !== String(c.idEstablecimiento || '') ||
     qs_serviciosFirma_(clean.servicios) !== qs_serviciosFirma_(serviciosActuales);
   if (!cambio) return { cambio: false };
 
@@ -668,36 +678,56 @@ function ord_actualizarCotizacionPadre_(idCotizacion, clean) {
 }
 
 /**
- * Deja las tareas de la orden iguales a `tareas`: actualiza las que siguen
- * (por ID TAREA), borra las que ya no vienen y crea las nuevas, en ese orden
- * (así los rowIndex de las actualizaciones siguen siendo válidos).
+ * Deja las tareas de la orden iguales a `tareas`: actualiza las que
+ * cambiaron (por ID TAREA; las idénticas no se reescriben), borra las que ya
+ * no vienen y crea las nuevas, en ese orden (así los rowIndex de las
+ * actualizaciones siguen siendo válidos). Cada cambio queda en
+ * HISTORIAL_TAREAS y sella ACTUALIZADO POR/EN de la tarea.
  * DEBE llamarse dentro del lock.
  * @param {!Object} spec
  * @param {string} idOrden
+ * @param {!Object} orden Objeto de dominio de la orden (para el historial).
  * @param {!Array<!Object>} tareas Tareas validadas con responsable resuelto.
  * @return {!Array<!Object>} Las tareas creadas (para avisar a su responsable).
  */
-function ord_sincronizarTareas_(spec, idOrden, tareas) {
+function ord_sincronizarTareas_(spec, idOrden, orden, tareas) {
   var filasActuales = spec.getTareaRows(idOrden);
   var filaPorId = {};
   filasActuales.forEach(function (f) { filaPorId[f.obj.idTarea] = f; });
+  var sello = htar_sello_();
+  var acc = htar_acciones_();
+  var historial = [];
 
   var enviadas = {};
   var actualizaciones = [];
   var nuevas = [];
   tareas.forEach(function (t) {
-    if (t.idTarea && filaPorId[t.idTarea]) {
+    var fila = t.idTarea ? filaPorId[t.idTarea] : null;
+    if (fila) {
       enviadas[t.idTarea] = true;
-      actualizaciones.push({ rowIndex: filaPorId[t.idTarea].rowIndex, idTarea: t.idTarea, tarea: t });
+      var diff = htar_diff_(fila.obj, t);
+      if (!diff.escribir) return;
+      // Sin cambios visibles (p. ej. solo se completó TIPO RESPONSABLE): se
+      // reescribe conservando el sello anterior y sin entrada de historial.
+      Object.assign(t, diff.lineas.length ? sello : { actualizadoPor: fila.obj.actualizadoPor, actualizadoEn: fila.obj.actualizadoEn });
+      actualizaciones.push({ rowIndex: fila.rowIndex, idTarea: t.idTarea, tarea: t });
+      historial.push(htar_entradaEdicion_(spec, orden, idOrden, t.idTarea, diff, t.tarea, t.estado));
     } else {
-      nuevas.push(t);
+      nuevas.push(Object.assign(t, sello));
     }
   });
 
+  var borradas = filasActuales.filter(function (f) { return !enviadas[f.obj.idTarea]; });
+  borradas.forEach(function (f) {
+    historial.push(htar_entrada_(spec, orden, idOrden, f.obj.idTarea, f.obj.tarea, acc.ELIMINADA, htar_resumen_(f.obj, true)));
+  });
+
   spec.updateTareas(idOrden, actualizaciones);
-  spec.deleteTareaRows(filasActuales
-    .filter(function (f) { return !enviadas[f.obj.idTarea]; })
-    .map(function (f) { return f.rowIndex; }));
-  spec.createTareas(idOrden, nuevas);
+  spec.deleteTareaRows(borradas.map(function (f) { return f.rowIndex; }));
+  var idsNuevas = spec.createTareas(idOrden, nuevas);
+  nuevas.forEach(function (t, i) {
+    historial.push(htar_entrada_(spec, orden, idOrden, idsNuevas[i], t.tarea, acc.CREADA, htar_resumen_(t, false)));
+  });
+  htar_registrar_(historial);
   return nuevas;
 }

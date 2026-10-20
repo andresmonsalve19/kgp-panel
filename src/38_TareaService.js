@@ -21,6 +21,9 @@
  *
  * Los documentos de la orden se regeneran después, desde el cliente y fuera
  * del lock (api_regenerateOisDocument / api_regenerateOipDocument).
+ *
+ * Cada cambio real queda en HISTORIAL_TAREAS (quién, cuándo, qué) y sella
+ * ACTUALIZADO POR/EN de la tarea, dentro del mismo lock (42_HistorialTareas.js).
  */
 
 // ---------------------------------------------------------------------
@@ -186,19 +189,26 @@ function tg_filaTarea_(spec, idOrden, idTarea, mensaje) {
 /**
  * Recalcula el ESTADO derivado de la orden a partir de sus tareas actuales y
  * lo guarda (ESTADO, ACTUALIZADO EN/POR).
- * @return {{estado: string, cerrada: boolean}}
+ * @return {{estado: string, cerrada: boolean, finalizada: boolean}} finalizada:
+ *     la orden ACABA de pasar a Finalizada y avisa a contabilidad (OIS).
  */
 function tg_refreshOrdenEstado_(spec, idOrden, orden) {
   var tareas = spec.getTareaRows(idOrden).map(function (r) { return r.obj; });
   var estado = ord_derivarEstado_(spec, tareas, qs_dateToISO_(orden.fechaVencimiento), toISODate_(new Date()));
   spec.update(idOrden, { 'ESTADO': estado, 'ACTUALIZADO POR': emps_nombreUsuarioActivo_() });
-  return { estado: estado, cerrada: spec.cierraAlFinalizar && estado === spec.estados.finalizada };
+  return {
+    estado: estado,
+    cerrada: spec.cierraAlFinalizar && estado === spec.estados.finalizada,
+    finalizada: !!spec.avisaFinalizada && String(orden.estado) !== spec.estados.finalizada && estado === spec.estados.finalizada
+  };
 }
 
 /**
  * Respuesta común de las 3 escrituras: lo que el cliente necesita para
  * actualizar su fila y su orden sin releer todo.
- * @return {!Object} ok_({tipo, idOrden, codigoOrden, ordenEstado, ordenCerrada, tarea})
+ * @return {!Object} ok_({tipo, idOrden, codigoOrden, ordenEstado, ordenCerrada,
+ *     ordenFinalizada, tarea}) — ordenFinalizada: la OIS acaba de quedar
+ *     Finalizada (el cliente pide el aviso a contabilidad).
  */
 function tg_writeResult_(spec, idOrden, orden, ordenInfo, tareaDto) {
   return ok_({
@@ -207,6 +217,7 @@ function tg_writeResult_(spec, idOrden, orden, ordenInfo, tareaDto) {
     codigoOrden: orden.codigo,
     ordenEstado: ordenInfo.estado,
     ordenCerrada: ordenInfo.cerrada,
+    ordenFinalizada: ordenInfo.finalizada,
     tarea: tareaDto || null
   });
 }
@@ -216,7 +227,8 @@ function tg_writeResult_(spec, idOrden, orden, ordenInfo, tareaDto) {
  * se puede cambiar (para moverla, se elimina y se crea en la otra orden). Ya
  * fuera del lock, una tarea NUEVA avisa por correo a su responsable.
  * @param {!Object} payload {tipo: 'OIS'|'OIP', idOrden, idTarea, tarea,
- *     idEmpleado, tipoResponsable, fechaInicio, fechaEntrega, estado, observacion}
+ *     idEmpleado, tipoResponsable, fechaInicio, fechaEntrega, estado, observacion,
+ *     cc: [correos en copia del aviso, solo si es una tarea nueva]}
  * @return {!Object} Ver tg_writeResult_.
  */
 function tg_saveTarea(payload) {
@@ -240,16 +252,24 @@ function tg_saveTarea(payload) {
     var errResp = ord_resolverResponsables_([clean]);
     if (errResp) return fail_('NOT_FOUND', 'No existe el responsable ' + clean.idEmpleado + '.');
 
+    var entrada;
     if (idTarea) {
       var fila = tg_filaTarea_(spec, idOrden, idTarea,
         'La tarea ya no existe en la ' + spec.tipo + ' ' + orden.codigo + ' (puede que la hayan eliminado desde otra vista). Actualiza el listado.');
-      spec.updateTareas(idOrden, [{ rowIndex: fila.rowIndex, idTarea: idTarea, tarea: clean }]);
+      var diff = htar_diff_(fila.obj, clean);
+      // Guardar sin cambios visibles conserva el sello anterior (y no deja historial).
+      Object.assign(clean, diff.lineas.length ? htar_sello_() : { actualizadoPor: fila.obj.actualizadoPor, actualizadoEn: fila.obj.actualizadoEn });
+      if (diff.escribir) spec.updateTareas(idOrden, [{ rowIndex: fila.rowIndex, idTarea: idTarea, tarea: clean }]);
+      entrada = htar_entradaEdicion_(spec, orden, idOrden, idTarea, diff, clean.tarea, clean.estado);
     } else {
       if (spec.getTareaRows(idOrden).length >= spec.maxTareas) {
         return fail_('VALIDATION', 'La ' + spec.tipo + ' ' + orden.codigo + ' ya tiene el máximo de ' + spec.maxTareas + ' tareas.');
       }
+      Object.assign(clean, htar_sello_());
       idTarea = spec.createTareas(idOrden, [clean])[0];
+      entrada = htar_entrada_(spec, orden, idOrden, idTarea, clean.tarea, htar_acciones_().CREADA, htar_resumen_(clean, false));
     }
+    htar_registrar_([entrada]);
 
     var ordenInfo = tg_refreshOrdenEstado_(spec, idOrden, orden);
     var dto = ord_tareaToDto_(Object.assign({ idTarea: idTarea }, clean));
@@ -257,7 +277,7 @@ function tg_saveTarea(payload) {
   }, { ids: { tipo: tipo, idOrden: idOrden, idTarea: idTarea }, payload: payload });
 
   // Fuera del lock: aviso al responsable de una tarea NUEVA (editar no avisa).
-  if (esNueva && resultado.ok) ntf_tareasCreadas_(spec.tipo, orden, [clean]);
+  if (esNueva && resultado.ok) ntf_tareasCreadas_(spec.tipo, orden, [clean], payload.cc);
   return resultado;
 }
 
@@ -285,9 +305,20 @@ function tg_setTareaEstado(tipo, idOrden, idTarea, estado) {
   return tx_conLock_('tg_setTareaEstado', function () {
     var orden = tg_ordenEditable_(spec, idOrden);
     var fila = tg_filaTarea_(spec, idOrden, idTarea, 'La tarea ya no existe (puede que la hayan eliminado desde otra vista). Actualiza el listado.');
-    repo_updateCells_(cfg.DB_SHEET_ID, spec.tabTareas, fila.rowIndex, { 'ESTADO': estado });
+    var cambios = { estado: estado };
+    if (htar_estado_(fila.obj.estado) !== estado) {
+      // Solo un cambio real sella la tarea y deja historial (un doble clic que
+      // repite el estado actual no).
+      Object.assign(cambios, htar_sello_());
+      repo_updateCells_(cfg.DB_SHEET_ID, spec.tabTareas, fila.rowIndex,
+        { 'ESTADO': estado, 'ACTUALIZADO POR': cambios.actualizadoPor, 'ACTUALIZADO EN': cambios.actualizadoEn });
+      var acc = htar_acciones_();
+      htar_registrar_([htar_entrada_(spec, orden, idOrden, idTarea, fila.obj.tarea,
+        estado === cfg.TAREA_ESTADO_FINALIZADA ? acc.FINALIZADA : acc.REABIERTA,
+        'Estado: ' + htar_estado_(fila.obj.estado) + ' → ' + estado)]);
+    }
     var ordenInfo = tg_refreshOrdenEstado_(spec, idOrden, orden);
-    var dto = ord_tareaToDto_(Object.assign({}, fila.obj, { estado: estado }));
+    var dto = ord_tareaToDto_(Object.assign({}, fila.obj, cambios));
     return tg_writeResult_(spec, idOrden, orden, ordenInfo, dto);
   }, { ids: { tipo: spec.tipo, idOrden: idOrden, idTarea: idTarea, estado: estado } });
 }
@@ -310,6 +341,7 @@ function tg_deleteTarea(tipo, idOrden, idTarea) {
     var orden = tg_ordenEditable_(spec, idOrden);
     var fila = tg_filaTarea_(spec, idOrden, idTarea, 'La tarea ya no existe (puede que la hayan eliminado desde otra vista). Actualiza el listado.');
     spec.deleteTareaRows([fila.rowIndex]);
+    htar_registrar_([htar_entrada_(spec, orden, idOrden, idTarea, fila.obj.tarea, htar_acciones_().ELIMINADA, htar_resumen_(fila.obj, true))]);
     var ordenInfo = tg_refreshOrdenEstado_(spec, idOrden, orden);
     return tg_writeResult_(spec, idOrden, orden, ordenInfo, null);
   }, { ids: { tipo: spec.tipo, idOrden: idOrden, idTarea: idTarea } });
