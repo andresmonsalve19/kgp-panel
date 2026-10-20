@@ -188,7 +188,7 @@ function oipn_enviarCorreo_(periodo, pendientes, filasCreadas) {
   if (!destino) return false;
 
   // Plantilla única de correo con los textos de OIP_RECORDATORIO (hoja
-  // CONFIG_CORREO_TEXTOS, CLAUDE.md §14-15): una OIP por "dato destacado".
+  // CONFIG_CORREOS, CLAUDE.md §14-15): una OIP por "dato destacado".
   try {
     mail_enviar_('OIP_RECORDATORIO', destino, {
       mes: oipn_nombreMes_(periodo.mes) + ' de ' + periodo.year,

@@ -3,7 +3,8 @@
  * plantilla única de 04_MailTemplate.js; aquí solo se decide CUÁNDO, A QUIÉN
  * y CON QUÉ VARIABLES. Los textos (asunto, título, párrafos, botón, datos
  * destacados) NO están aquí: salen de mail_textos_(clave), es decir, de la
- * hoja CONFIG_CORREO_TEXTOS o, si está vacía, de mail_textosDefault_.
+ * hoja CONFIG_CORREOS (vista Configuración) o, si está vacía, de
+ * mail_textosDefault_. Cada correo suma además su "copia siempre a".
  *
  *   1. Cotización creada  -> al creador, con el código y el enlace al
  *      documento. Se envía cuando el documento ya existe (fase 2,
@@ -18,6 +19,15 @@
  *   3. Tarea creada -> al responsable (CORREO de PERSONAL_KGP), desde
  *      "Gestionar tareas" (tg_saveTarea) y desde "Guardar cambios" de
  *      Gestionar OIS/OIP (tareas nuevas, sin ID).
+ *   4. OIS finalizada -> a contabilidad (CFG_().OIS_FINALIZADA_EMAIL): ya está
+ *      lista para facturar. Lo pide el cliente (api_avisarOisFinalizada) tras
+ *      la escritura que la dejó Finalizada; sale una sola vez por OIS.
+ *
+ * Copias (CC): antes de cada acción que dispara un correo, el cliente abre el
+ * selector KGP.mailCc (JsCore.js.html) y manda la lista elegida como `cc`
+ * (personas de la BD + correos escritos a mano). Todas las funciones de aquí
+ * la reciben y la pasan a mail_enviar_ (opciones.cc); mail_normalizarCc_ la
+ * depura. Las copias van ADEMÁS del destinatario de siempre.
  *
  * "El creador" = CREADO POR de la cotización (correo del usuario activo al
  * crearla) o, si está vacío, el CORREO del empleado ELABORADO POR. Con
@@ -37,7 +47,7 @@
 
 /**
  * Nombre largo de cada tipo de orden, para el texto de los correos
- * (CFG_().NOMBRE_OIS / NOMBRE_OIP, hoja CONFIG_GENERAL).
+ * (CFG_().NOMBRE_OIS / NOMBRE_OIP, 00_Config.js).
  * @param {string} tipo 'OIS' | 'OIP'
  * @return {string}
  */
@@ -95,30 +105,46 @@ function ntf_log_(etapa, ids, err) {
  * y 2). evento: 'CTZ' | 'OIS' | 'OIP'; id: de la cotización o de la orden;
  * docRes: respuesta de doc_generate*; inicial: true = primera generación
  * (con requestId), false = regeneración (solo envía si quedó pendiente).
- * enviar(docUrl): manda el correo; devuelve false si no hay destinatario
+ * cc: copias elegidas por el usuario al disparar la acción (solo llegan en la
+ * generación inicial; si el correo queda pendiente se guardan junto a la marca
+ * para que la regeneración que lo envíe las respete).
+ * enviar(docUrl, cc): manda el correo; devuelve false si no hay destinatario
  * (permanente: no se reintenta) y lanza si el envío falla (se reintenta en la
  * próxima regeneración exitosa).
  */
-function ntf_trasDocumento_(evento, id, docRes, inicial, enviar) {
+function ntf_trasDocumento_(evento, id, docRes, inicial, cc, enviar) {
   var pendKey = 'NTF_PEND_' + evento + '_' + id;
   var props;
+  cc = mail_normalizarCc_(cc);
   try {
     props = PropertiesService.getScriptProperties();
     if (!docRes || !docRes.ok) {
-      if (inicial) props.setProperty(pendKey, '1');
+      if (inicial) props.setProperty(pendKey, JSON.stringify({ cc: cc }));
       return;
     }
-    if (!inicial && !props.getProperty(pendKey)) return;
+    var pend = props.getProperty(pendKey);
+    if (!inicial && !pend) return;
+    if (!inicial) cc = ntf_ccDePendiente_(pend);
 
     var sentKey = 'ntf:sent:' + evento + ':' + id;
     if (!cache_().get(sentKey)) {
-      enviar(docRes.data && docRes.data.docUrl);
+      enviar(docRes.data && docRes.data.docUrl, cc);
       cache_().put(sentKey, '1', CFG_().CACHE_TTL.IDEMPOTENCIA_S);
     }
     props.deleteProperty(pendKey);
   } catch (e) {
     ntf_log_('ntf_trasDocumento_:' + evento, { id: id, idCotizacion: evento === 'CTZ' ? id : '' }, e);
-    try { if (props) props.setProperty(pendKey, '1'); } catch (e2) { /* sin marca: no se reintenta */ }
+    try { if (props) props.setProperty(pendKey, JSON.stringify({ cc: cc })); } catch (e2) { /* sin marca: no se reintenta */ }
+  }
+}
+
+/** Copias guardadas en una marca NTF_PEND_* ('1' = formato anterior, sin copias). */
+function ntf_ccDePendiente_(valor) {
+  try {
+    var o = JSON.parse(String(valor || ''));
+    return mail_normalizarCc_(o && o.cc);
+  } catch (e) {
+    return [];
   }
 }
 
@@ -127,8 +153,8 @@ function ntf_trasDocumento_(evento, id, docRes, inicial, enviar) {
 // ---------------------------------------------------------------------
 
 /** Llamado tras api_generateDocument (inicial) / api_regenerateDocument. */
-function ntf_onDocumentoCotizacion_(idCotizacion, docRes, inicial) {
-  ntf_trasDocumento_('CTZ', idCotizacion, docRes, inicial, function (docUrl) {
+function ntf_onDocumentoCotizacion_(idCotizacion, docRes, inicial, cc) {
+  ntf_trasDocumento_('CTZ', idCotizacion, docRes, inicial, cc, function (docUrl, ccFinal) {
     var info = ntf_infoCotizacion_(idCotizacion);
     if (!info) return false;
     if (!info.correoCreador) {
@@ -142,7 +168,7 @@ function ntf_onDocumentoCotizacion_(idCotizacion, docRes, inicial) {
       cliente: info.cliente,
       estado: CFG_().ESTADO_INICIAL,
       fechaElaboracion: ntf_fechaLarga_(info.fechaElaboracion)
-    }, { url: docUrl || info.urlDocumento });
+    }, { url: docUrl || info.urlDocumento, cc: ccFinal });
     return true;
   });
 }
@@ -156,8 +182,8 @@ function ntf_onDocumentoCotizacion_(idCotizacion, docRes, inicial) {
  * con requestId, que solo manda el flujo de aprobación de Gestionar
  * cotización) y tras sus api_regenerate* (solo si el correo quedó pendiente).
  */
-function ntf_onDocumentoOrden_(tipo, idOrden, docRes, inicial) {
-  ntf_trasDocumento_(tipo, idOrden, docRes, inicial, function (docUrl) {
+function ntf_onDocumentoOrden_(tipo, idOrden, docRes, inicial, cc) {
+  ntf_trasDocumento_(tipo, idOrden, docRes, inicial, cc, function (docUrl, ccFinal) {
     var found = tipo === 'OIP' ? oip_findById_(idOrden) : ois_findById_(idOrden);
     if (!found) return false;
     var orden = found.obj;
@@ -176,13 +202,16 @@ function ntf_onDocumentoOrden_(tipo, idOrden, docRes, inicial) {
       nombreOrden: ntf_nombreOrden_(tipo),
       codigoOrden: orden.codigo,
       fechaAprobacion: ntf_fechaLarga_(orden.fechaElaboracion)
-    }, { url: docUrl || orden.urlDocumento });
+    }, { url: docUrl || orden.urlDocumento, cc: ccFinal });
     return true;
   });
 }
 
-/** Llamado por qs_updateQuotation, ya fuera del lock, cuando la cotización acaba de pasar a Rechazada. */
-function ntf_cotizacionRechazada_(idCotizacion) {
+/**
+ * Llamado por qs_updateQuotation, ya fuera del lock, cuando la cotización
+ * acaba de pasar a Rechazada. cc: copias elegidas en el selector del cliente.
+ */
+function ntf_cotizacionRechazada_(idCotizacion, cc) {
   try {
     var info = ntf_infoCotizacion_(idCotizacion);
     if (!info) return;
@@ -197,7 +226,7 @@ function ntf_cotizacionRechazada_(idCotizacion) {
       cliente: info.cliente,
       fecha: ntf_fechaLarga_(new Date()),
       tieneDocumento: info.urlDocumento ? 'si' : ''
-    }, { url: info.urlDocumento });
+    }, { url: info.urlDocumento, cc: cc });
   } catch (e) {
     ntf_log_('ntf_cotizacionRechazada', { idCotizacion: idCotizacion }, e);
   }
@@ -211,9 +240,10 @@ function ntf_cotizacionRechazada_(idCotizacion) {
  * Un correo por tarea nueva, a su responsable. tipo: 'OIS' | 'OIP'; orden:
  * objeto de dominio de la orden ({codigo, idCotizacion, urlDocumento});
  * tareas: tareas ya validadas ({tarea, idEmpleado, responsable, fechaEntrega,
- * observacion}). Llamar SIEMPRE fuera del lock.
+ * observacion}). cc: copias elegidas por el usuario; van en el correo de cada
+ * tarea nueva. Llamar SIEMPRE fuera del lock.
  */
-function ntf_tareasCreadas_(tipo, orden, tareas) {
+function ntf_tareasCreadas_(tipo, orden, tareas, cc) {
   if (!orden || !tareas || !tareas.length) return;
   var cliente = '';
   var responsables = [];
@@ -245,9 +275,70 @@ function ntf_tareasCreadas_(tipo, orden, tareas) {
         cliente: cliente,
         fechaInicio: ntf_fechaLarga_(t.fechaInicio),
         fechaEntrega: ntf_fechaLarga_(t.fechaEntrega)
-      }, { url: orden.urlDocumento });
+      }, { url: orden.urlDocumento, cc: cc });
     } catch (e2) {
       ntf_log_('ntf_tareasCreadas_', { idCotizacion: orden.idCotizacion, orden: orden.codigo }, e2);
     }
   });
+}
+
+// ---------------------------------------------------------------------
+// 4. OIS finalizada -> contabilidad
+// ---------------------------------------------------------------------
+
+/**
+ * Aviso a contabilidad (CFG_().OIS_FINALIZADA_EMAIL) de que una OIS terminó y
+ * está lista para facturar. Lo pide el cliente (api_avisarOisFinalizada) justo
+ * después de la escritura que la dejó Finalizada, para que el usuario elija
+ * antes las copias (cc). Solo sale si la OIS está de verdad Finalizada y una
+ * sola vez por OIS (marca NTF_FIN_OIS_<id> en ScriptProperties): llamarlo de
+ * nuevo no reenvía ni sirve para escribirle a contabilidad a voluntad.
+ *
+ * @param {string} idOis
+ * @param {*} cc Copias elegidas (ver mail_normalizarCc_).
+ * @return {!Object} ok_({enviado, motivo?}) / fail_. Un correo que falla se
+ *     registra y devuelve enviado=false: no es un error de la operación.
+ */
+function ntf_oisFinalizada_(idOis, cc) {
+  idOis = String(idOis || '').trim();
+  if (!idOis) return fail_('VALIDATION', 'Falta idOis.');
+  var marca = 'NTF_FIN_OIS_' + idOis;
+  var props = null;
+  var reservada = false;
+  try {
+    var found = ois_findById_(idOis);
+    if (!found) return fail_('NOT_FOUND', 'No existe la OIS ' + idOis + '.');
+    var orden = found.obj;
+    if (String(orden.estado) !== CFG_().OIS_ESTADO_FINALIZADA) {
+      return ok_({ enviado: false, motivo: 'La OIS ' + orden.codigo + ' no está finalizada.' });
+    }
+    props = PropertiesService.getScriptProperties();
+    if (props.getProperty(marca)) return ok_({ enviado: false, motivo: 'El aviso de la OIS ' + orden.codigo + ' ya se envió.' });
+    // La marca se reserva ANTES de enviar (no hay lock: MailApp + historial no
+    // deben correr dentro de uno) para que dos pestañas a la vez no dupliquen
+    // el aviso; si el envío falla, se libera para poder reintentarlo.
+    props.setProperty(marca, '1');
+    reservada = true;
+
+    var destino = String(CFG_().OIS_FINALIZADA_EMAIL || '').trim();
+    if (!destino) {
+      throw new AppError_('MAIL', 'No se envió el aviso de la OIS ' + orden.codigo + ' finalizada: OIS_FINALIZADA_EMAIL está vacío.');
+    }
+    var info = ntf_infoCotizacion_(orden.idCotizacion);
+    var tareas = tar_getRowsByOis_(idOis);
+    mail_enviar_('OIS_FINALIZADA', destino, {
+      codigoOrden: orden.codigo,
+      nombreOrden: ntf_nombreOrden_('OIS'),
+      codigoCotizacion: info ? info.codigo : '',
+      cliente: info ? info.cliente : '',
+      numTareas: tareas.length,
+      fechaElaboracion: ntf_fechaLarga_(orden.fechaElaboracion),
+      fechaFinalizacion: ntf_fechaLarga_(new Date())
+    }, { url: orden.urlDocumento, cc: cc });
+    return ok_({ enviado: true });
+  } catch (e) {
+    if (reservada) { try { props.deleteProperty(marca); } catch (e2) { /* la marca queda: no se reintenta */ } }
+    ntf_log_('ntf_oisFinalizada_', { idOis: idOis }, e);
+    return ok_({ enviado: false, motivo: 'No se pudo enviar el aviso a contabilidad: ' + (e && e.message ? e.message : e) });
+  }
 }

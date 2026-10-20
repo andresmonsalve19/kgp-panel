@@ -14,3 +14,6 @@ node_modules/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Copia de la BD con datos reales de clientes (no subir)
+assets/BASE DE DATOS*.xlsx

@@ -16,8 +16,11 @@
  */
 
 /**
- * Configuración general de la aplicación: valores por defecto del código con
- * los de las hojas CONFIG_* aplicados encima (06_ConfigSheet.js).
+ * Configuración general de la aplicación: TODO vive aquí, en el código. Lo
+ * único que se puede cambiar desde fuera (vista Configuración -> hojas
+ * CONFIG_IDS / CONFIG_CORREOS, 06_ConfigSheet.js, CLAUDE.md §15) son los IDs
+ * de spreadsheets/carpetas/archivos y los destinatarios fijos de los correos
+ * (OIP_NOTIF_EMAIL, OIS_FINALIZADA_EMAIL); cfgs_aplicar_ los pone encima.
  *
  * Memoizada por ejecución: se construye UNA vez (3 lecturas de
  * ScriptProperties + aplicar la hoja) y las llamadas siguientes devuelven el
@@ -57,17 +60,18 @@ function CFG_() {
   // TEMPLATE_TAB_OIS (admin_setOipTabName la corrige si el nombre real cambia).
   var templateTabOip = props.getProperty('TEMPLATE_TAB_OIP') || 'OIP V-4';
 
-  // Valores POR DEFECTO. Cualquiera de ellos (salvo CAT_SHEET_ID, las listas
-  // de estados y APP_VERSION) se puede sobrescribir desde las hojas CONFIG_*
-  // del spreadsheet de configuración (06_ConfigSheet.js, CLAUDE.md §15):
-  // cfgs_aplicar_ los reemplaza al final de esta función. Si una celda está
-  // vacía o no es válida, se queda el valor de aquí.
+  // Valores del código. Solo los IDs de cfgs_catalogoIds_ (salvo
+  // CAT_SHEET_ID) y los destinatarios fijos de los correos se pueden
+  // sobrescribir desde la vista Configuración (06_ConfigSheet.js, CLAUDE.md
+  // §15): cfgs_aplicar_ los reemplaza al final de esta función. Si la celda
+  // está vacía, se queda el valor de aquí. Lo demás se cambia solo aquí.
   var cfg = {
     TZ: 'America/Bogota',
     APP_VERSION: '1.0.0',
 
     DB_SHEET_ID: '141ZCKO24f6Yp1NEt-yZ3_Fm0XXlzcyD_RcRZXoeGwGI',
-    // Spreadsheet de catálogo Y de configuración (hojas CONFIG_*). Fijo en el
+    // Spreadsheet de catálogo Y de configuración (TIPOS DE SERVICIOS,
+    // CONFIG_IDS, CONFIG_CORREOS). Fijo en el
     // código: es de donde se lee todo lo demás, no puede venir de sí mismo.
     CAT_SHEET_ID: cfgs_sheetId_(),
 
@@ -98,6 +102,10 @@ function CFG_() {
     // mes que acaba de terminar).
     OIP_NOTIF_EMAIL: 'jaimemonsalve120238@gmail.com',
 
+    // Destinatario del aviso "OIS lista para facturar" (39_NotifyService.js,
+    // ntf_oisFinalizada_): contabilidad, cuando una OIS queda Finalizada.
+    OIS_FINALIZADA_EMAIL: 'contabilidad@kgpconsultorias.com',
+
     // Historial de correos enviados (04_MailTemplate.js, mail_log_): un
     // spreadsheet APARTE de la BD principal, pestaña HISTORIAL con las
     // columnas NUMERO, TIMESTAMP, FROM, TO, SUBJECT, BODY.
@@ -105,8 +113,8 @@ function CFG_() {
     MAIL_HISTORIAL_TAB: 'HISTORIAL',
 
     // Datos fijos de la plantilla de correo (04_MailTemplate.js): remitente,
-    // firma, nota y pie. Los TEXTOS de cada correo (asunto, título, párrafos…)
-    // no viven aquí sino en mail_textosDefault_ / hoja CONFIG_CORREO_TEXTOS.
+    // firma, nota y pie (solo código). Los TEXTOS de cada correo (asunto y
+    // cuerpo) no viven aquí sino en mail_textosDefault_ / hoja CONFIG_CORREOS.
     CORREO: {
       REMITENTE_NOMBRE: 'KGP',
       FIRMA: 'Equipo KGP',
@@ -155,6 +163,7 @@ function CFG_() {
     ID_PREFIJO_TAREA_OIS: 'TAR',
     ID_PREFIJO_TAREA_OIP: 'TAP',
     ID_PREFIJO_FACTURA_OIP: 'FAC',
+    ID_PREFIJO_HISTORIAL_TAREA: 'HTA',
 
     // Prefijo del CÓDIGO consecutivo visible (CTZ-KGP-001-26, ...). El número
     // sigue la marca de agua de ScriptProperties (SEQ_*), así que cambiar el
@@ -187,7 +196,9 @@ function CFG_() {
       TAREAS_OIS: 'TAREAS_OIS',
       OIP: 'OIP',
       TAREAS_OIP: 'TAREAS_OIP',
-      OIP_FACTURACION: 'OIP_FACTURACION'
+      OIP_FACTURACION: 'OIP_FACTURACION',
+      // Historial de cambios de las tareas de OIS y OIP (42_HistorialTareas.js).
+      HISTORIAL_TAREAS: 'HISTORIAL_TAREAS'
     },
 
     LIMITS: {
@@ -205,9 +216,15 @@ function CFG_() {
       // Filas de OIP_FACTURACION por OIP: una por mes facturado. 120 = 10
       // años de mensualidades, muy por encima del plazo máximo de una OIP.
       MAX_FACTURAS_OIP: 120,
+      // Entradas que devuelve el popup "Historial de cambios" de una tarea u
+      // orden (las más recientes). La hoja guarda todas.
+      MAX_HISTORIAL_TAREAS: 300,
       LOCK_MS: 30000,
       // Espera máxima del lock corto del historial de correos (mail_log_).
       LOCK_HISTORIAL_MS: 10000,
+      // Máximo de personas en copia (CC) de un correo (mail_normalizarCc_ y
+      // el selector de copias del cliente, KGP.mailCc).
+      MAX_CC: 20,
       CELL_MAX: 5000,
       MAX_PLAZO_DIAS: 365,
       // Techo del snapshot completo que el Dashboard descarga de una sola
@@ -287,7 +304,7 @@ function CFG_() {
       IDEMPOTENCIA_S: 21600
     }
   };
-  cfgs_aplicar_(cfg, 'valores', null, ov);
+  cfgs_aplicar_(cfg, null, ov);
   if (sinHoja) return cfg;
   memo.__cfg = { ov: ov, cfg: cfg_congelar_(cfg) };
   return memo.__cfg.cfg;
@@ -440,7 +457,9 @@ function SCHEMA_() {
       ],
       // TIPO RESPONSABLE: INTERNO / TERCERO (CFG_().TIPO_RESPONSABLE_*). Sin la
       // columna, el tipo se deduce de la hoja donde está el ID EMPLEADO.
-      optional: ['TIPO RESPONSABLE']
+      // ACTUALIZADO POR / EN: último cambio de la tarea (el detalle completo
+      // está en HISTORIAL_TAREAS, 42_HistorialTareas.js).
+      optional: ['TIPO RESPONSABLE', 'ACTUALIZADO POR', 'ACTUALIZADO EN']
     },
     // Mismo modelo que OIS: una fila por OIP, y nada de la cotización padre
     // se duplica aquí (cliente/solicitante/establecimiento/servicios se leen
@@ -462,7 +481,9 @@ function SCHEMA_() {
       ],
       // TIPO RESPONSABLE: INTERNO / TERCERO (CFG_().TIPO_RESPONSABLE_*). Sin la
       // columna, el tipo se deduce de la hoja donde está el ID EMPLEADO.
-      optional: ['TIPO RESPONSABLE']
+      // ACTUALIZADO POR / EN: último cambio de la tarea (el detalle completo
+      // está en HISTORIAL_TAREAS, 42_HistorialTareas.js).
+      optional: ['TIPO RESPONSABLE', 'ACTUALIZADO POR', 'ACTUALIZADO EN']
     },
     // Control de facturación mensual de una OIP. A diferencia de las tareas,
     // estas filas se guardan en el momento (no esperan al "Guardar cambios"
@@ -478,6 +499,16 @@ function SCHEMA_() {
       // FECHA NOTIFICACION la escribe el recordatorio mensual
       // (37_OipNotify.js), no el formulario.
       optional: ['FECHA NOTIFICACION']
+    },
+    // Registro de auditoría de las tareas (OIS y OIP en la misma hoja): una
+    // fila por cambio, nunca se edita. Ver 42_HistorialTareas.js. La crea
+    // admin_prepararHistorialTareas() (51_Admin.js).
+    HISTORIAL_TAREAS: {
+      required: [
+        'ID HISTORIAL', 'FECHA', 'TIPO ORDEN', 'ID ORDEN', 'CODIGO ORDEN',
+        'ID TAREA', 'TAREA', 'ACCION', 'DETALLE', 'USUARIO', 'CORREO USUARIO'
+      ],
+      optional: []
     }
   };
 }
@@ -488,9 +519,8 @@ function SCHEMA_() {
  * setValues sobre un rango, por las celdas combinadas).
  */
 function CELLMAP_() {
-  // Valores POR DEFECTO; la hoja CONFIG_CELDAS los puede sobrescribir
-  // (cfgs_aplicar_, 06_ConfigSheet.js).
-  return cfgs_aplicar_({
+  // Solo código (decisión del usuario): si la plantilla cambia, se ajusta aquí.
+  return {
     FECHA_ANIO: 'A7',
     FECHA_MES: 'B7',
     FECHA_DIA: 'C7',
@@ -600,5 +630,5 @@ function CELLMAP_() {
     OIP_TAREAS_COL_FECHA_INICIO: 'C',
     OIP_TAREAS_COL_FECHA_ENTREGA: 'D',
     OIP_TAREAS_COL_OBSERVACION: 'E'
-  }, 'celdas');
+  };
 }

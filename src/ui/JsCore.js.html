@@ -24,9 +24,10 @@ window.KGP = window.KGP || {};
   KGP.tareas = KGP.tareas || {};
   KGP.empleados = KGP.empleados || {};
   KGP.clientes = KGP.clientes || {};
+  KGP.config = KGP.config || {};
 
   /**
-   * Parámetro de la hoja de configuración (CONFIG_*), que doGet inyecta en
+   * Parámetro de la app (00_Config.js / cfgs_clientConfig_), que doGet inyecta en
    * window.KGP_CONFIG en cada carga de la página (06_ConfigSheet.js,
    * cfgs_clientConfig_). `def` = valor si no llegó o no es un número válido.
    */
@@ -165,6 +166,7 @@ window.KGP = window.KGP || {};
     if (view === 'tareas' && KGP.tareas.onEnter) KGP.tareas.onEnter();
     if (view === 'empleados' && KGP.empleados.onEnter) KGP.empleados.onEnter();
     if (view === 'clientes' && KGP.clientes.onEnter) KGP.clientes.onEnter();
+    if (view === 'config' && KGP.config.onEnter) KGP.config.onEnter();
   };
 
   // ---------------- Utilidades compartidas ----------------
@@ -1038,6 +1040,328 @@ window.KGP = window.KGP || {};
     return { open: open, close: close, wireGlobalEvents: wireGlobalEvents };
   }());
 
+  // ---------------- Historial de cambios de tareas ----------------
+
+  /**
+   * Popup de solo lectura con quién cambió qué y cuándo (hoja
+   * HISTORIAL_TAREAS, 42_HistorialTareas.js). HTML: #ht-modal-overlay en
+   * Index.html. Siempre pide el dato fresco (api_getHistorialTareas), nunca
+   * usa KGP.localCache.
+   *
+   *   KGP.historialTareas.open({tipo: 'OIS'|'OIP', idTarea, titulo, subtitulo})
+   *     -> historial de UNA tarea.
+   *   KGP.historialTareas.open({tipo, idOrden, titulo, subtitulo})
+   *     -> todas las tareas de la orden, también las eliminadas (cada entrada
+   *        dice a qué tarea corresponde).
+   *
+   * Los cambios hechos en "Gestionar OIS/OIP" se registran al "Guardar
+   * cambios", no antes.
+   */
+  KGP.historialTareas = (function () {
+    var ACCIONES = {
+      CREADA: { label: 'Creada', cls: 'ht-accion-creada' },
+      EDITADA: { label: 'Editada', cls: 'ht-accion-editada' },
+      FINALIZADA: { label: 'Finalizada', cls: 'ht-accion-finalizada' },
+      REABIERTA: { label: 'Reabierta', cls: 'ht-accion-reabierta' },
+      ELIMINADA: { label: 'Eliminada', cls: 'ht-accion-eliminada' }
+    };
+    var token = 0;
+    var wired = false;
+
+    function $(id) { return document.getElementById(id); }
+    function h(s) { return KGP.escapeHtml(s); }
+
+    /** 'yyyy-MM-dd HH:mm' -> '19 de octubre de 2026, 15:42'. */
+    function fechaLarga(s) {
+      var m = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2}))?/.exec(String(s || ''));
+      if (!m) return String(s || '');
+      return Number(m[3]) + ' de ' + KGP.ui.mesNombre(Number(m[2])).toLowerCase() + ' de ' + m[1] + (m[4] ? ', ' + m[4] : '');
+    }
+
+    function entradaHtml(e, porOrden) {
+      var a = ACCIONES[e.accion] || { label: e.accion || 'Cambio', cls: 'ht-accion-editada' };
+      var correo = e.correo && e.correo !== e.usuario ? ' <span class="ht-correo">(' + h(e.correo) + ')</span>' : '';
+      return '<li class="ht-item">' +
+        '<div class="ht-item-head"><span class="ht-accion ' + a.cls + '">' + h(a.label) + '</span>' +
+          '<span class="ht-fecha">' + h(fechaLarga(e.fecha)) + '</span></div>' +
+        '<div class="ht-quien">Por <strong>' + h(e.usuario || 'Usuario no identificado') + '</strong>' + correo + '</div>' +
+        (porOrden && e.tarea ? '<div class="ht-tarea">' + h(e.tarea) + '</div>' : '') +
+        (e.detalle ? '<div class="ht-detalle">' + h(e.detalle) + '</div>' : '') +
+        '</li>';
+    }
+
+    function render(data, porOrden) {
+      var entradas = data.entradas || [];
+      var html = '';
+      if (data.aviso) html += '<div class="ht-aviso">' + h(data.aviso) + '</div>';
+      if (!entradas.length) {
+        html += data.aviso ? '' : '<div class="empty-state">Aún no hay cambios registrados para ' + (porOrden ? 'las tareas de esta orden' : 'esta tarea') +
+          '. Los cambios hechos antes de activar el historial no aparecen.</div>';
+      } else {
+        if (data.truncado) html += '<div class="ht-aviso">Se muestran los ' + entradas.length + ' cambios más recientes de ' + data.total + '.</div>';
+        html += '<ol class="ht-list">' + entradas.map(function (e) { return entradaHtml(e, porOrden); }).join('') + '</ol>';
+      }
+      $('ht-modal-content').innerHTML = html;
+    }
+
+    function open(opts) {
+      opts = opts || {};
+      var my = ++token;
+      var porOrden = !opts.idTarea;
+      $('ht-modal-title').textContent = opts.titulo || 'Historial de cambios';
+      $('ht-modal-subtitle').textContent = opts.subtitulo || '';
+      $('ht-modal-subtitle').hidden = !opts.subtitulo;
+      $('ht-modal-content').innerHTML = '<div class="ht-loading"><span class="spinner dark"></span><span>Cargando historial…</span></div>';
+      $('ht-modal-overlay').classList.add('open');
+      KGP.apiCall('api_getHistorialTareas', [{ tipo: opts.tipo, idOrden: opts.idOrden || '', idTarea: opts.idTarea || '' }]).then(function (data) {
+        if (my === token) render(data || {}, porOrden);
+      }).catch(function (err) {
+        if (my !== token) return;
+        $('ht-modal-content').innerHTML = '<div class="empty-state">No se pudo cargar el historial: ' + h(KGP.friendlyError(err)) + '</div>';
+      });
+      setTimeout(function () { $('ht-modal-ok').focus(); }, 50);
+    }
+
+    function close() {
+      token++; // una respuesta que llegue después ya no pinta nada
+      $('ht-modal-overlay').classList.remove('open');
+    }
+
+    function wireGlobalEvents() {
+      if (wired) return;
+      wired = true;
+      $('ht-modal-close').addEventListener('click', close);
+      $('ht-modal-ok').addEventListener('click', close);
+      $('ht-modal-overlay').addEventListener('click', function (e) {
+        if (e.target.id === 'ht-modal-overlay') close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && $('ht-modal-overlay').classList.contains('open')) close();
+      });
+    }
+
+    return { open: open, close: close, wireGlobalEvents: wireGlobalEvents };
+  }());
+
+  // ---------------- Selector de copias (CC) de los correos ----------------
+
+  /**
+   * Popup que se abre ANTES de cualquier acción que envíe un correo
+   * (cotización creada/aprobada/rechazada, tarea nueva, OIS finalizada) para
+   * elegir quién más lo recibe en copia: personas de la BD (internos +
+   * terceros con correo, de KGP.catalog) y correos escritos a mano que no
+   * están en la BD. El HTML (#cc-modal-overlay) vive en Index.html.
+   *
+   *   KGP.mailCc.pedir({titulo, descripcion, para, confirmar, obligatorio})
+   *     -> Promise<string[] | null>   (null = el usuario canceló: no hagas la acción)
+   *
+   * obligatorio: sin Cancelar/✕/Esc (la acción ya ocurrió y el correo debe
+   * salir de todos modos; el usuario solo decide las copias).
+   * El servidor vuelve a depurar la lista (mail_normalizarCc_), esto es UX.
+   * Las copias van ADEMÁS del destinatario de siempre.
+   */
+  KGP.mailCc = (function () {
+    var state = { resolve: null, personas: [], marcados: {}, extras: [], obligatorio: false, previoFoco: null };
+    var EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+
+    function $(id) { return document.getElementById(id); }
+    function esc(s) { return KGP.escapeHtml(s); }
+    function norm(s) { return String(s || '').toLowerCase(); }
+    function maxCc() { return KGP.cfg('MAX_CC', 20); }
+
+    /** Personas con correo (internos + terceros), sin repetir correos, por nombre. */
+    function personasDe(cat) {
+      var vistos = {};
+      return KGP.ui.responsables(cat).filter(function (e) {
+        var c = String(e.correo || '').trim();
+        if (!EMAIL_RE.test(c) || vistos[norm(c)]) return false;
+        vistos[norm(c)] = true;
+        return true;
+      }).map(function (e) {
+        var tercero = e.tipoResponsable === KGP.ui.tiposResponsable()[1].valor;
+        return { correo: String(e.correo).trim(), nombre: e.nombre || e.correo, cargo: e.cargo || '', tercero: tercero };
+      }).sort(function (a, b) { return a.nombre.localeCompare(b.nombre); });
+    }
+
+    function total() {
+      return Object.keys(state.marcados).filter(function (k) { return state.marcados[k]; }).length + state.extras.length;
+    }
+
+    function renderCount() {
+      $('cc-count').textContent = total() ? (total() + ' en copia (máx. ' + maxCc() + ')') : 'Sin copias: solo le llegará al destinatario de siempre.';
+    }
+
+    function renderLista() {
+      var q = norm($('cc-search').value).trim();
+      var lista = $('cc-list');
+      var visibles = state.personas.filter(function (p) {
+        return !q || norm(p.nombre + ' ' + p.correo + ' ' + p.cargo).indexOf(q) !== -1;
+      });
+      if (!visibles.length) {
+        lista.innerHTML = '<div class="cc-empty">' + (state.personas.length ? 'Nadie coincide con la búsqueda.' : 'No hay personas con correo registrado. Escribe los correos abajo.') + '</div>';
+        return;
+      }
+      lista.innerHTML = visibles.map(function (p) {
+        var k = norm(p.correo);
+        return '<label class="cc-person"><input type="checkbox" data-correo="' + esc(p.correo) + '"' + (state.marcados[k] ? ' checked' : '') + '>' +
+          '<span class="cc-person-main"><span class="cc-person-name">' + esc(p.nombre) + (p.tercero ? ' <span class="cc-tag">Tercero</span>' : '') + '</span>' +
+          '<span class="cc-person-mail">' + esc(p.correo) + (p.cargo ? ' · ' + esc(p.cargo) : '') + '</span></span></label>';
+      }).join('');
+    }
+
+    function renderExtras() {
+      $('cc-extra-chips').innerHTML = state.extras.map(function (c, i) {
+        return '<button type="button" class="chip" data-i="' + i + '" title="Quitar ' + esc(c) + '">' + esc(c) + ' <span class="chip-x">✕</span></button>';
+      }).join('');
+    }
+
+    function setError(msg) {
+      var el = $('cc-extra-err');
+      el.textContent = msg || '';
+      el.style.display = msg ? 'block' : 'none';
+    }
+
+    /** Agrega los correos escritos (separados por coma, ; o espacios). true si no hubo error. */
+    function agregarEscritos() {
+      var input = $('cc-extra-input');
+      var partes = input.value.split(/[,;\s]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+      if (!partes.length) { setError(''); return true; }
+      var malos = partes.filter(function (c) { return !EMAIL_RE.test(c) || c.length > 254; });
+      if (malos.length) { setError('Correo no válido: ' + malos.join(', ')); return false; }
+      var conocidos = {};
+      state.personas.forEach(function (p) { conocidos[norm(p.correo)] = true; });
+      for (var i = 0; i < partes.length; i++) {
+        var k = norm(partes[i]);
+        var yaEsta = state.marcados[k] || state.extras.some(function (e) { return norm(e) === k; });
+        if (yaEsta) continue;
+        if (total() >= maxCc()) { setError('Máximo ' + maxCc() + ' personas en copia.'); renderCount(); renderExtras(); renderLista(); return false; }
+        if (conocidos[k]) state.marcados[k] = true; // ya está en la BD: solo se marca su casilla
+        else state.extras.push(partes[i]);
+      }
+      input.value = '';
+      setError('');
+      renderLista(); renderExtras(); renderCount();
+      return true;
+    }
+
+    function cerrar(resultado) {
+      $('cc-modal-overlay').classList.remove('open');
+      var resolve = state.resolve;
+      state.resolve = null;
+      if (state.previoFoco && state.previoFoco.focus) { try { state.previoFoco.focus(); } catch (e) { /* el elemento ya no está */ } }
+      if (resolve) resolve(resultado);
+    }
+
+    function confirmar() {
+      if (!agregarEscritos()) return; // no perder lo que escribió: si es inválido, se queda abierto
+      var correos = state.personas.filter(function (p) { return state.marcados[norm(p.correo)]; })
+        .map(function (p) { return p.correo; }).concat(state.extras);
+      cerrar(correos);
+    }
+
+    function cancelar() {
+      if (state.obligatorio) return;
+      cerrar(null);
+    }
+
+    function pedir(opts) {
+      opts = opts || {};
+      if (state.resolve) cerrar(null); // un solo selector a la vez
+      state.marcados = {};
+      state.extras = [];
+      state.obligatorio = !!opts.obligatorio;
+      state.previoFoco = document.activeElement;
+      var cat = KGP.catalog.current();
+      state.personas = cat ? personasDe(cat) : [];
+
+      $('cc-modal-title').textContent = opts.titulo || 'Enviar copia del correo';
+      $('cc-modal-desc').textContent = opts.descripcion || '';
+      $('cc-modal-para').textContent = opts.para ? ('Para: ' + opts.para) : '';
+      $('cc-modal-para').style.display = opts.para ? 'block' : 'none';
+      $('cc-ok').textContent = opts.confirmar || 'Continuar';
+      // style.display (no [hidden]): .modal-close y .btn fijan display y le ganan al atributo.
+      $('cc-cancel').style.display = state.obligatorio ? 'none' : '';
+      $('cc-modal-close').style.display = state.obligatorio ? 'none' : '';
+      $('cc-search').value = '';
+      $('cc-extra-input').value = '';
+      setError('');
+      renderLista(); renderExtras(); renderCount();
+      $('cc-modal-overlay').classList.add('open');
+      setTimeout(function () { $('cc-search').focus(); }, 0);
+
+      // Si el catálogo aún no llegó (o falló antes), se pide en segundo plano y se repinta la lista.
+      if (!cat) {
+        KGP.catalog.load().then(function (c) {
+          if (!state.resolve) return;
+          state.personas = personasDe(c);
+          renderLista();
+        }).catch(function () { /* queda solo la entrada manual */ });
+      }
+      return new Promise(function (resolve) { state.resolve = resolve; });
+    }
+
+    /**
+     * Aviso a contabilidad de que una OIS quedó Finalizada: el servidor ya la
+     * dejó Finalizada; aquí solo se eligen las copias y se envía el correo.
+     * Nunca rechaza: un fallo se avisa con un toast.
+     */
+    function avisarOisFinalizada(idOis, codigo) {
+      return pedir({
+        titulo: 'OIS ' + codigo + ' finalizada',
+        descripcion: 'La OIS terminó. Se le avisará a contabilidad que ya está lista para facturar. Si quieres, elige quién más recibe copia de ese correo.',
+        para: KGP.cfgTexto('OIS_FINALIZADA_EMAIL', 'contabilidad'),
+        confirmar: 'Enviar aviso',
+        obligatorio: true
+      }).then(function (cc) {
+        return KGP.apiCall('api_avisarOisFinalizada', [idOis, cc || []]);
+      }).then(function (r) {
+        if (r && r.enviado) KGP.toast('Se avisó a contabilidad: la OIS ' + codigo + ' está lista para facturar.', 'success', 6000);
+        else if (r && r.motivo) KGP.toast(r.motivo, 'warning', 7000);
+      }).catch(function (err) {
+        KGP.toast('No se pudo avisar a contabilidad: ' + KGP.friendlyError(err), 'error', 8000);
+      });
+    }
+
+    function wireGlobalEvents() {
+      $('cc-ok').addEventListener('click', confirmar);
+      $('cc-cancel').addEventListener('click', cancelar);
+      $('cc-modal-close').addEventListener('click', cancelar);
+      $('cc-search').addEventListener('input', renderLista);
+      $('cc-extra-add').addEventListener('click', agregarEscritos);
+      $('cc-extra-input').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); agregarEscritos(); }
+      });
+      $('cc-list').addEventListener('change', function (e) {
+        var cb = e.target.closest('input[type="checkbox"]');
+        if (!cb) return;
+        var k = norm(cb.getAttribute('data-correo'));
+        if (cb.checked && total() >= maxCc()) {
+          cb.checked = false;
+          setError('Máximo ' + maxCc() + ' personas en copia.');
+          return;
+        }
+        state.marcados[k] = cb.checked;
+        setError('');
+        renderCount();
+      });
+      $('cc-extra-chips').addEventListener('click', function (e) {
+        var chip = e.target.closest('.chip');
+        if (!chip) return;
+        state.extras.splice(Number(chip.getAttribute('data-i')), 1);
+        setError('');
+        renderExtras(); renderCount();
+      });
+      $('cc-modal-overlay').addEventListener('click', function (e) {
+        if (e.target.id === 'cc-modal-overlay') cancelar();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && $('cc-modal-overlay').classList.contains('open')) cancelar();
+      });
+    }
+
+    return { pedir: pedir, avisarOisFinalizada: avisarOisFinalizada, wireGlobalEvents: wireGlobalEvents };
+  }());
+
   // ---------------- Menú lateral móvil (hamburguesa) ----------------
 
   function setSidebarOpen(open) {
@@ -1102,6 +1426,8 @@ window.KGP = window.KGP || {};
     KGP.entityModal.wireGlobalEvents();
     KGP.servicioModal.wireGlobalEvents();
     KGP.tareaModal.wireGlobalEvents();
+    KGP.historialTareas.wireGlobalEvents();
+    KGP.mailCc.wireGlobalEvents();
 
     var initial = window.KGP_INITIAL_VIEW === 'dashboard' ? 'dashboard' : 'cotizacion';
     KGP.nav(initial);

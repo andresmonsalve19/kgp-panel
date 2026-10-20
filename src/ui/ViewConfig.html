@@ -1,0 +1,92 @@
+<!-- Vista "Configuración" (CLAUDE.md §15): lo ÚNICO configurable de la app,
+     por decisión del usuario — correos (destinatarios fijos, "copia siempre
+     a", asunto y cuerpo), IDs de spreadsheets/carpetas/archivos y tipos de
+     servicio. Todo se guarda al instante en el spreadsheet de catálogo
+     (hojas CONFIG_CORREOS, CONFIG_IDS y TIPOS DE SERVICIOS) vía
+     api_saveConfigCorreo / api_saveConfigIds / api_saveTipoServicio /
+     api_deleteTipoServicio. Lógica en ui/JsConfig.js.html.
+
+     Siempre se lee fresco (api_getConfiguracion) al entrar por primera vez y
+     con "Actualizar": nada de esto usa la caché local, igual que el detalle
+     de Gestión (editar sobre un dato viejo pisaría cambios hechos en la hoja). -->
+<section class="view" id="view-config">
+  <div class="page-header">
+    <div>
+      <h1>Configuración</h1>
+      <div class="desc">Correos que envía la app, IDs de los archivos y carpetas donde se guarda todo, y tipos de servicio. Los cambios se guardan en la hoja de configuración y se aplican de inmediato.</div>
+    </div>
+    <div class="dash-header-actions">
+      <a class="btn btn-sm" id="cfg-hoja-link" target="_blank" rel="noopener" hidden>Abrir hoja de configuración ↗</a>
+      <button type="button" class="btn btn-sm" id="cfg-refresh-btn">
+        <span id="cfg-refresh-spinner" style="display:none;" class="spinner dark"></span>
+        Actualizar
+      </button>
+    </div>
+  </div>
+
+  <div class="seg-control" id="cfg-tabs" role="tablist" aria-label="Sección de configuración">
+    <button type="button" class="seg-option is-active" role="tab" aria-selected="true" data-tab="correos">Correos</button>
+    <button type="button" class="seg-option" role="tab" aria-selected="false" data-tab="ids">Archivos y carpetas</button>
+    <button type="button" class="seg-option" role="tab" aria-selected="false" data-tab="tipos">Tipos de servicio</button>
+    <button type="button" class="seg-option" role="tab" aria-selected="false" data-tab="consecutivos">Consecutivos</button>
+  </div>
+
+  <div id="cfg-loading" class="detail-loading">
+    <span class="spinner-lg"></span>
+    <div class="page-loader-text">Cargando configuración…</div>
+  </div>
+
+  <div id="cfg-content" hidden>
+    <!-- ---------- Correos ---------- -->
+    <div class="cfg-panel" data-panel="correos">
+      <p class="cfg-help">Cada correo se envía con la plantilla de KGP; aquí cambias a quién llega, quién recibe siempre copia, el asunto y el cuerpo. El diseño, el logo, la firma y el pie no cambian.</p>
+      <div id="cfg-correos-list"></div>
+    </div>
+
+    <!-- ---------- IDs de archivos y carpetas ---------- -->
+    <div class="cfg-panel" data-panel="ids" hidden>
+      <div class="card">
+        <p class="cfg-help">Pega el ID o el enlace completo de Drive. Antes de guardar se comprueba que el archivo o la carpeta exista y que la cuenta de la app tenga acceso. Cambiar la base de datos o una carpeta afecta a todo lo que se guarde de ahí en adelante.</p>
+        <div id="cfg-ids-list"></div>
+        <div class="cfg-actions">
+          <span class="cfg-dirty" id="cfg-ids-dirty"></span>
+          <button type="button" class="btn btn-sm" id="cfg-ids-reset" disabled>Descartar cambios</button>
+          <button type="button" class="btn btn-primary" id="cfg-ids-save" disabled>
+            <span id="cfg-ids-spinner" style="display:none;" class="spinner"></span>
+            <span id="cfg-ids-save-label">Guardar cambios</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---------- Tipos de servicio ---------- -->
+    <div class="cfg-panel" data-panel="tipos" hidden>
+      <div class="card">
+        <p class="cfg-help">Son las opciones del desplegable "Tipo de servicio" al crear o editar una cotización. El código UNSPSC se completa solo según el tipo elegido. Renombrar o eliminar un tipo no cambia las cotizaciones ya guardadas.</p>
+        <div class="filters-row">
+          <input type="text" class="search-input" id="cfg-tipos-search" placeholder="Buscar tipo o código…">
+          <button type="button" class="btn btn-primary btn-sm" id="cfg-tipo-nuevo-btn">+ Nuevo tipo de servicio</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table cfg-tipos-table">
+            <thead>
+              <tr>
+                <th>Tipo de servicio</th>
+                <th>Código UNSPSC</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="cfg-tipos-tbody"></tbody>
+          </table>
+        </div>
+        <div class="cfg-count" id="cfg-tipos-count"></div>
+      </div>
+    </div>
+
+    <!-- ---------- Consecutivos (contadores de cotización / OIS / OIP) ---------- -->
+    <div class="cfg-panel" data-panel="consecutivos" hidden>
+      <p class="cfg-help">El número de cada código sigue la numeración desde 1 según lo que ya hay en la base de datos. Aquí puedes subir el contador: si escribes que el último usado es el 200, el siguiente código será el 201, luego el 202, etc. No se puede dejar por debajo de lo que ya existe (repetiría códigos).</p>
+      <div id="cfg-consec-list"></div>
+    </div>
+  </div>
+</section>

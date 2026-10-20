@@ -46,7 +46,7 @@ function doc_generateForQuotation_(idCotizacion, requestId) {
     preparar: function (ss, d) {
       var sheet = doc_hojaCotizacion_(ss);
       doc_writeCells_(sheet, doc_buildCtx_(d));
-      return { hoja: sheet, baseName: sanitizeFileName_(d.cotizacion.codigo) };
+      return { hoja: sheet, baseName: doc_ordenBaseName_(d.cotizacion.codigo, d.cliente) };
     },
     carpeta: function () { return CFG_().OUT_FOLDER_ID; },
     actualizarInfo: function (url, estado, fileId) { qr_updateDocInfo_(idCotizacion, url, estado, fileId); }
@@ -654,8 +654,8 @@ function doc_cleanupTemp_(tempFileId) {
 }
 
 /**
- * "<CODIGO ORDEN>-<RAZÓN SOCIAL>": nombre de la carpeta y (+ ".xlsx") del
- * archivo de una OIS/OIP.
+ * "<CODIGO>-<RAZÓN SOCIAL>": nombre de la carpeta y (+ ".xlsx") del
+ * archivo de una cotización, OIS u OIP.
  * @param {string} codigoOrden
  * @param {Object} cliente
  * @return {string}

@@ -149,7 +149,10 @@ function tarp_rowToObj_(row) {
     fechaInicio: row[normText_('FECHA INICIO')] || '',
     fechaEntrega: row[normText_('FECHA ENTREGA')] || '',
     estado: row[normText_('ESTADO')] || '',
-    observacion: String(row[normText_('OBSERVACION')] || '')
+    observacion: String(row[normText_('OBSERVACION')] || ''),
+    // Último cambio (columnas opcionales; el detalle está en HISTORIAL_TAREAS).
+    actualizadoPor: row[normText_('ACTUALIZADO POR')] || '',
+    actualizadoEn: row[normText_('ACTUALIZADO EN')] || ''
   };
 }
 
@@ -173,7 +176,11 @@ function tarp_toRow_(idTarea, idOip, t) {
     'FECHA INICIO': t.fechaInicio,
     'FECHA ENTREGA': t.fechaEntrega,
     'ESTADO': t.estado,
-    'OBSERVACION': t.observacion
+    'OBSERVACION': t.observacion,
+    // Sello del último cambio (htar_sello_, 42_HistorialTareas.js). Quien
+    // reescribe una tarea sin cambios conserva el sello anterior.
+    'ACTUALIZADO POR': t.actualizadoPor || '',
+    'ACTUALIZADO EN': t.actualizadoEn || ''
   };
 }
 

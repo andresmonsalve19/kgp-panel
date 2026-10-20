@@ -4,8 +4,8 @@
  *
  * doGet solo sirve el shell: los datos llegan vía api_bootstrap() después
  * del primer render. La única lectura de Sheets de doGet es la de la
- * configuración (hojas CONFIG_*, cfgs_refresh_), requisito explícito del
- * usuario: se relee en cada carga de la página.
+ * configuración (hojas CONFIG_IDS / CONFIG_CORREOS, cfgs_refresh_), requisito
+ * explícito del usuario: se relee en cada carga de la página.
  *
  * Contrato: toda api_* devuelve {ok, data, error, meta} (01_Result.js) y nunca
  * deja escapar una excepción cruda (safeCall_). Son la ÚNICA superficie que el
@@ -34,8 +34,8 @@ function doGet(e) {
   // escritura a ScriptProperties.
   bumpDataVersion_();
 
-  // Requisito del usuario: la configuración (hojas CONFIG_* del spreadsheet
-  // de catálogo, 06_ConfigSheet.js) se lee SIEMPRE al cargar la página. Una
+  // Requisito del usuario: la configuración (CONFIG_IDS / CONFIG_CORREOS del
+  // spreadsheet de catálogo, 06_ConfigSheet.js) se lee SIEMPRE al cargar la página. Una
   // sola apertura del spreadsheet; el resultado queda en caché para todas las
   // llamadas google.script.run de esta sesión. Si falla, se usa la copia
   // anterior o los valores del código (nunca impide abrir la app).
@@ -183,12 +183,13 @@ function api_createQuotation(payload) {
  * Fase 2: genera el documento .xlsx a partir de una cotización ya creada.
  * Con requestId (solo la creación) envía además el correo "cotización
  * creada" al creador, con el enlace al documento (39_NotifyService.js).
+ * cc: correos en copia que el usuario eligió en el selector (opcional).
  */
-function api_generateDocument(idCotizacion, requestId) {
+function api_generateDocument(idCotizacion, requestId, cc) {
   return safeCall_('api_generateDocument', function () {
     if (!idCotizacion) return fail_('VALIDATION', 'Falta idCotizacion.');
     var res = doc_generateForQuotation_(idCotizacion, requestId);
-    if (requestId) ntf_onDocumentoCotizacion_(idCotizacion, res, true);
+    if (requestId) ntf_onDocumentoCotizacion_(idCotizacion, res, true, cc);
     return res;
   });
 }
@@ -314,14 +315,27 @@ function api_updateOis(idOis, payload) {
 /**
  * Genera el documento de la OIS (primera vez, con requestId para
  * idempotencia). Con requestId (flujo de aprobación) envía además el correo
- * "cotización aprobada" al creador, con el código de la OIS y su enlace.
+ * "cotización aprobada" al creador, con el código de la OIS y su enlace
+ * (y en copia a quienes el usuario eligió: cc).
  */
-function api_generateOisDocument(idOis, requestId) {
+function api_generateOisDocument(idOis, requestId, cc) {
   return safeCall_('api_generateOisDocument', function () {
     if (!idOis) return fail_('VALIDATION', 'Falta idOis.');
     var res = doc_generateForOis_(idOis, requestId || null);
-    if (requestId) ntf_onDocumentoOrden_('OIS', idOis, res, true);
+    if (requestId) ntf_onDocumentoOrden_('OIS', idOis, res, true, cc);
     return res;
+  });
+}
+
+/**
+ * Aviso a contabilidad de que la OIS quedó Finalizada y está lista para
+ * facturar. El cliente lo llama tras la escritura que devolvió
+ * ordenFinalizada = true, con las copias (cc) que el usuario eligió. Solo
+ * sale una vez por OIS y solo si de verdad está Finalizada.
+ */
+function api_avisarOisFinalizada(idOis, cc) {
+  return safeCall_('api_avisarOisFinalizada', function () {
+    return ntf_oisFinalizada_(idOis, cc);
   });
 }
 
@@ -375,13 +389,14 @@ function api_updateOip(idOip, payload) {
 /**
  * Genera el documento de la OIP (primera vez, con requestId para
  * idempotencia). Con requestId (flujo de aprobación) envía además el correo
- * "cotización aprobada" al creador, con el código de la OIP y su enlace.
+ * "cotización aprobada" al creador, con el código de la OIP y su enlace
+ * (y en copia a quienes el usuario eligió: cc).
  */
-function api_generateOipDocument(idOip, requestId) {
+function api_generateOipDocument(idOip, requestId, cc) {
   return safeCall_('api_generateOipDocument', function () {
     if (!idOip) return fail_('VALIDATION', 'Falta idOip.');
     var res = doc_generateForOip_(idOip, requestId || null);
-    if (requestId) ntf_onDocumentoOrden_('OIP', idOip, res, true);
+    if (requestId) ntf_onDocumentoOrden_('OIP', idOip, res, true, cc);
     return res;
   });
 }
@@ -448,6 +463,17 @@ function api_setTareaEstado(tipo, idOrden, idTarea, estado) {
 function api_deleteTarea(tipo, idOrden, idTarea) {
   return safeCall_('api_deleteTarea', function () {
     return tg_deleteTarea(tipo, idOrden, idTarea);
+  });
+}
+
+/**
+ * Historial de cambios (HISTORIAL_TAREAS) de UNA tarea ({tipo, idTarea}) o de
+ * todas las tareas de una orden, incluidas las eliminadas ({tipo, idOrden}).
+ * Siempre fresco: lo pide el popup "Historial de cambios" al abrirse.
+ */
+function api_getHistorialTareas(params) {
+  return safeCall_('api_getHistorialTareas', function () {
+    return htar_listar_(params);
   });
 }
 
@@ -566,5 +592,65 @@ function api_getDashboardSnapshot(params) {
 function api_getOrdenesDashboard(params) {
   return safeCall_('api_getOrdenesDashboard', function () {
     return ds_getOrdenesSnapshot_(params || {});
+  });
+}
+
+// ---------------------------------------------------------------------
+// API — Configuración (06_ConfigSheet.js, 11_CatalogRepo.js; CLAUDE.md §15).
+// Solo IDs de archivos/carpetas, correos (destinatarios fijos, copia fija,
+// asunto y cuerpo), tipos de servicio y contadores de los consecutivos
+// (cotización / OIS / OIP). Casi todo escribe en el spreadsheet de catálogo
+// (cfgs_sheetId_); los contadores, en ScriptProperties (20_Ids.js).
+// ---------------------------------------------------------------------
+
+/**
+ * Todo lo que muestra la vista Configuración, leído en el momento. La primera
+ * vez migra la configuración anterior (hojas CONFIG_* viejas -> CONFIG_IDS +
+ * CONFIG_CORREOS) y borra las hojas que volvieron al código.
+ */
+function api_getConfiguracion() {
+  return safeCall_('api_getConfiguracion', function () {
+    return cfgs_snapshot_();
+  });
+}
+
+/** Guarda IDs: cambios = {CLAVE: id o enlace}. Comprueba antes que cada archivo/carpeta exista y sea accesible. */
+function api_saveConfigIds(cambios) {
+  return safeCall_('api_saveConfigIds', function () {
+    return cfgs_guardarIds_(cambios);
+  });
+}
+
+/** Guarda un correo: destinatarios fijos (si aplica), copia siempre a, asunto y cuerpo. */
+function api_saveConfigCorreo(clave, datos) {
+  return safeCall_('api_saveConfigCorreo', function () {
+    return cfgs_guardarCorreo_(clave, datos);
+  });
+}
+
+/** Crea (datos.fila vacío) o edita un tipo de servicio de TIPOS DE SERVICIOS. */
+function api_saveTipoServicio(datos) {
+  return safeCall_('api_saveTipoServicio', function () {
+    return cat_guardarTipo_(datos);
+  });
+}
+
+/**
+ * Fija el último número usado de un consecutivo ('COTIZACION' | 'OIS' | 'OIP'):
+ * el siguiente código será ultimo + 1. No puede quedar por debajo de lo que ya
+ * existe en la hoja. Devuelve el estado de los tres contadores.
+ */
+function api_saveConsecutivo(tipo, ultimo) {
+  return safeCall_('api_saveConsecutivo', function () {
+    return tx_conLock_('api_saveConsecutivo', function () {
+      return code_guardarContador_(tipo, ultimo);
+    }, { ids: { tipo: tipo }, payload: { ultimo: ultimo } });
+  });
+}
+
+/** Elimina un tipo de servicio (fila + tipo esperado, para no borrar otra fila si la hoja cambió). */
+function api_deleteTipoServicio(fila, tipoAnterior) {
+  return safeCall_('api_deleteTipoServicio', function () {
+    return cat_eliminarTipo_(fila, tipoAnterior);
   });
 }

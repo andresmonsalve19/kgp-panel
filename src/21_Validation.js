@@ -57,10 +57,13 @@ function validateCreatePayload_(payload) {
   }
 
   // ---- establecimiento ----
+  // OPCIONAL: sin establecimiento (ausente, o modo "existente" sin id) la
+  // cotización se crea con ID ESTABLECIMIENTO vacío y la plantilla deja en
+  // blanco las celdas del establecimiento y su encargado.
   var establecimiento = null;
-  if (!isPlainObject_(payload.establecimiento)) {
-    err('establecimiento es obligatorio.');
-  } else {
+  var estSinElegir = !isPlainObject_(payload.establecimiento) ||
+    (payload.establecimiento.modo === 'existente' && !String(payload.establecimiento.idEstablecimiento || '').trim());
+  if (!estSinElegir) {
     var estModo = payload.establecimiento.modo;
     if (estModo !== 'existente' && estModo !== 'nuevo') {
       err('establecimiento.modo debe ser "existente" o "nuevo".');
@@ -71,9 +74,6 @@ function validateCreatePayload_(payload) {
       datos: null,
       encargado: null
     };
-    if (estModo === 'existente' && !establecimiento.idEstablecimiento) {
-      err('establecimiento.idEstablecimiento es obligatorio cuando modo="existente".');
-    }
     if (estModo === 'nuevo') {
       var ed = payload.establecimiento.datos || {};
       establecimiento.datos = {
@@ -231,8 +231,8 @@ function validateUpdatePayload_(payload) {
   var idSolicitante = String((payload.solicitante && payload.solicitante.idContacto) || '').trim();
   if (!idSolicitante) err('solicitante es obligatorio.');
 
+  // OPCIONAL: '' = cotización sin establecimiento (ni encargado).
   var idEstablecimiento = String((payload.establecimiento && payload.establecimiento.idEstablecimiento) || '').trim();
-  if (!idEstablecimiento) err('establecimiento es obligatorio.');
 
   // ESTADO es opcional: '' = conservar el actual. Si llega, solo puede ser la
   // decisión de Cotización (Aprobada/Rechazada); qs_updateQuotation verifica

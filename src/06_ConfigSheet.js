@@ -1,41 +1,41 @@
 /**
- * Configuración editable desde Google Sheets (CLAUDE.md §15).
+ * Configuración editable (CLAUDE.md §15). Por decisión del usuario SOLO se
+ * configuran tres cosas; todo lo demás (plazos, IVA, límites, celdas de la
+ * plantilla, nombres de pestañas, firma y pie del correo...) vive únicamente
+ * en el código (00_Config.js, 04_MailTemplate.js).
  *
- * El spreadsheet de catálogo (cfgs_sheetId_, el mismo de TIPOS DE SERVICIOS)
- * tiene varias hojas CONFIG_* con forma de tabla. Todas usan las mismas
- * columnas base para que se lean igual:
+ *   1. IDs de spreadsheets, carpetas y archivos   -> hoja CONFIG_IDS
+ *   2. Correos: destinatarios fijos, "copia siempre a", asunto y cuerpo
+ *                                                  -> hoja CONFIG_CORREOS
+ *   3. Tipos de servicio                           -> hoja TIPOS DE SERVICIOS
+ *                                                     (11_CatalogRepo.js)
  *
- *   GRUPO | CLAVE | VALOR | VALOR POR DEFECTO | DESCRIPCION  (+ columnas de ayuda)
- *
- * salvo CONFIG_CORREO_TEXTOS (una fila por correo, una columna por campo de
- * texto) y CONFIG_LEEME (solo explicación).
- *
- *   CONFIG_IDS            IDs de spreadsheets, carpetas y archivos.
- *   CONFIG_HOJAS          nombres de las pestañas (BD, plantilla, historial).
- *   CONFIG_GENERAL        plazos, IVA, límites, avisos, dashboard, caché.
- *   CONFIG_CORREO         destinatarios, remitente, firma y pie del correo.
- *   CONFIG_CORREO_TEXTOS  asunto, título, párrafos... de cada correo.
- *   CONFIG_CELDAS         mapa de celdas de la plantilla (CELLMAP).
+ * Las tres viven en el spreadsheet de catálogo (cfgs_sheetId_) y se editan
+ * desde la vista "Configuración" (ui/ViewConfig.html + ui/JsConfig.js.html,
+ * api_*Config* en 50_WebApp.js), que escribe directamente en estas hojas.
+ * También se pueden editar a mano en el spreadsheet.
  *
  * CÓMO SE APLICA
- *   - doGet (cada vez que se carga o recarga la página) llama cfgs_refresh_:
- *     lee TODAS las hojas CONFIG_* en una sola apertura del spreadsheet y
- *     guarda el resultado en CacheService. Las demás llamadas de esa sesión
- *     (google.script.run, disparadores) usan esa copia sin volver a leer.
- *   - CFG_() y CELLMAP_() (00_Config.js) aplican esos valores al final con
- *     cfgs_aplicar_. Los textos de correo los toma mail_textos_.
- *   - Solo se aplican claves del catálogo (cfgs_catalogo_): una clave
- *     desconocida o un valor que no se puede interpretar se IGNORA y queda el
- *     valor del código. La app nunca se cae por la config; admin_verConfig()
- *     lista lo que se ignoró.
- *   - Celda VALOR vacía = valor por defecto del código.
+ *   - doGet (cada carga o recarga de la página) llama cfgs_refresh_: lee
+ *     CONFIG_IDS y CONFIG_CORREOS en una sola apertura del spreadsheet y deja
+ *     el resultado en CacheService. Las llamadas google.script.run de esa
+ *     sesión y los disparadores usan esa copia. Guardar desde la vista
+ *     Configuración también la refresca.
+ *   - CFG_() (00_Config.js) aplica los IDs y los destinatarios fijos con
+ *     cfgs_aplicar_; los textos y la copia fija de cada correo los toma
+ *     mail_textos_ (04_MailTemplate.js).
+ *   - Solo se aplican claves conocidas (allowlist: cfgs_catalogoIds_ y los
+ *     destinatarios fijos de mail_textosDefault_). Celda vacía o clave
+ *     desconocida = se queda el valor del código: la app nunca se cae por la
+ *     configuración.
  *
- * Las hojas las crea / completa admin_crearHojasConfig() (51_Admin.js): es
- * idempotente y NUNCA pisa un VALOR ya escrito; solo agrega filas nuevas y
- * refresca las columnas de ayuda (VALOR POR DEFECTO, DESCRIPCION...).
+ * Las hojas antiguas (CONFIG_LEEME, CONFIG_HOJAS, CONFIG_GENERAL,
+ * CONFIG_CORREO, CONFIG_CORREO_TEXTOS, CONFIG_CELDAS) se eliminan la primera
+ * vez que se abre la vista Configuración (o con admin_crearHojasConfig()),
+ * migrando antes lo que sigue siendo configurable (cfgs_asegurarHojas_).
  *
- * Regla de recursión: nada de este archivo que se use al leer la config puede
- * llamar CFG_() (CFG depende de esto). Por eso el ID del spreadsheet vive en
+ * Regla de recursión: nada de lo que se usa al LEER la config puede llamar
+ * CFG_() (CFG depende de esto). Por eso el ID del spreadsheet vive en
  * cfgs_sheetId_ y no en CFG.
  */
 
@@ -44,22 +44,31 @@ function cfgs_sheetId_() {
   return '1n87Kj1wgP7PQ3jZXunHgiR7EK2MqG7zcDzhHwCCkaqM';
 }
 
-/** Nombres de las hojas de configuración. */
+/** Hojas de configuración vigentes. */
 function cfgs_tabs_() {
-  return {
-    LEEME: 'CONFIG_LEEME',
-    IDS: 'CONFIG_IDS',
-    HOJAS: 'CONFIG_HOJAS',
-    GENERAL: 'CONFIG_GENERAL',
-    CORREO: 'CONFIG_CORREO',
-    CORREO_TEXTOS: 'CONFIG_CORREO_TEXTOS',
-    CELDAS: 'CONFIG_CELDAS'
-  };
+  return { IDS: 'CONFIG_IDS', CORREOS: 'CONFIG_CORREOS' };
 }
 
-/** Clave de CacheService donde vive la copia leída de las hojas CONFIG_*. */
+/** Hojas de la configuración anterior: se eliminan al migrar (cfgs_asegurarHojas_). */
+function cfgs_tabsObsoletas_() {
+  return ['CONFIG_LEEME', 'CONFIG_HOJAS', 'CONFIG_GENERAL', 'CONFIG_CORREO', 'CONFIG_CORREO_TEXTOS', 'CONFIG_CELDAS'];
+}
+
+/** Columnas de CONFIG_IDS. */
+function cfgs_columnasIds_() {
+  return ['GRUPO', 'CLAVE', 'NOMBRE', 'VALOR', 'DESCRIPCION', 'ENLACE'];
+}
+
+/** Columnas de CONFIG_CORREOS: ayuda + destinatarios + los campos de texto editables + variables. */
+function cfgs_columnasCorreos_() {
+  return ['CLAVE', 'CORREO', 'CUANDO SE ENVIA', 'DESTINATARIOS', 'COPIA SIEMPRE A']
+    .concat(mail_camposTexto_())
+    .concat(['VARIABLES']);
+}
+
+/** Clave de CacheService donde vive la copia leída de las hojas de configuración. */
 function cfgs_cacheKey_() {
-  return 'cfgsheet:data:v1';
+  return 'cfgsheet:data:v2';
 }
 
 /**
@@ -73,7 +82,7 @@ function cfgs_ttl_() {
 
 /** Overrides vacíos (sin hoja o con error). */
 function cfgs_vacio_(aviso) {
-  return { valores: {}, celdas: {}, correos: {}, avisos: aviso ? [aviso] : [], leidoEn: '' };
+  return { valores: {}, correos: {}, avisos: aviso ? [aviso] : [], leidoEn: '' };
 }
 
 // ---------------------------------------------------------------------
@@ -106,8 +115,9 @@ function cfgs_overrides_() {
 }
 
 /**
- * Relee las hojas CONFIG_* y reemplaza la copia en caché. Lo llama doGet en
- * cada carga de la página. Si la lectura falla, se queda la copia anterior.
+ * Relee las hojas de configuración y reemplaza la copia en caché. Lo llama
+ * doGet en cada carga de la página y la vista Configuración tras guardar. Si
+ * la lectura falla, se queda la copia anterior.
  */
 function cfgs_refresh_() {
   var memo = repo_memo_();
@@ -124,10 +134,22 @@ function cfgs_refresh_() {
   }
 }
 
+/** Encabezados normalizados de la fila 1 de `values` -> {NOMBRE: índice}. */
+function cfgs_indiceColumnas_(fila) {
+  var col = {};
+  (fila || []).forEach(function (x, i) {
+    var k = normText_(x);
+    if (k && col[k] === undefined) col[k] = i;
+  });
+  return col;
+}
+
 /**
- * Lee todas las hojas CONFIG_* en una sola apertura del spreadsheet.
- * Devuelve {valores: {CLAVE: valor}, celdas: {CLAVE: valor},
- * correos: {CLAVE: {CAMPO: texto}}, avisos: [], leidoEn}.
+ * Lee CONFIG_IDS y CONFIG_CORREOS en una sola apertura del spreadsheet.
+ * Devuelve {valores: {CLAVE: texto}, correos: {CLAVE: {CAMPO: texto, CC}},
+ * avisos: [], leidoEn}. Los destinatarios fijos de un correo
+ * (DESTINO_CFG en mail_textosDefault_) se copian a `valores` para que CFG_()
+ * los vea con su nombre de siempre (OIP_NOTIF_EMAIL, OIS_FINALIZADA_EMAIL).
  */
 function cfgs_leerHoja_() {
   var tabs = cfgs_tabs_();
@@ -135,129 +157,95 @@ function cfgs_leerHoja_() {
   out.leidoEn = new Date().toISOString();
   var ss = SpreadsheetApp.openById(cfgs_sheetId_());
 
-  ss.getSheets().forEach(function (sh) {
-    var nombre = sh.getName();
-    if (nombre.indexOf('CONFIG_') !== 0 || nombre === tabs.LEEME) return;
-    var values = sh.getDataRange().getValues();
-    if (values.length < 2) return;
-    var h = values[0].map(function (x) { return normText_(x); });
-    var iClave = h.indexOf('CLAVE');
-    if (iClave < 0) {
-      out.avisos.push('La hoja ' + nombre + ' no tiene columna CLAVE; se ignoró.');
-      return;
-    }
-
-    if (nombre === tabs.CORREO_TEXTOS) {
-      var campos = mail_camposTexto_();
-      values.slice(1).forEach(function (row) {
-        var clave = String(row[iClave] || '').trim();
-        if (!clave) return;
-        var textos = {};
-        campos.forEach(function (c) {
-          var i = h.indexOf(c);
-          if (i >= 0 && row[i] !== '' && row[i] != null) textos[c] = String(row[i]);
-        });
-        out.correos[clave] = textos;
+  var shIds = ss.getSheetByName(tabs.IDS);
+  if (shIds) {
+    var vIds = shIds.getDataRange().getValues();
+    var cIds = cfgs_indiceColumnas_(vIds[0]);
+    if (cIds.CLAVE === undefined || cIds.VALOR === undefined) {
+      out.avisos.push('La hoja ' + tabs.IDS + ' no tiene las columnas CLAVE y VALOR; se ignoró.');
+    } else {
+      vIds.slice(1).forEach(function (row) {
+        var clave = String(row[cIds.CLAVE] || '').trim();
+        var v = String(row[cIds.VALOR] == null ? '' : row[cIds.VALOR]).trim();
+        if (clave && v) out.valores[clave] = v;
       });
-      return;
     }
+  }
 
-    var iValor = h.indexOf('VALOR');
-    if (iValor < 0) {
-      out.avisos.push('La hoja ' + nombre + ' no tiene columna VALOR; se ignoró.');
-      return;
+  var shCor = ss.getSheetByName(tabs.CORREOS);
+  if (shCor) {
+    var vCor = shCor.getDataRange().getValues();
+    var cCor = cfgs_indiceColumnas_(vCor[0]);
+    if (cCor.CLAVE === undefined) {
+      out.avisos.push('La hoja ' + tabs.CORREOS + ' no tiene columna CLAVE; se ignoró.');
+    } else {
+      var campos = mail_camposTexto_();
+      vCor.slice(1).forEach(function (row) {
+        var clave = String(row[cCor.CLAVE] || '').trim();
+        if (!clave) return;
+        // Todas las columnas de texto, incluso vacías: un campo vaciado a
+        // propósito (sin botón, sin título...) queda vacío. Ver mail_textos_.
+        var t = {};
+        campos.forEach(function (c) {
+          var i = cCor[c];
+          if (i !== undefined) t[c] = row[i] == null ? '' : String(row[i]);
+        });
+        var iCc = cCor[normText_('COPIA SIEMPRE A')];
+        if (iCc !== undefined && String(row[iCc] || '').trim()) t.CC = String(row[iCc]).trim();
+        var iDest = cCor.DESTINATARIOS;
+        if (iDest !== undefined && String(row[iDest] || '').trim()) t.DESTINATARIOS = String(row[iDest]).trim();
+        out.correos[clave] = t;
+      });
     }
-    var destino = nombre === tabs.CELDAS ? out.celdas : out.valores;
-    values.slice(1).forEach(function (row) {
-      var clave = String(row[iClave] || '').trim();
-      var v = row[iValor];
-      if (!clave || v === '' || v == null) return;
-      if (Object.prototype.toString.call(v) === '[object Date]') v = v.toISOString();
-      if (destino.hasOwnProperty(clave)) out.avisos.push('La clave ' + clave + ' está repetida; se usó la de la hoja ' + nombre + '.');
-      destino[clave] = v;
-    });
+  }
+
+  // Destinatarios fijos -> claves de CFG_().
+  var defs = mail_textosDefault_();
+  Object.keys(defs).forEach(function (k) {
+    var destinoCfg = defs[k].DESTINO_CFG;
+    var hoja = out.correos[k];
+    if (destinoCfg && hoja && hoja.DESTINATARIOS) out.valores[destinoCfg] = hoja.DESTINATARIOS;
   });
   return out;
 }
 
 // ---------------------------------------------------------------------
-// Aplicación sobre CFG_() / CELLMAP_()
+// Aplicación sobre CFG_()
 // ---------------------------------------------------------------------
 
-/** Claves de CFG_() que se pueden sobrescribir desde la hoja (las del catálogo, salvo las de solo lectura). Memoizado. */
+/**
+ * Claves de CFG_() que la hoja puede sobrescribir: los IDs editables y los
+ * destinatarios fijos de los correos. Memoizado por ejecución.
+ */
 function cfgs_clavesEditables_() {
   var memo = repo_memo_();
   if (memo.__cfgsEditables) return memo.__cfgsEditables;
   var set = {};
-  var cat = cfgs_catalogo_();
-  Object.keys(cat).forEach(function (tab) {
-    if (tab === 'CELDAS') return;
-    cat[tab].forEach(function (f) { if (!f.soloLectura) set[f.clave] = true; });
-  });
+  cfgs_catalogoIds_().forEach(function (f) { if (!f.soloLectura) set[f.clave] = true; });
+  var defs = mail_textosDefault_();
+  Object.keys(defs).forEach(function (k) { if (defs[k].DESTINO_CFG) set[defs[k].DESTINO_CFG] = true; });
   memo.__cfgsEditables = set;
   return set;
 }
 
 /**
- * Convierte el valor de la hoja al tipo del valor por defecto. Devuelve
- * undefined si no se puede (y entonces se queda el valor del código).
- * esCelda: valida formato de celda ("A7") o columna ("B") como el default.
+ * Aplica sobre `cfg` (defaults del código) los valores de la hoja que estén
+ * en la allowlist. Todos son textos (IDs, correos). avisos (opcional): array
+ * donde anotar lo ignorado. ov (opcional): overrides a usar en vez de
+ * cfgs_overrides_ (verificación).
  */
-function cfgs_coerce_(def, v, esCelda) {
-  if (typeof def === 'number') {
-    var n = typeof v === 'number' ? v : Number(String(v).trim().replace(',', '.'));
-    if (!isFinite(n) || n < 0) return undefined;
-    if (Number.isInteger(def) && !Number.isInteger(n)) return undefined;
-    return n;
-  }
-  if (def === null || typeof def === 'string') {
-    var s = String(v).trim();
-    if (!s) return undefined;
-    if (esCelda && typeof def === 'string') {
-      s = s.toUpperCase();
-      if (/^[A-Z]{1,3}\d+$/.test(def) && !/^[A-Z]{1,3}\d+$/.test(s)) return undefined;
-      if (/^[A-Z]{1,3}$/.test(def) && !/^[A-Z]{1,3}$/.test(s)) return undefined;
-    }
-    return s;
-  }
-  return undefined; // listas, objetos, booleanos: no editables desde la hoja
-}
-
-/**
- * Aplica los valores de la hoja sobre `obj` (defaults de CFG o CELLMAP).
- * seccion: 'valores' (CFG, claves con puntos: "LIMITS.MAX_SERVICIOS") o
- * 'celdas' (CELLMAP). avisos (opcional): array donde anotar lo ignorado.
- * ov (opcional): overrides a usar en vez de cfgs_overrides_ (verificación).
- */
-function cfgs_aplicar_(obj, seccion, avisos, ov) {
-  var mapa = (ov || cfgs_overrides_())[seccion] || {};
-  var claves = Object.keys(mapa);
-  if (!claves.length) return obj;
-  var editables = seccion === 'valores' ? cfgs_clavesEditables_() : null;
-
-  claves.forEach(function (path) {
-    if (editables && !editables[path]) {
-      if (avisos) avisos.push('Clave desconocida o no editable en la hoja: ' + path + ' (se ignoró).');
+function cfgs_aplicar_(cfg, avisos, ov) {
+  var mapa = (ov || cfgs_overrides_()).valores || {};
+  var editables = cfgs_clavesEditables_();
+  Object.keys(mapa).forEach(function (k) {
+    if (!editables[k] || !(k in cfg)) {
+      if (avisos) avisos.push('Clave desconocida o no editable: ' + k + ' (se ignoró).');
       return;
     }
-    var partes = path.split('.');
-    var cont = obj;
-    for (var i = 0; i < partes.length - 1; i++) {
-      cont = cont ? cont[partes[i]] : null;
-    }
-    var k = partes[partes.length - 1];
-    if (!isPlainObject_(cont) || !(k in cont)) {
-      if (avisos) avisos.push('Clave desconocida: ' + path + ' (se ignoró).');
-      return;
-    }
-    var v = cfgs_coerce_(cont[k], mapa[path], seccion === 'celdas');
-    if (v === undefined) {
-      if (avisos) avisos.push('Valor no válido para ' + path + ': "' + mapa[path] + '" (se usa ' + cont[k] + ').');
-      return;
-    }
-    cont[k] = v;
+    var v = String(mapa[k] == null ? '' : mapa[k]).trim();
+    if (v) cfg[k] = v;
   });
-  return obj;
+  return cfg;
 }
 
 /** Ejecuta fn() viendo SOLO los valores por defecto del código (sin la hoja). */
@@ -275,8 +263,9 @@ function cfgs_sinHoja_(fn) {
 /**
  * Parámetros que necesita el navegador (doGet los inyecta en la página como
  * window.KGP_CONFIG; el cliente los lee con KGP.cfg (números) o
- * KGP.cfgTexto (textos)). Solo valores simples y nada sensible: IDs de
- * archivos, correos y demás se quedan en el servidor.
+ * KGP.cfgTexto (textos)). Salen del código (00_Config.js), salvo el
+ * destinatario del aviso a contabilidad (configurable). Solo valores simples
+ * y nada sensible: IDs de archivos y demás se quedan en el servidor.
  */
 function cfgs_clientConfig_() {
   var c = CFG_();
@@ -286,6 +275,8 @@ function cfgs_clientConfig_() {
     MAX_ACTIVIDADES: c.LIMITS.MAX_ACTIVIDADES,
     MAX_TAREAS: c.LIMITS.MAX_TAREAS,
     MAX_TAREAS_OIP: c.LIMITS.MAX_TAREAS_OIP,
+    MAX_CC: c.LIMITS.MAX_CC,
+    OIS_FINALIZADA_EMAIL: c.OIS_FINALIZADA_EMAIL,
     TARIFA_MAX_DIGITS: String(Math.trunc(c.TARIFA_MAX)).length,
     CANTIDAD_MAX: c.CANTIDAD_MAX,
     PLAZO_DEFAULT: c.COTIZACION_PLAZO_DEFAULT,
@@ -303,388 +294,262 @@ function cfgs_clientConfig_() {
 }
 
 // ---------------------------------------------------------------------
-// Catálogo documentado: qué va en cada hoja
+// Catálogo de IDs (filas de CONFIG_IDS)
 // ---------------------------------------------------------------------
 
 /**
- * Filas de cada hoja de configuración. {grupo, clave, descripcion, tipo,
- * nombre?, hoja?, soloLectura?}. El VALOR POR DEFECTO sale del código
- * (cfgs_valorDefault_); aquí solo se documenta. Para agregar un parámetro
- * nuevo: añádelo a CFG_()/CELLMAP_() y luego aquí, y vuelve a ejecutar
- * admin_crearHojasConfig().
+ * IDs configurables: {grupo, clave, nombre, tipo ('Spreadsheet'|'Carpeta'|
+ * 'Archivo'), descripcion, soloLectura?}. El valor por defecto es el de
+ * CFG_() (00_Config.js). Para agregar uno: su default en CFG_() y su fila aquí.
  */
-function cfgs_catalogo_() {
-  return {
-    IDS: [
-      { grupo: 'Bases de datos', clave: 'DB_SHEET_ID', nombre: 'Base de datos principal', tipo: 'Spreadsheet',
-        descripcion: 'Spreadsheet con COTIZACIONES, SERVICIOS, CLIENTES, OIS, OIP, tareas, personal, etc.' },
-      { grupo: 'Bases de datos', clave: 'CAT_SHEET_ID', nombre: 'Catálogo y configuración', tipo: 'Spreadsheet', soloLectura: true,
-        descripcion: 'ESTE archivo (TIPOS DE SERVICIOS + hojas CONFIG_*). Solo informativo: está fijo en el código (cfgs_sheetId_) porque de aquí se lee todo lo demás.' },
-      { grupo: 'Bases de datos', clave: 'MAIL_HISTORIAL_SHEET_ID', nombre: 'Historial de correos', tipo: 'Spreadsheet',
-        descripcion: 'Spreadsheet donde se registra cada correo enviado (pestaña de CONFIG_HOJAS > MAIL_HISTORIAL_TAB).' },
-      { grupo: 'Plantilla de documentos', clave: 'TEMPLATE_FILE_ID', nombre: 'Plantilla original (.xlsx)', tipo: 'Archivo',
-        descripcion: 'Archivo .xlsx original de la plantilla de cotización/OIS/OIP. admin_convertTemplate() lo convierte a hoja de Google.' },
-      { grupo: 'Plantilla de documentos', clave: 'TEMPLATE_SHEET_ID', nombre: 'Plantilla convertida', tipo: 'Spreadsheet',
-        descripcion: 'Copia nativa de Google de la plantilla, de la que se generan los documentos. La escribe admin_convertTemplate(); si esta celda tiene valor, manda esta celda.' },
-      { grupo: 'Carpetas de salida', clave: 'OUT_FOLDER_ID', nombre: 'Carpeta de cotizaciones', tipo: 'Carpeta',
-        descripcion: 'Carpeta de Drive donde se guardan los documentos de las cotizaciones.' },
-      { grupo: 'Carpetas de salida', clave: 'OIS_FOLDER_ID', nombre: 'Carpeta de OIS', tipo: 'Carpeta',
-        descripcion: 'Carpeta raíz de las OIS: cada OIS crea aquí su subcarpeta con su documento.' },
-      { grupo: 'Carpetas de salida', clave: 'OIP_FOLDER_ID', nombre: 'Carpeta de OIP', tipo: 'Carpeta',
-        descripcion: 'Carpeta raíz de las OIP: cada OIP crea aquí su subcarpeta con su documento.' }
-    ],
-    HOJAS: [
-      { grupo: 'Base de datos principal', clave: 'TABS.COTIZACIONES', tipo: 'Texto', descripcion: 'Pestaña de cotizaciones (una fila por servicio).' },
-      { grupo: 'Base de datos principal', clave: 'TABS.SERVICIOS', tipo: 'Texto', descripcion: 'Pestaña de servicios de cada cotización.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.CLIENTES', tipo: 'Texto', descripcion: 'Pestaña de clientes.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.CONTACTOS', tipo: 'Texto', descripcion: 'Pestaña de contactos de los clientes (solicitantes y encargados).' },
-      { grupo: 'Base de datos principal', clave: 'TABS.ESTABLECIMIENTOS', tipo: 'Texto', descripcion: 'Pestaña de establecimientos de los clientes.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.PERSONAL', tipo: 'Texto', descripcion: 'Pestaña de empleados internos (Gestión de empleados > Internos).' },
-      { grupo: 'Base de datos principal', clave: 'TABS.PERSONAL_TERCEROS', tipo: 'Texto', descripcion: 'Pestaña de empleados terceros / independientes (Gestión de empleados > Terceros). Mismas columnas que la de internos.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.OIS', tipo: 'Texto', descripcion: 'Pestaña de OIS.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.TAREAS_OIS', tipo: 'Texto', descripcion: 'Pestaña de tareas de las OIS.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.OIP', tipo: 'Texto', descripcion: 'Pestaña de OIP.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.TAREAS_OIP', tipo: 'Texto', descripcion: 'Pestaña de tareas de las OIP.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.OIP_FACTURACION', tipo: 'Texto', descripcion: 'Pestaña de facturación mensual de las OIP.' },
-      { grupo: 'Base de datos principal', clave: 'TABS.ERRORES', tipo: 'Texto', descripcion: 'Pestaña donde se registran los errores (se crea sola si no existe).' },
-      { grupo: 'Catálogo', clave: 'TABS.TIPOS_SERVICIO', tipo: 'Texto', descripcion: 'Pestaña de este archivo con los tipos de servicio (columna A) y su código UNSPSC (columna B).' },
-      { grupo: 'Plantilla de documentos', clave: 'TEMPLATE_TAB_NAME', tipo: 'Texto', descripcion: 'Pestaña de la plantilla para la cotización. Vacío = la primera hoja de la plantilla.' },
-      { grupo: 'Plantilla de documentos', clave: 'TEMPLATE_TAB_OIS', tipo: 'Texto', descripcion: 'Pestaña de la plantilla para la OIS.' },
-      { grupo: 'Plantilla de documentos', clave: 'TEMPLATE_TAB_OIP', tipo: 'Texto', descripcion: 'Pestaña de la plantilla para la OIP.' },
-      { grupo: 'Historial de correos', clave: 'MAIL_HISTORIAL_TAB', tipo: 'Texto', descripcion: 'Pestaña del historial de correos (columnas NUMERO, TIMESTAMP, FROM, TO, SUBJECT, BODY).' }
-    ],
-    GENERAL: [
-      { grupo: 'Fechas y plazos', clave: 'TZ', tipo: 'Texto', descripcion: 'Zona horaria de fechas y consecutivos (formato IANA, p. ej. America/Bogota).' },
-      { grupo: 'Fechas y plazos', clave: 'COTIZACION_PLAZO_DEFAULT', tipo: 'Número entero', descripcion: 'Plazo (días) con el que arranca el formulario de "Crear cotización".' },
-      { grupo: 'Fechas y plazos', clave: 'OIP_PLAZO_DEFAULT', tipo: 'Número entero', descripcion: 'Plazo (días) con el que nace una OIP. La OIS hereda el plazo de su cotización.' },
-      { grupo: 'Fechas y plazos', clave: 'LIMITS.MAX_PLAZO_DIAS', tipo: 'Número entero', descripcion: 'Plazo máximo (días) permitido en cotizaciones y órdenes.' },
-      { grupo: 'Tarifas', clave: 'IVA_TASA', tipo: 'Número decimal', descripcion: 'Tasa de IVA sobre el SUBTOTAL (0.19 = 19 %).' },
-      { grupo: 'Tarifas', clave: 'TARIFA_MAX', tipo: 'Número entero', descripcion: 'Tarifa máxima por servicio (su cantidad de dígitos limita también el campo en pantalla).' },
-      { grupo: 'Tarifas', clave: 'CANTIDAD_MAX', tipo: 'Número entero', descripcion: 'Cantidad máxima por servicio.' },
-      { grupo: 'Límites', clave: 'LIMITS.MAX_SERVICIOS', tipo: 'Número entero', descripcion: 'Servicios por cotización. OJO: la plantilla solo tiene 10 bloques de servicio (CONFIG_CELDAS).' },
-      { grupo: 'Límites', clave: 'LIMITS.MAX_ACTIVIDADES', tipo: 'Número entero', descripcion: 'Actividades por servicio. Debe coincidir con SERVICIOS_ACT_MAX de CONFIG_CELDAS.' },
-      { grupo: 'Límites', clave: 'LIMITS.MAX_TAREAS', tipo: 'Número entero', descripcion: 'Tareas por OIS. OJO: la plantilla OIS solo tiene 20 filas de tareas (229 a 248).' },
-      { grupo: 'Límites', clave: 'LIMITS.MAX_TAREAS_OIP', tipo: 'Número entero', descripcion: 'Tareas por OIP (salvaguarda; la plantilla OIP inserta filas según haga falta).' },
-      { grupo: 'Límites', clave: 'LIMITS.MAX_FACTURAS_OIP', tipo: 'Número entero', descripcion: 'Filas de facturación por OIP (una por mes).' },
-      { grupo: 'Límites', clave: 'LIMITS.CELL_MAX', tipo: 'Número entero', descripcion: 'Máximo de caracteres de un texto libre que se guarda en una celda.' },
-      { grupo: 'Avisos y dashboard', clave: 'DIAS_POR_VENCER_COTIZACION', tipo: 'Número entero', descripcion: 'Días antes del vencimiento en que una cotización aparece como "por vencer".' },
-      { grupo: 'Avisos y dashboard', clave: 'DIAS_POR_VENCER_ORDENES', tipo: 'Número entero', descripcion: 'Días antes del vencimiento en que una OIS/OIP aparece como "por vencer".' },
-      { grupo: 'Avisos y dashboard', clave: 'DIAS_POR_VENCER_TAREAS', tipo: 'Número entero', descripcion: 'Días antes de la fecha de entrega en que una tarea aparece como "por vencer".' },
-      { grupo: 'Avisos y dashboard', clave: 'DIAS_RECIENTES_COTIZACION', tipo: 'Número entero', descripcion: 'Días hacia atrás que cuenta la tarjeta "Recién creadas" del Dashboard.' },
-      { grupo: 'Avisos y dashboard', clave: 'DASHBOARD_POLL_MS', tipo: 'Número entero', descripcion: 'Cada cuántos milisegundos el Dashboard revisa si hay datos nuevos (30000 = 30 s).' },
-      { grupo: 'Avisos y dashboard', clave: 'LIMITS.DASHBOARD_MAX_COTIZACIONES', tipo: 'Número entero', descripcion: 'Máximo de cotizaciones que descarga el Dashboard (las más recientes).' },
-      { grupo: 'Responsables de tareas', clave: 'ETIQUETA_RESPONSABLE_INTERNO', tipo: 'Texto', descripcion: 'Cómo se muestra la opción "interno" al elegir el responsable de una tarea y en Gestión de empleados.' },
-      { grupo: 'Responsables de tareas', clave: 'ETIQUETA_RESPONSABLE_TERCERO', tipo: 'Texto', descripcion: 'Cómo se muestra la opción "tercero" al elegir el responsable de una tarea y en Gestión de empleados.' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_EMPLEADO', tipo: 'Texto', descripcion: 'Prefijo del ID de un empleado interno nuevo (EMP-...). Solo afecta a los que se creen después.' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_TERCERO', tipo: 'Texto', descripcion: 'Prefijo del ID de un tercero nuevo (TER-...). Solo afecta a los que se creen después.' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_CLIENTE', tipo: 'Texto', descripcion: 'Prefijo del ID de un cliente nuevo (CLI-...).' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_CONTACTO', tipo: 'Texto', descripcion: 'Prefijo del ID de un contacto nuevo (CON-...).' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_ESTABLECIMIENTO', tipo: 'Texto', descripcion: 'Prefijo del ID de un establecimiento nuevo (EST-...).' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_COTIZACION', tipo: 'Texto', descripcion: 'Prefijo del ID interno de una cotización nueva (CTZ-...). No es el código visible.' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_SERVICIO', tipo: 'Texto', descripcion: 'Prefijo del ID de un servicio nuevo (SRV-...).' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_OIS', tipo: 'Texto', descripcion: 'Prefijo del ID interno de una OIS nueva (OIS-...). No es el código visible.' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_OIP', tipo: 'Texto', descripcion: 'Prefijo del ID interno de una OIP nueva (OIP-...). No es el código visible.' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_TAREA_OIS', tipo: 'Texto', descripcion: 'Prefijo del ID de una tarea nueva de OIS (TAR-...).' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_TAREA_OIP', tipo: 'Texto', descripcion: 'Prefijo del ID de una tarea nueva de OIP (TAP-...).' },
-      { grupo: 'Identificadores', clave: 'ID_PREFIJO_FACTURA_OIP', tipo: 'Texto', descripcion: 'Prefijo del ID de una fila nueva de facturación OIP (FAC-...).' },
-      { grupo: 'Consecutivos', clave: 'CODIGO_PREFIJO_COTIZACION', tipo: 'Texto', descripcion: 'Prefijo del código visible de una cotización (CTZ-KGP-001-26). La numeración continúa aunque se cambie.' },
-      { grupo: 'Consecutivos', clave: 'CODIGO_PREFIJO_OIS', tipo: 'Texto', descripcion: 'Prefijo del código visible de una OIS (OIS-KGP-001-26). La numeración continúa aunque se cambie.' },
-      { grupo: 'Consecutivos', clave: 'CODIGO_PREFIJO_OIP', tipo: 'Texto', descripcion: 'Prefijo del código visible de una OIP (OIP-KGP-001-26). La numeración continúa aunque se cambie.' },
-      { grupo: 'Textos', clave: 'NOMBRE_OIS', tipo: 'Texto', descripcion: 'Nombre largo de la OIS en los correos ({{nombreOrden}}).' },
-      { grupo: 'Textos', clave: 'NOMBRE_OIP', tipo: 'Texto', descripcion: 'Nombre largo de la OIP en los correos ({{nombreOrden}}).' },
-      { grupo: 'Recordatorio de facturación OIP', clave: 'OIP_NOTIF_DIA', tipo: 'Número entero', descripcion: 'Día del mes (1-28) en que corre el recordatorio. Se aplica al volver a ejecutar admin_installOipFacturacionTrigger().' },
-      { grupo: 'Recordatorio de facturación OIP', clave: 'OIP_NOTIF_HORA', tipo: 'Número entero', descripcion: 'Hora aproximada (0-23, zona TZ) del recordatorio. Se aplica al volver a ejecutar admin_installOipFacturacionTrigger().' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'LIMITS.LOCK_MS', tipo: 'Número entero', descripcion: 'Milisegundos que una escritura espera su turno antes de responder "sistema ocupado".' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'LIMITS.LOCK_HISTORIAL_MS', tipo: 'Número entero', descripcion: 'Milisegundos que espera el registro de un correo en HISTORIAL antes de rendirse (el correo ya salió).' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.IDEMPOTENCIA_S', tipo: 'Número entero', descripcion: 'Segundos durante los que un reintento de la misma operación devuelve el resultado ya guardado (máx. 21600).' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.CLIENTES_S', tipo: 'Número entero', descripcion: 'Segundos de caché del listado de clientes (máx. 21600).' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.EMPLEADOS_S', tipo: 'Número entero', descripcion: 'Segundos de caché del listado de empleados (máx. 21600).' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.DASHBOARD_S', tipo: 'Número entero', descripcion: 'Segundos de caché de las consultas paginadas del Dashboard y listados.' },
-      { grupo: 'Avanzado (no tocar sin necesidad)', clave: 'CACHE_TTL.DASHBOARD_SNAPSHOT_S', tipo: 'Número entero', descripcion: 'Segundos de caché del snapshot completo del Dashboard (máx. 21600).' }
-    ],
-    CORREO: [
-      { grupo: 'Destinatarios', clave: 'OIP_NOTIF_EMAIL', tipo: 'Correo(s)', descripcion: 'Quién recibe el recordatorio mensual de facturación de las OIP. Varios: separados por coma.' },
-      { grupo: 'Remitente y firma', clave: 'CORREO.REMITENTE_NOMBRE', tipo: 'Texto', descripcion: 'Nombre que ve el destinatario como remitente. La dirección es siempre la de la cuenta que publica la app.' },
-      { grupo: 'Remitente y firma', clave: 'CORREO.FIRMA', tipo: 'Texto', descripcion: 'Firma debajo de "Saludos cordiales,".' },
-      { grupo: 'Remitente y firma', clave: 'CORREO.NOTA_PIE', tipo: 'Texto', descripcion: 'Texto pequeño al final del pie verde.' },
-      { grupo: 'Pie del correo', clave: 'CORREO.DIRECCION', tipo: 'Texto', descripcion: 'Dirección del pie (vacío = no se muestra).' },
-      { grupo: 'Pie del correo', clave: 'CORREO.TELEFONOS', tipo: 'Texto', descripcion: 'Teléfonos del pie. Cada número de 10 dígitos se vuelve un enlace tel:+57...' },
-      { grupo: 'Pie del correo', clave: 'CORREO.CORREO_CONTACTO', tipo: 'Correo', descripcion: 'Correo de contacto del pie (enlace mailto:).' },
-      { grupo: 'Pie del correo', clave: 'CORREO.SITIO_WEB_TEXTO', tipo: 'Texto', descripcion: 'Texto del sitio web en el pie.' },
-      { grupo: 'Pie del correo', clave: 'CORREO.SITIO_WEB_URL', tipo: 'URL', descripcion: 'Enlace del sitio web (pie y logo).' }
-    ],
-    CELDAS: [
-      { grupo: 'Encabezado', hoja: 'Todas', clave: 'FECHA_ANIO', descripcion: 'Año de elaboración.' },
-      { grupo: 'Encabezado', hoja: 'Todas', clave: 'FECHA_MES', descripcion: 'Mes de elaboración.' },
-      { grupo: 'Encabezado', hoja: 'Todas', clave: 'FECHA_DIA', descripcion: 'Día de elaboración.' },
-      { grupo: 'Encabezado', hoja: 'Todas', clave: 'CODIGO', descripcion: 'Código de la cotización.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_RAZON_SOCIAL', descripcion: 'Razón social.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_NUMERO_ID', descripcion: 'Tipo y número de identificación.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_DIRECCION', descripcion: 'Dirección.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_CIUDAD_DEPTO_PAIS', descripcion: 'Ciudad, departamento y país.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_TELEFONO', descripcion: 'Teléfono.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_CIIU', descripcion: 'Código CIIU.' },
-      { grupo: 'Cliente', hoja: 'Todas', clave: 'CLIENTE_ACTIVIDAD_PRINCIPAL', descripcion: 'Actividad principal.' },
-      { grupo: 'Solicitante', hoja: 'Todas', clave: 'SOLICITANTE_NOMBRE', descripcion: 'Nombre del solicitante.' },
-      { grupo: 'Solicitante', hoja: 'Todas', clave: 'SOLICITANTE_CARGO', descripcion: 'Cargo del solicitante.' },
-      { grupo: 'Solicitante', hoja: 'Todas', clave: 'SOLICITANTE_TELEFONO', descripcion: 'Teléfono del solicitante.' },
-      { grupo: 'Solicitante', hoja: 'Todas', clave: 'SOLICITANTE_CORREO', descripcion: 'Correo del solicitante.' },
-      { grupo: 'Cotización', hoja: 'Todas', clave: 'COTIZACION_DESCRIPCION', descripcion: 'Descripción general de la cotización.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ESTABLECIMIENTO_NOMBRE', descripcion: 'Nombre del establecimiento.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ESTABLECIMIENTO_DIRECCION', descripcion: 'Dirección del establecimiento.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ESTABLECIMIENTO_CIUDAD_DEPTO_PAIS', descripcion: 'Ciudad, departamento y país del establecimiento.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ENCARGADO_NOMBRE', descripcion: 'Nombre del encargado.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ENCARGADO_CARGO', descripcion: 'Cargo del encargado.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ENCARGADO_TELEFONO', descripcion: 'Teléfono del encargado.' },
-      { grupo: 'Establecimiento', hoja: 'Todas', clave: 'ENCARGADO_CORREO', descripcion: 'Correo del encargado.' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_FILA_BASE', descripcion: 'Fila del Servicio #1 (número de fila).' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_FILA_PASO', descripcion: 'Filas entre un servicio y el siguiente (#2 = base + paso, ...).' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_COL_TIPO', descripcion: 'Columna del tipo de servicio (letra).' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_COL_UNSPSC', descripcion: 'Columna del código UNSPSC (letra).' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_COL_DESCRIPCION', descripcion: 'Columna de la descripción del servicio (letra).' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_ACT_COL', descripcion: 'Columna de las actividades (letra).' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_ACT_OFFSET_FILA', descripcion: 'Filas debajo del servicio donde empieza su lista de actividades.' },
-      { grupo: 'Servicios', hoja: 'Todas', clave: 'SERVICIOS_ACT_MAX', descripcion: 'Filas de actividades por servicio en la plantilla.' },
-      { grupo: 'Tarifas', hoja: 'Cotización', clave: 'TARIFAS_FILA_BASE', descripcion: 'Fila de la tarifa del Servicio #1 (#2 en la siguiente, ...).' },
-      { grupo: 'Tarifas', hoja: 'Cotización', clave: 'TARIFAS_COL_TARIFA', descripcion: 'Columna de la tarifa (letra).' },
-      { grupo: 'Tarifas', hoja: 'Cotización', clave: 'TARIFAS_COL_CANTIDAD', descripcion: 'Columna de la cantidad (letra).' },
-      { grupo: 'Tarifas', hoja: 'Cotización', clave: 'TARIFAS_COL_OBSERVACIONES', descripcion: 'Columna de las observaciones (letra).' },
-      { grupo: 'Personal', hoja: 'Todas', clave: 'TIEMPO_ENTREGA', descripcion: 'Tiempo de entrega.' },
-      { grupo: 'Personal', hoja: 'Todas', clave: 'ELABORADO_POR', descripcion: 'Nombre de quien elaboró.' },
-      { grupo: 'Personal', hoja: 'Todas', clave: 'CARGO_ELABORADO_POR', descripcion: 'Cargo de quien elaboró.' },
-      { grupo: 'Personal', hoja: 'Todas', clave: 'APROBADO_POR', descripcion: 'Nombre de quien revisó y aprobó.' },
-      { grupo: 'Personal', hoja: 'Todas', clave: 'ASESOR_COMERCIAL', descripcion: 'Nombre del asesor comercial.' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_COT_CODIGO', descripcion: 'Código de la cotización padre.' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_CODIGO', descripcion: 'Código de la OIS.' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_FECHA_ANIO', descripcion: 'Año de la OIS.' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_FECHA_MES', descripcion: 'Mes de la OIS.' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_FECHA_DIA', descripcion: 'Día de la OIS.' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_TAREAS_FILA_BASE', descripcion: 'Fila de la tarea #1 (las demás siguen hacia abajo).' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_TAREAS_COL_TAREA', descripcion: 'Columna de la tarea (letra).' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_TAREAS_COL_RESPONSABLE', descripcion: 'Columna del responsable (letra).' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_TAREAS_COL_FECHA_INICIO', descripcion: 'Columna de la fecha de inicio (letra).' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_TAREAS_COL_FECHA_ENTREGA', descripcion: 'Columna de la fecha de entrega (letra).' },
-      { grupo: 'OIS', hoja: 'OIS', clave: 'OIS_TAREAS_COL_OBSERVACION', descripcion: 'Columna de la observación (letra).' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_COT_CODIGO', descripcion: 'Código de la cotización padre.' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_CODIGO', descripcion: 'Código de la OIP.' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_FECHA_ANIO', descripcion: 'Año de la OIP.' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_FECHA_MES', descripcion: 'Mes de la OIP.' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_FECHA_DIA', descripcion: 'Día de la OIP.' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_TAREAS_FILA_BASE', descripcion: 'Fila de la tarea #1 (cada tarea siguiente inserta una fila debajo).' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_TAREAS_COL_TAREA', descripcion: 'Columna de la tarea (letra).' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_TAREAS_COL_RESPONSABLE', descripcion: 'Columna del responsable (letra).' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_TAREAS_COL_FECHA_INICIO', descripcion: 'Columna de la fecha de inicio (letra).' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_TAREAS_COL_FECHA_ENTREGA', descripcion: 'Columna de la fecha de entrega (letra).' },
-      { grupo: 'OIP', hoja: 'OIP', clave: 'OIP_TAREAS_COL_OBSERVACION', descripcion: 'Columna de la observación (letra).' }
-    ]
-  };
+function cfgs_catalogoIds_() {
+  return [
+    { grupo: 'Bases de datos', clave: 'DB_SHEET_ID', nombre: 'Base de datos principal', tipo: 'Spreadsheet',
+      descripcion: 'Spreadsheet con COTIZACIONES, SERVICIOS, CLIENTES, OIS, OIP, tareas, personal, etc.' },
+    { grupo: 'Bases de datos', clave: 'CAT_SHEET_ID', nombre: 'Catálogo y configuración', tipo: 'Spreadsheet', soloLectura: true,
+      descripcion: 'Este archivo (TIPOS DE SERVICIOS + CONFIG_IDS + CONFIG_CORREOS). Fijo en el código porque de aquí se lee todo lo demás.' },
+    { grupo: 'Bases de datos', clave: 'MAIL_HISTORIAL_SHEET_ID', nombre: 'Historial de correos', tipo: 'Spreadsheet',
+      descripcion: 'Spreadsheet donde se registra cada correo enviado (pestaña HISTORIAL).' },
+    { grupo: 'Plantilla de documentos', clave: 'TEMPLATE_SHEET_ID', nombre: 'Plantilla convertida (Google Sheets)', tipo: 'Spreadsheet',
+      descripcion: 'Copia nativa de Google de la plantilla, de la que se generan los documentos de cotizaciones, OIS y OIP.' },
+    { grupo: 'Carpetas de documentos', clave: 'OUT_FOLDER_ID', nombre: 'Carpeta de cotizaciones', tipo: 'Carpeta',
+      descripcion: 'Carpeta de Drive donde se guardan los documentos de las cotizaciones.' },
+    { grupo: 'Carpetas de documentos', clave: 'OIS_FOLDER_ID', nombre: 'Carpeta de OIS', tipo: 'Carpeta',
+      descripcion: 'Carpeta raíz de las OIS: cada OIS crea aquí su subcarpeta con su documento.' },
+    { grupo: 'Carpetas de documentos', clave: 'OIP_FOLDER_ID', nombre: 'Carpeta de OIP', tipo: 'Carpeta',
+      descripcion: 'Carpeta raíz de las OIP: cada OIP crea aquí su subcarpeta con su documento.' }
+  ];
 }
 
-/** Valor de una clave con puntos ("LIMITS.MAX_SERVICIOS") dentro de un objeto. */
-function cfgs_get_(obj, path) {
-  return path.split('.').reduce(function (o, k) { return o == null ? undefined : o[k]; }, obj);
+/** Enlace de Drive para un ID según su tipo ('' si no hay ID). */
+function cfgs_urlDe_(tipo, id) {
+  if (!id) return '';
+  if (tipo === 'Carpeta') return 'https://drive.google.com/drive/folders/' + id;
+  if (tipo === 'Archivo') return 'https://drive.google.com/file/d/' + id + '/view';
+  return 'https://docs.google.com/spreadsheets/d/' + id + '/edit';
+}
+
+/** Fórmula ENLACE de CONFIG_IDS: sigue a la celda VALOR de la misma fila. */
+function cfgs_formulaEnlace_(tipo, fila, letraValor) {
+  var ref = letraValor + fila;
+  var base = tipo === 'Carpeta' ? 'https://drive.google.com/drive/folders/'
+    : tipo === 'Archivo' ? 'https://drive.google.com/file/d/'
+      : 'https://docs.google.com/spreadsheets/d/';
+  return '=IF(' + ref + '="","",HYPERLINK("' + base + '"&' + ref + ',"Abrir"))';
+}
+
+/** Saca el ID de un enlace de Drive/Sheets (.../d/<id>/..., /folders/<id>, ?id=<id>) o devuelve el texto tal cual. */
+function cfgs_extraerId_(texto) {
+  var s = String(texto == null ? '' : texto).trim();
+  var m = s.match(/\/d\/([A-Za-z0-9_-]{10,})/) || s.match(/\/folders\/([A-Za-z0-9_-]{10,})/) || s.match(/[?&]id=([A-Za-z0-9_-]{10,})/);
+  return m ? m[1] : s;
 }
 
 // ---------------------------------------------------------------------
-// Creación y formato de las hojas (admin_crearHojasConfig)
+// Hojas: creación, migración desde la configuración anterior y formato
 // ---------------------------------------------------------------------
 
 /**
- * Crea o completa las hojas CONFIG_* con forma de tabla. Idempotente:
- *   - Hoja que no existe -> se crea con sus encabezados.
- *   - Fila (CLAVE) que no existe -> se agrega con VALOR = valor actual del código.
- *   - Fila que ya existe -> su VALOR (y los textos de correo) NO se tocan;
- *     solo se refrescan las columnas de ayuda (GRUPO, DESCRIPCION, VALOR POR
- *     DEFECTO, TIPO, ENLACE...).
- * Devuelve un resumen por hoja.
+ * Deja el spreadsheet con la configuración vigente (idempotente):
+ *   - CONFIG_IDS: si no existe o tiene el formato anterior (con "VALOR POR
+ *     DEFECTO"), se reescribe con las columnas de cfgs_columnasIds_
+ *     conservando los VALOR ya escritos.
+ *   - CONFIG_CORREOS: si no existe, se crea con los textos vigentes (los de
+ *     la antigua CONFIG_CORREO_TEXTOS donde tuvieran valor, si no los del
+ *     código) y los destinatarios de la antigua CONFIG_CORREO. Si existe, solo
+ *     se agregan las filas de correos nuevos; con `refrescarAyuda` se
+ *     reescriben además las columnas informativas (nombre, cuándo se envía,
+ *     variables).
+ *   - Las hojas antiguas (cfgs_tabsObsoletas_) se eliminan.
+ * Llamar dentro del script lock (escribe). Devuelve un resumen de lo hecho.
  */
-function cfgs_crearHojas_() {
+function cfgs_asegurarHojas_(refrescarAyuda) {
   var tabs = cfgs_tabs_();
-  var cat = cfgs_catalogo_();
-  // Valores por defecto = los del CÓDIGO, sin lo que diga la hoja.
-  var defs = cfgs_sinHoja_(function () { return { cfg: CFG_(), celdas: CELLMAP_() }; });
   var ss = SpreadsheetApp.openById(cfgs_sheetId_());
   var resumen = [];
 
-  function linkFormula(tipo, fila, colLetra) {
-    var ref = colLetra + fila;
-    var base = tipo === 'Carpeta' ? 'https://drive.google.com/drive/folders/'
-      : tipo === 'Archivo' ? 'https://drive.google.com/file/d/'
-        : 'https://docs.google.com/spreadsheets/d/';
-    return '=IF(' + ref + '="","",HYPERLINK("' + base + '"&' + ref + ',"Abrir"))';
-  }
+  // Valores de las hojas antiguas (para migrar) antes de borrar nada.
+  var viejoCorreo = cfgs_leerKv_(ss.getSheetByName('CONFIG_CORREO'));
+  var viejosTextos = cfgs_leerFilas_(ss.getSheetByName('CONFIG_CORREO_TEXTOS'));
 
-  function kvSpec(nombre, items, extras, fuente) {
-    return {
-      nombre: nombre,
-      columnas: ['GRUPO', 'CLAVE', 'VALOR', 'VALOR POR DEFECTO', 'DESCRIPCION'].concat(extras || []),
-      anchos: [170, 260, 300, 220, 420].concat((extras || []).map(function () { return 160; })),
-      valorTexto: nombre !== tabs.GENERAL,
-      filas: items.map(function (f) {
-        var def = fuente === 'celdas' ? defs.celdas[f.clave] : cfgs_get_(defs.cfg, f.clave);
-        var defTxt = def == null ? '' : def;
-        var fila = { GRUPO: f.grupo, CLAVE: f.clave, VALOR: defTxt, 'VALOR POR DEFECTO': defTxt, DESCRIPCION: f.descripcion };
-        if (f.nombre) fila.NOMBRE = f.nombre;
-        if (f.tipo) fila.TIPO = f.tipo;
-        if (f.hoja) fila['HOJA DE PLANTILLA'] = f.hoja;
-        if (f.soloLectura) fila.DESCRIPCION = '(Solo lectura) ' + f.descripcion;
-        fila.__tipoId = f.tipo;
-        return fila;
-      })
-    };
-  }
-
-  var textos = mail_textosDefault_();
-  var specs = [
-    kvSpec(tabs.IDS, cat.IDS, ['NOMBRE', 'TIPO', 'ENLACE'], 'valores'),
-    kvSpec(tabs.HOJAS, cat.HOJAS, ['TIPO'], 'valores'),
-    kvSpec(tabs.GENERAL, cat.GENERAL, ['TIPO'], 'valores'),
-    kvSpec(tabs.CORREO, cat.CORREO, ['TIPO'], 'valores'),
-    {
-      nombre: tabs.CORREO_TEXTOS,
-      columnas: ['CLAVE', 'DESCRIPCION', 'DESTINATARIO', 'VARIABLES'].concat(mail_camposTexto_()),
-      anchos: [200, 280, 240, 300, 300, 300, 180, 260, 200, 520, 220, 380],
-      valorTexto: true,
-      filas: Object.keys(textos).map(function (k) {
-        var t = textos[k];
-        var fila = { CLAVE: k, DESCRIPCION: t.DESCRIPCION, DESTINATARIO: t.DESTINATARIO, VARIABLES: t.VARIABLES };
-        mail_camposTexto_().forEach(function (c) { fila[c] = t[c]; });
-        return fila;
-      }),
-      // Columnas que se refrescan siempre (las demás son del usuario).
-      ayuda: ['DESCRIPCION', 'DESTINATARIO', 'VARIABLES']
-    },
-    kvSpec(tabs.CELDAS, cat.CELDAS, ['HOJA DE PLANTILLA'], 'celdas')
-  ];
-  specs.forEach(function (s) {
-    if (!s.ayuda) s.ayuda = s.columnas.filter(function (c) { return c !== 'CLAVE' && c !== 'VALOR'; });
-  });
-
-  specs.forEach(function (spec) {
-    var sh = ss.getSheetByName(spec.nombre) || ss.insertSheet(spec.nombre);
-    var res = cfgs_sincronizarTabla_(sh, spec, linkFormula);
-    resumen.push(spec.nombre + ': ' + res.agregadas + ' fila(s) nuevas, ' + res.existentes + ' ya existían (sus valores no se tocaron).');
-  });
-
-  cfgs_escribirLeeme_(ss);
-
-  // Orden de las pestañas: después de las que no son de configuración.
-  var orden = [tabs.LEEME, tabs.IDS, tabs.HOJAS, tabs.GENERAL, tabs.CORREO, tabs.CORREO_TEXTOS, tabs.CELDAS];
-  var otras = ss.getSheets().filter(function (s) { return orden.indexOf(s.getName()) < 0; }).length;
-  orden.forEach(function (n, i) {
-    var sh = ss.getSheetByName(n);
-    if (!sh) return;
-    ss.setActiveSheet(sh);
-    ss.moveActiveSheet(otras + i + 1);
-  });
-
-  SpreadsheetApp.flush();
-  return resumen;
-}
-
-/** Sincroniza una hoja de tabla: encabezados, filas faltantes, columnas de ayuda y formato. */
-function cfgs_sincronizarTabla_(sh, spec, linkFormula) {
-  // Encabezados: los que falten se agregan al final, nunca se reordenan los del usuario.
-  var lastCol = Math.max(sh.getLastColumn(), 1);
-  var headers = sh.getLastRow() >= 1 ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function (x) { return String(x).trim(); }) : [];
-  if (headers.every(function (x) { return !x; })) headers = [];
-  spec.columnas.forEach(function (c) {
-    if (headers.map(normText_).indexOf(normText_(c)) < 0) headers.push(c);
-  });
-  sh.getRange(1, 1, 1, headers.length).setValues([headers]);
-  var col = {};
-  headers.forEach(function (x, i) { col[normText_(x)] = i; });
-
-  // VALOR (y textos de correo) como texto plano, para que Sheets no convierta "0.19", "A7", IDs, etc.
-  var maxRows = sh.getMaxRows();
-  if (spec.valorTexto) {
-    spec.columnas.forEach(function (c) {
-      if (spec.ayuda.indexOf(c) < 0 && c !== 'CLAVE') sh.getRange(2, col[normText_(c)] + 1, Math.max(maxRows - 1, 1), 1).setNumberFormat('@');
+  // ---- CONFIG_IDS ----
+  var shIds = ss.getSheetByName(tabs.IDS);
+  var headIds = shIds && shIds.getLastColumn() ? cfgs_indiceColumnas_(shIds.getRange(1, 1, 1, shIds.getLastColumn()).getValues()[0]) : {};
+  var formatoViejo = !shIds || headIds[normText_('VALOR POR DEFECTO')] !== undefined ||
+    cfgs_columnasIds_().some(function (c) { return headIds[normText_(c)] === undefined; }) ||
+    cfgs_hayIdsObsoletos_(shIds);
+  if (formatoViejo || refrescarAyuda) {
+    var previos = cfgs_leerKv_(shIds);
+    var defs = cfgs_sinHoja_(function () { return CFG_(); });
+    var cols = cfgs_columnasIds_();
+    var letraValor = cfgs_colLetra_(cols.indexOf('VALOR') + 1);
+    var filas = cfgs_catalogoIds_().map(function (f, i) {
+      var valor = f.soloLectura ? cfgs_sheetId_() : (previos[f.clave] !== undefined ? previos[f.clave] : (defs[f.clave] || ''));
+      return [f.grupo, f.clave, f.nombre, valor, (f.soloLectura ? '(Solo lectura) ' : '') + f.descripcion,
+        cfgs_formulaEnlace_(f.tipo, i + 2, letraValor)];
     });
+    shIds = shIds || ss.insertSheet(tabs.IDS);
+    shIds.clear();
+    shIds.getRange(2, cols.indexOf('VALOR') + 1, Math.max(shIds.getMaxRows() - 1, 1), 1).setNumberFormat('@');
+    shIds.getRange(1, 1, 1, cols.length).setValues([cols]);
+    shIds.getRange(2, 1, filas.length, cols.length).setValues(filas);
+    cfgs_formatoTabla_(shIds, cols, [170, 220, 260, 380, 460, 90], filas.length);
+    resumen.push(tabs.IDS + ': ' + (formatoViejo ? 'reescrita con el formato nuevo (se conservaron los valores).' : 'columnas de ayuda actualizadas.'));
   }
 
-  var lastRow = sh.getLastRow();
-  var data = lastRow >= 2 ? sh.getRange(2, 1, lastRow - 1, headers.length).getValues() : [];
-  var filaPorClave = {};
-  data.forEach(function (r, i) {
-    var k = String(r[col.CLAVE] || '').trim();
-    if (k) filaPorClave[k] = i;
-  });
+  // ---- CONFIG_CORREOS ----
+  var colsCor = cfgs_columnasCorreos_();
+  var shCor = ss.getSheetByName(tabs.CORREOS);
+  var textos = mail_textosDefault_();
+  var cfgCodigo = cfgs_sinHoja_(function () { return CFG_(); });
+  var filaDefault = function (k, previo) {
+    var t = textos[k];
+    previo = previo || {};
+    var fila = {
+      CLAVE: k,
+      CORREO: t.NOMBRE,
+      'CUANDO SE ENVIA': t.DESCRIPCION,
+      DESTINATARIOS: t.DESTINO_CFG
+        ? (viejoCorreo[t.DESTINO_CFG] || cfgCodigo[t.DESTINO_CFG] || '')
+        : '(automático) ' + t.DESTINATARIO,
+      'COPIA SIEMPRE A': '',
+      VARIABLES: t.VARIABLES
+    };
+    mail_camposTexto_().forEach(function (c) {
+      fila[c] = (previo[c] != null && String(previo[c]).trim() !== '') ? String(previo[c]) : t[c];
+    });
+    return colsCor.map(function (c) { return fila[c] == null ? '' : fila[c]; });
+  };
 
-  var agregadas = 0, existentes = 0;
-  spec.filas.forEach(function (f) {
-    var idx = filaPorClave[f.CLAVE];
-    if (idx === undefined) {
-      var nueva = headers.map(function (hd) { var v = f[hd]; return v == null ? '' : v; });
-      data.push(nueva);
-      filaPorClave[f.CLAVE] = data.length - 1;
-      agregadas++;
+  if (!shCor) {
+    shCor = ss.insertSheet(tabs.CORREOS);
+    var filasCor = Object.keys(textos).map(function (k) { return filaDefault(k, viejosTextos[k]); });
+    shCor.getRange(1, 1, Math.max(shCor.getMaxRows(), filasCor.length + 1), colsCor.length).setNumberFormat('@');
+    shCor.getRange(1, 1, 1, colsCor.length).setValues([colsCor]);
+    shCor.getRange(2, 1, filasCor.length, colsCor.length).setValues(filasCor);
+    cfgs_formatoTabla_(shCor, colsCor, [190, 230, 320, 260, 260, 300, 300, 200, 520, 220, 380, 320], filasCor.length);
+    resumen.push(tabs.CORREOS + ': creada con ' + filasCor.length + ' correos' + (Object.keys(viejosTextos).length ? ' (textos migrados de CONFIG_CORREO_TEXTOS).' : '.'));
+  } else {
+    var datos = shCor.getDataRange().getValues();
+    var head = cfgs_indiceColumnas_(datos[0]);
+    var faltanCols = colsCor.some(function (c) { return head[normText_(c)] === undefined; });
+    var existentes = {};
+    datos.slice(1).forEach(function (r) { if (head.CLAVE !== undefined && r[head.CLAVE]) existentes[String(r[head.CLAVE]).trim()] = true; });
+    var nuevas = Object.keys(textos).filter(function (k) { return !existentes[k]; });
+    if (faltanCols) {
+      resumen.push(tabs.CORREOS + ': AVISO — faltan columnas (' + colsCor.join(', ') + '). Corrígela a mano o bórrala para que se vuelva a crear.');
     } else {
-      existentes++;
-      spec.ayuda.forEach(function (c) {
-        if (f[c] !== undefined && col[normText_(c)] !== undefined) data[idx][col[normText_(c)]] = f[c];
-      });
+      if (nuevas.length) {
+        var filasNuevas = nuevas.map(function (k) {
+          var arr = filaDefault(k);
+          return datos[0].map(function (hd) { var i = colsCor.map(normText_).indexOf(normText_(hd)); return i >= 0 ? arr[i] : ''; });
+        });
+        shCor.getRange(shCor.getLastRow() + 1, 1, filasNuevas.length, datos[0].length).setNumberFormat('@').setValues(filasNuevas);
+        resumen.push(tabs.CORREOS + ': ' + nuevas.length + ' correo(s) nuevo(s) agregado(s).');
+      }
+      if (refrescarAyuda && datos.length > 1) {
+        var ayuda = ['CORREO', 'CUANDO SE ENVIA', 'VARIABLES'];
+        datos.slice(1).forEach(function (r, i) {
+          var t = textos[String(r[head.CLAVE] || '').trim()];
+          if (!t) return;
+          ayuda.forEach(function (c) {
+            var v = c === 'CORREO' ? t.NOMBRE : c === 'CUANDO SE ENVIA' ? t.DESCRIPCION : t.VARIABLES;
+            shCor.getRange(i + 2, head[normText_(c)] + 1).setValue(v);
+          });
+          if (!t.DESTINO_CFG) shCor.getRange(i + 2, head.DESTINATARIOS + 1).setValue('(automático) ' + t.DESTINATARIO);
+        });
+        resumen.push(tabs.CORREOS + ': columnas de ayuda actualizadas.');
+      }
+    }
+  }
+
+  // ---- Hojas antiguas ----
+  cfgs_tabsObsoletas_().forEach(function (n) {
+    var sh = ss.getSheetByName(n);
+    if (sh && ss.getSheets().length > 1) {
+      ss.deleteSheet(sh);
+      resumen.push(n + ': eliminada (su configuración volvió al código).');
     }
   });
 
-  // Enlaces de CONFIG_IDS: fórmula que sigue a la celda VALOR de la misma fila.
-  var hayEnlace = col.ENLACE !== undefined;
-  if (hayEnlace) {
-    var letraValor = cfgs_colLetra_(col.VALOR + 1);
-    var tipoPorClave = {};
-    spec.filas.forEach(function (f) { tipoPorClave[f.CLAVE] = f.__tipoId; });
-    data.forEach(function (r, i) {
-      var t = tipoPorClave[String(r[col.CLAVE]).trim()] || String(r[col.TIPO] || '');
-      r[col.ENLACE] = linkFormula(t, i + 2, letraValor);
-    });
-  }
-
-  if (data.length) sh.getRange(2, 1, data.length, headers.length).setValues(data);
-  cfgs_formatoTabla_(sh, headers, spec, data.length);
-  return { agregadas: agregadas, existentes: existentes };
+  if (!resumen.length) resumen.push('La configuración ya estaba al día.');
+  return resumen;
 }
 
-/** Formato de "tabla": encabezado verde KGP, filas alternas, filtro, columnas fijas y anchos. */
-function cfgs_formatoTabla_(sh, headers, spec, nFilas) {
+/** true si CONFIG_IDS tiene una fila cuya CLAVE ya no es configurable (p. ej. TEMPLATE_FILE_ID): se limpia al reescribirla. */
+function cfgs_hayIdsObsoletos_(sh) {
+  if (!sh || sh.getLastRow() < 2) return false;
+  var v = sh.getDataRange().getValues();
+  var c = cfgs_indiceColumnas_(v[0]);
+  if (c.CLAVE === undefined) return false;
+  var validas = {};
+  cfgs_catalogoIds_().forEach(function (f) { validas[f.clave] = true; });
+  return v.slice(1).some(function (r) {
+    var k = String(r[c.CLAVE] || '').trim();
+    return k && !validas[k];
+  });
+}
+
+/** {CLAVE: VALOR (texto)} de una hoja con columnas CLAVE y VALOR. {} si no existe. */
+function cfgs_leerKv_(sh) {
+  var out = {};
+  if (!sh || sh.getLastRow() < 2) return out;
+  var v = sh.getDataRange().getValues();
+  var c = cfgs_indiceColumnas_(v[0]);
+  if (c.CLAVE === undefined || c.VALOR === undefined) return out;
+  v.slice(1).forEach(function (r) {
+    var k = String(r[c.CLAVE] || '').trim();
+    var val = String(r[c.VALOR] == null ? '' : r[c.VALOR]).trim();
+    if (k && val) out[k] = val;
+  });
+  return out;
+}
+
+/** {CLAVE: {COLUMNA: texto}} de una hoja con una fila por CLAVE. {} si no existe. */
+function cfgs_leerFilas_(sh) {
+  var out = {};
+  if (!sh || sh.getLastRow() < 2) return out;
+  var v = sh.getDataRange().getValues();
+  var c = cfgs_indiceColumnas_(v[0]);
+  if (c.CLAVE === undefined) return out;
+  v.slice(1).forEach(function (r) {
+    var k = String(r[c.CLAVE] || '').trim();
+    if (!k) return;
+    var fila = {};
+    Object.keys(c).forEach(function (h) { fila[h] = r[c[h]] == null ? '' : String(r[c[h]]); });
+    out[k] = fila;
+  });
+  return out;
+}
+
+/** Formato de "tabla": encabezado verde KGP, filas alternas, filtro, CLAVE fija y anchos. */
+function cfgs_formatoTabla_(sh, headers, anchos, nFilas) {
   var nCols = headers.length;
   var total = Math.max(nFilas + 1, 2);
   sh.setFrozenRows(1);
-  var head = sh.getRange(1, 1, 1, nCols);
-  head.setFontWeight('bold').setFontColor('#ffffff').setBackground('#436b0a')
+  sh.getRange(1, 1, 1, nCols).setFontWeight('bold').setFontColor('#ffffff').setBackground('#436b0a')
     .setVerticalAlignment('middle').setWrap(true);
   sh.setRowHeight(1, 32);
-
-  var cuerpo = sh.getRange(2, 1, total - 1, nCols);
-  cuerpo.setVerticalAlignment('top').setWrap(true);
+  sh.getRange(2, 1, total - 1, nCols).setVerticalAlignment('top').setWrap(true);
 
   sh.getBandings().forEach(function (b) { b.remove(); });
-  var banding = sh.getRange(1, 1, total, nCols).applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false);
-  banding.setHeaderRowColor('#436b0a').setFirstRowColor('#ffffff').setSecondRowColor('#eef4e4');
+  sh.getRange(1, 1, total, nCols).applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false)
+    .setHeaderRowColor('#436b0a').setFirstRowColor('#ffffff').setSecondRowColor('#eef4e4');
 
   var filtro = sh.getFilter();
   if (filtro) filtro.remove();
   sh.getRange(1, 1, total, nCols).createFilter();
 
-  // CLAVE en negrita (es lo que lee el código: no se debe cambiar).
   var iClave = headers.map(normText_).indexOf('CLAVE');
   if (iClave >= 0) {
     sh.getRange(2, iClave + 1, total - 1, 1).setFontWeight('bold').setFontFamily('Roboto Mono');
     sh.setFrozenColumns(iClave + 1);
+    sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) {
+      if (p.getDescription() === 'KGP: columna CLAVE') p.remove();
+    });
+    sh.getRange(2, iClave + 1, total - 1, 1).protect().setDescription('KGP: columna CLAVE').setWarningOnly(true);
   }
-
-  headers.forEach(function (hd, i) {
-    var j = spec.columnas.map(normText_).indexOf(normText_(hd));
-    if (j >= 0 && spec.anchos[j]) sh.setColumnWidth(i + 1, spec.anchos[j]);
-  });
-
-  // Aviso suave (no bloquea) si alguien edita la columna CLAVE.
-  sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(function (p) {
-    if (p.getDescription() === 'KGP: columna CLAVE') p.remove();
-  });
-  if (iClave >= 0) {
-    sh.getRange(2, iClave + 1, total - 1, 1).protect()
-      .setDescription('KGP: columna CLAVE').setWarningOnly(true);
-  }
+  headers.forEach(function (hd, i) { if (anchos[i]) sh.setColumnWidth(i + 1, anchos[i]); });
 }
 
 /** Letra de columna (1 -> A, 27 -> AA). */
@@ -698,58 +563,232 @@ function cfgs_colLetra_(n) {
   return s;
 }
 
-/** Hoja CONFIG_LEEME: qué hay en cada hoja y las reglas de edición. Se reescribe completa cada vez. */
-function cfgs_escribirLeeme_(ss) {
-  var tabs = cfgs_tabs_();
-  var sh = ss.getSheetByName(tabs.LEEME) || ss.insertSheet(tabs.LEEME);
-  sh.clear();
-  var filas = [
-    ['HOJA', 'QUÉ CONTIENE', 'CÓMO SE EDITA'],
-    [tabs.IDS, 'IDs de los spreadsheets, carpetas y archivos de Drive que usa la app (con enlace para abrirlos).', 'Cambie la columna VALOR por el nuevo ID (la parte larga del enlace de Drive).'],
-    [tabs.HOJAS, 'Nombres de las pestañas de la base de datos, de la plantilla y del historial de correos.', 'Si renombra una pestaña en su archivo, escriba aquí el nombre nuevo en VALOR.'],
-    [tabs.GENERAL, 'Plazos, IVA, límites, días de aviso "por vencer", actualización del Dashboard y caché.', 'Solo números en VALOR (salvo TZ). El grupo "Avanzado" no se toca sin necesidad.'],
-    [tabs.CORREO, 'Quién recibe el recordatorio de facturación OIP, nombre del remitente, firma y datos del pie del correo.', 'Texto libre en VALOR. Varios correos: separados por coma.'],
-    [tabs.CORREO_TEXTOS, 'Asunto, título, párrafos, botón y datos destacados de CADA correo que envía la app (una fila por correo).', 'Use {{variable}} (ver columna VARIABLES), {{#var}}texto{{/var}} = solo si la variable tiene valor, {{^var}}texto{{/var}} = solo si está vacía. PARRAFOS: separe párrafos con una línea en blanco. DESTACADOS: una línea por dato, "Título | valor".'],
-    [tabs.CELDAS, 'Celdas de la plantilla donde se escribe cada dato de la cotización, OIS y OIP.', 'Celdas como A7, columnas como B, filas como 39. Cambie solo si cambió la plantilla.'],
-    ['', '', ''],
-    ['REGLA', 'DETALLE', ''],
-    ['Cuándo se aplica', 'La app lee estas hojas cada vez que se carga o recarga la página (F5). Los disparadores automáticos usan la última copia leída.', ''],
-    ['Celda VALOR vacía', 'Se usa el valor por defecto del código (columna VALOR POR DEFECTO). Igual para un texto de correo vacío.', ''],
-    ['Valor no válido', 'Si un valor no se puede interpretar (p. ej. letras donde va un número), se ignora y se usa el valor por defecto: la app nunca se cae por la configuración.', ''],
-    ['Columna CLAVE', 'Es lo que lee el código: no la cambie (Sheets avisa si lo intenta). Puede reordenar filas y columnas libremente.', ''],
-    ['Verificar', 'En el editor de Apps Script, ejecute admin_verConfig(): lista lo que se ignoró y los valores vigentes.', ''],
-    ['Agregar parámetros', 'admin_crearHojasConfig() agrega las filas nuevas sin tocar los valores ya escritos.', '']
-  ];
-  sh.getRange(1, 1, filas.length, 3).setValues(filas);
-  sh.getRange(1, 1, 1, 3).setFontWeight('bold').setFontColor('#ffffff').setBackground('#436b0a');
-  sh.getRange(9, 1, 1, 3).setFontWeight('bold').setFontColor('#ffffff').setBackground('#436b0a');
-  sh.getRange(2, 1, filas.length - 1, 1).setFontWeight('bold');
-  sh.getRange(1, 1, filas.length, 3).setWrap(true).setVerticalAlignment('top');
-  sh.setColumnWidth(1, 220);
-  sh.setColumnWidth(2, 560);
-  sh.setColumnWidth(3, 560);
-  sh.setFrozenRows(1);
+// ---------------------------------------------------------------------
+// Vista "Configuración": lectura y escrituras
+// ---------------------------------------------------------------------
+
+/** Lista de correos (texto con comas/;/espacios) -> {lista, malos}. */
+function cfgs_parsearCorreos_(texto) {
+  var partes = String(texto == null ? '' : texto).split(/[,;\s]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+  var re = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+  var vistos = {};
+  var lista = [];
+  var malos = [];
+  partes.forEach(function (c) {
+    if (!re.test(c) || c.length > 254) { malos.push(c); return; }
+    if (vistos[c.toLowerCase()]) return;
+    vistos[c.toLowerCase()] = true;
+    lista.push(c);
+  });
+  return { lista: lista, malos: malos };
+}
+
+/** Texto largo de un correo: normaliza saltos de línea, recorta espacios al final de cada línea y trunca. Conserva las líneas en blanco (separan párrafos). */
+function cfgs_textoLargo_(s) {
+  var t = String(s == null ? '' : s).replace(/\r\n?/g, '\n').split('\n')
+    .map(function (l) { return l.replace(/[ \t]+$/g, ''); }).join('\n').trim();
+  return truncate_(t, CFG_().LIMITS.CELL_MAX);
 }
 
 /**
- * Relee la hoja y devuelve qué se aplicó y qué se ignoró (para
+ * Todo lo que muestra la vista Configuración, leído en el momento (nunca de
+ * caché): {hojaUrl, ids, correos, tipos}. Antes deja las hojas al día
+ * (cfgs_asegurarHojas_, dentro del lock) para que la primera visita migre la
+ * configuración anterior.
+ */
+function cfgs_snapshot_() {
+  var tabs = cfgs_tabs_();
+  var ss = SpreadsheetApp.openById(cfgs_sheetId_());
+  var necesitaMigrar = !ss.getSheetByName(tabs.IDS) || !ss.getSheetByName(tabs.CORREOS) ||
+    cfgs_tabsObsoletas_().some(function (n) { return !!ss.getSheetByName(n); });
+  if (!necesitaMigrar) {
+    var shIds = ss.getSheetByName(tabs.IDS);
+    var head = cfgs_indiceColumnas_(shIds.getRange(1, 1, 1, Math.max(shIds.getLastColumn(), 1)).getValues()[0]);
+    necesitaMigrar = head[normText_('VALOR POR DEFECTO')] !== undefined || cfgs_hayIdsObsoletos_(shIds);
+  }
+  if (necesitaMigrar) {
+    var mig = tx_conLock_('cfgs_asegurarHojas_', function () { return ok_(cfgs_asegurarHojas_(false)); });
+    if (!mig.ok) return mig;
+  }
+
+  var data = cfgs_refresh_();
+  var cfg = CFG_();
+  var cfgCodigo = cfgs_sinHoja_(function () { return CFG_(); });
+
+  var ids = cfgs_catalogoIds_().map(function (f) {
+    var valor = f.soloLectura ? cfgs_sheetId_() : String(cfg[f.clave] || '');
+    return {
+      clave: f.clave, grupo: f.grupo, nombre: f.nombre, tipo: f.tipo, descripcion: f.descripcion,
+      soloLectura: !!f.soloLectura, valor: valor, url: cfgs_urlDe_(f.tipo, valor),
+      enHoja: !f.soloLectura && !!(data.valores || {})[f.clave]
+    };
+  });
+
+  var defs = mail_textosDefault_();
+  var correos = Object.keys(defs).map(function (k) {
+    var d = defs[k];
+    var efectivo = mail_textos_(k);
+    var campos = {};
+    var originales = {};
+    mail_camposTexto_().forEach(function (c) { campos[c] = efectivo[c] || ''; originales[c] = d[c] || ''; });
+    return {
+      clave: k,
+      nombre: d.NOMBRE,
+      descripcion: d.DESCRIPCION,
+      destinatarioFijo: !!d.DESTINO_CFG,
+      destinatarios: d.DESTINO_CFG ? String(cfg[d.DESTINO_CFG] || '') : d.DESTINATARIO,
+      destinatariosOriginal: d.DESTINO_CFG ? String(cfgCodigo[d.DESTINO_CFG] || '') : '',
+      cc: efectivo.CC || '',
+      campos: campos,
+      originales: originales,
+      variables: d.VARIABLES
+    };
+  });
+
+  return ok_({
+    hojaUrl: 'https://docs.google.com/spreadsheets/d/' + cfgs_sheetId_() + '/edit',
+    ids: ids,
+    correos: correos,
+    tipos: cat_listarConFila_(),
+    consecutivos: code_estadoContadores_(new Date()),
+    avisos: data.avisos || []
+  });
+}
+
+/**
+ * Guarda IDs desde la vista. cambios: {CLAVE: valor}. Cada valor puede ser el
+ * ID o el enlace completo (se extrae el ID). Vacío = volver al valor del
+ * código. Antes de escribir se comprueba que el archivo/carpeta exista y que
+ * la cuenta de la app tenga acceso: un ID equivocado dejaría la app sin poder
+ * leer o guardar. Devuelve ok_({ids: [...]}) con el snapshot de IDs, o
+ * fail_('VALIDATION', ..., {CLAVE: mensaje}).
+ */
+function cfgs_guardarIds_(cambios) {
+  if (!isPlainObject_(cambios) || !Object.keys(cambios).length) return fail_('VALIDATION', 'No hay cambios que guardar.');
+  var catalogo = {};
+  cfgs_catalogoIds_().forEach(function (f) { catalogo[f.clave] = f; });
+
+  var errores = {};
+  var limpios = {};
+  var nombres = {};
+  Object.keys(cambios).forEach(function (k) {
+    var f = catalogo[k];
+    if (!f || f.soloLectura) { errores[k] = 'Este valor no se puede cambiar.'; return; }
+    var id = cfgs_extraerId_(cambios[k]);
+    if (!id) { limpios[k] = ''; return; }
+    if (!/^[A-Za-z0-9_-]{10,}$/.test(id)) { errores[k] = 'No parece un ID de Google Drive válido.'; return; }
+    try {
+      if (f.tipo === 'Carpeta') nombres[k] = DriveApp.getFolderById(id).getName();
+      else if (f.tipo === 'Spreadsheet') nombres[k] = SpreadsheetApp.openById(id).getName();
+      else nombres[k] = DriveApp.getFileById(id).getName();
+    } catch (e) {
+      errores[k] = 'No se encontró ' + (f.tipo === 'Carpeta' ? 'la carpeta' : 'el archivo') + ' o la cuenta de la app no tiene acceso: ' + errMsg_(e);
+      return;
+    }
+    limpios[k] = id;
+  });
+  if (Object.keys(errores).length) return fail_('VALIDATION', 'Revisa los IDs marcados.', errores);
+
+  var res = tx_conLock_('cfgs_guardarIds_', function () {
+    cfgs_asegurarHojas_(false);
+    var sh = SpreadsheetApp.openById(cfgs_sheetId_()).getSheetByName(cfgs_tabs_().IDS);
+    var v = sh.getDataRange().getValues();
+    var c = cfgs_indiceColumnas_(v[0]);
+    Object.keys(limpios).forEach(function (k) {
+      for (var i = 1; i < v.length; i++) {
+        if (String(v[i][c.CLAVE]).trim() === k) {
+          sh.getRange(i + 1, c.VALOR + 1).setNumberFormat('@').setValue(limpios[k]);
+          return;
+        }
+      }
+      throw new AppError_('SCHEMA', 'No se encontró la fila ' + k + ' en ' + cfgs_tabs_().IDS + '.');
+    });
+    return ok_(true);
+  }, { payload: cambios });
+  if (!res.ok) return res;
+
+  cfgs_refresh_();
+  var snap = cfgs_snapshot_();
+  if (!snap.ok) return snap;
+  return ok_({ ids: snap.data.ids, nombres: nombres });
+}
+
+/**
+ * Guarda un correo desde la vista: datos {destinatarios (solo si el correo
+ * tiene destinatario fijo), cc, ASUNTO, TITULO, SALUDO, PARRAFOS, BOTON,
+ * DESTACADOS}. Asunto y párrafos son obligatorios; los demás pueden quedar
+ * vacíos (p. ej. BOTON vacío = sin botón). Devuelve ok_(correo) con el mismo
+ * formato de cfgs_snapshot_.
+ */
+function cfgs_guardarCorreo_(clave, datos) {
+  clave = String(clave || '').trim();
+  var defs = mail_textosDefault_();
+  var d = defs[clave];
+  if (!d) return fail_('NOT_FOUND', 'No existe el correo ' + clave + '.');
+  if (!isPlainObject_(datos)) return fail_('VALIDATION', 'Datos del correo inválidos.');
+
+  var errores = {};
+  var fila = {};
+  mail_camposTexto_().forEach(function (c) { fila[c] = cfgs_textoLargo_(datos[c]); });
+  if (!fila.ASUNTO) errores.ASUNTO = 'El asunto es obligatorio.';
+  if (/[\r\n]/.test(fila.ASUNTO)) errores.ASUNTO = 'El asunto debe ir en una sola línea.';
+  if (!fila.PARRAFOS) errores.PARRAFOS = 'El cuerpo del correo no puede quedar vacío.';
+
+  var cc = cfgs_parsearCorreos_(datos.cc);
+  if (cc.malos.length) errores.cc = 'Correo no válido: ' + cc.malos.join(', ');
+  if (cc.lista.length > CFG_().LIMITS.MAX_CC) errores.cc = 'Máximo ' + CFG_().LIMITS.MAX_CC + ' correos en copia.';
+  fila['COPIA SIEMPRE A'] = cc.lista.join(', ');
+
+  if (d.DESTINO_CFG) {
+    var dest = cfgs_parsearCorreos_(datos.destinatarios);
+    if (dest.malos.length) errores.destinatarios = 'Correo no válido: ' + dest.malos.join(', ');
+    else if (!dest.lista.length) errores.destinatarios = 'Este correo necesita al menos un destinatario.';
+    fila.DESTINATARIOS = dest.lista.join(', ');
+  }
+  if (Object.keys(errores).length) return fail_('VALIDATION', 'Revisa los campos marcados.', errores);
+
+  var res = tx_conLock_('cfgs_guardarCorreo_', function () {
+    cfgs_asegurarHojas_(false);
+    var sh = SpreadsheetApp.openById(cfgs_sheetId_()).getSheetByName(cfgs_tabs_().CORREOS);
+    var v = sh.getDataRange().getValues();
+    var c = cfgs_indiceColumnas_(v[0]);
+    var idx = -1;
+    for (var i = 1; i < v.length; i++) if (String(v[i][c.CLAVE]).trim() === clave) { idx = i; break; }
+    if (idx < 0) throw new AppError_('SCHEMA', 'No se encontró la fila ' + clave + ' en ' + cfgs_tabs_().CORREOS + '.');
+    var nueva = v[idx].slice();
+    Object.keys(fila).forEach(function (col) {
+      var j = c[normText_(col)];
+      if (j !== undefined) nueva[j] = fila[col];
+    });
+    sh.getRange(idx + 1, 1, 1, nueva.length).setNumberFormat('@').setValues([nueva]);
+    return ok_(true);
+  }, { ids: { clave: clave }, payload: datos });
+  if (!res.ok) return res;
+
+  cfgs_refresh_();
+  var snap = cfgs_snapshot_();
+  if (!snap.ok) return snap;
+  return ok_(snap.data.correos.filter(function (x) { return x.clave === clave; })[0]);
+}
+
+/**
+ * Relee la configuración y devuelve qué se aplicó y qué se ignoró (para
  * admin_verConfig). No escribe nada.
  */
 function cfgs_verificar_() {
   var data = cfgs_refresh_();
   var avisos = (data.avisos || []).slice();
-  var defs = cfgs_sinHoja_(function () { return { cfg: CFG_(), celdas: CELLMAP_() }; });
-  cfgs_aplicar_(defs.cfg, 'valores', avisos, data);
-  cfgs_aplicar_(defs.celdas, 'celdas', avisos, data);
+  var defs = cfgs_sinHoja_(function () { return Object.assign({}, CFG_()); });
+  cfgs_aplicar_(defs, avisos, data);
   var textos = mail_textosDefault_();
   Object.keys(data.correos || {}).forEach(function (k) {
-    if (!textos[k]) avisos.push('Correo desconocido en ' + cfgs_tabs_().CORREO_TEXTOS + ': ' + k + ' (se ignoró).');
+    if (!textos[k]) avisos.push('Correo desconocido en ' + cfgs_tabs_().CORREOS + ': ' + k + ' (se ignoró).');
   });
   return {
     leidoEn: data.leidoEn,
-    clavesEnHoja: Object.keys(data.valores || {}).length + Object.keys(data.celdas || {}).length,
+    clavesEnHoja: Object.keys(data.valores || {}).length,
     correosEnHoja: Object.keys(data.correos || {}).length,
     avisos: avisos,
-    efectivo: { CFG: CFG_(), CELLMAP: CELLMAP_(), CLIENTE: cfgs_clientConfig_() }
+    efectivo: { CFG: CFG_(), CLIENTE: cfgs_clientConfig_() }
   };
 }

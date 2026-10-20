@@ -29,15 +29,75 @@
     <?!= include('ui/ViewTareas'); ?>
     <?!= include('ui/ViewEmpleados'); ?>
     <?!= include('ui/ViewClientes'); ?>
+    <?!= include('ui/ViewConfig'); ?>
   </main>
 </div>
 
 <div id="toast-stack"></div>
 
+<!-- ---------- Popup: copias (CC) de un correo ----------
+     GLOBAL: lo maneja KGP.mailCc (ui/JsCore.js.html). Se abre antes de toda
+     acción que envía un correo (cotización creada/aprobada/rechazada, tarea
+     nueva, OIS finalizada) para elegir quién más lo recibe en copia: personas
+     de la BD o correos escritos a mano. No lo dupliques en una vista: usa
+     KGP.mailCc.pedir(). -->
+<div class="modal-overlay" id="cc-modal-overlay">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="cc-modal-title">
+    <div class="modal-header">
+      <h2 id="cc-modal-title">Enviar copia del correo</h2>
+      <button type="button" class="modal-close" id="cc-modal-close" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="cc-desc" id="cc-modal-desc"></p>
+      <p class="cc-para" id="cc-modal-para"></p>
+
+      <div class="cc-section-title">Con copia a (opcional)</div>
+      <input type="search" id="cc-search" class="cc-search" placeholder="Buscar persona por nombre o correo…" autocomplete="off" aria-label="Buscar persona">
+      <div class="cc-list" id="cc-list"></div>
+
+      <div class="cc-section-title">Otros correos (que no están en la base de datos)</div>
+      <div class="cc-extra-row">
+        <input type="email" id="cc-extra-input" class="cc-search" placeholder="correo@ejemplo.com (varios: separados por coma)" autocomplete="off" aria-label="Agregar otro correo">
+        <button type="button" class="btn btn-sm" id="cc-extra-add">Agregar</button>
+      </div>
+      <div class="cc-extra-err" id="cc-extra-err" role="alert"></div>
+      <div class="cc-chips" id="cc-extra-chips"></div>
+
+      <div class="cc-count" id="cc-count" aria-live="polite"></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-sm" id="cc-cancel">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="cc-ok">Continuar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ---------- Popup: historial de cambios de tareas ----------
+     GLOBAL: lo maneja KGP.historialTareas (ui/JsCore.js.html). Muestra
+     quién cambió qué y cuándo (hoja HISTORIAL_TAREAS) de una tarea o de
+     todas las tareas de una orden. Solo lectura. Lo abren "Gestionar
+     tareas", "Gestionar OIS" y "Gestionar OIP": no lo dupliques. -->
+<div class="modal-overlay" id="ht-modal-overlay">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="ht-modal-title">
+    <div class="modal-header">
+      <h2 id="ht-modal-title">Historial de cambios</h2>
+      <button type="button" class="modal-close" id="ht-modal-close" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="ht-subtitle" id="ht-modal-subtitle"></p>
+      <div id="ht-modal-content" aria-live="polite"></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-sm" id="ht-modal-ok">Cerrar</button>
+    </div>
+  </div>
+</div>
+
 <script>
   window.KGP_INITIAL_VIEW = <?!= JSON.stringify(initialView); ?>;
-  // Parámetros de la hoja de configuración (CONFIG_*), leídos por doGet en
-  // esta misma carga (06_ConfigSheet.js, cfgs_clientConfig_). Se consultan
+  // Parámetros de la app (00_Config.js, más el destinatario del aviso a
+  // contabilidad de CONFIG_CORREOS) que doGet inyecta en esta misma carga
+  // (06_ConfigSheet.js, cfgs_clientConfig_). Se consultan
   // con KGP.cfg('CLAVE', def) (números) o KGP.cfgTexto('CLAVE', def) (textos).
   window.KGP_CONFIG = <?!= clientConfigJson ?>;
 </script>
@@ -51,6 +111,7 @@
 <?!= include('ui/JsTareas.js'); ?>
 <?!= include('ui/JsEmpleados.js'); ?>
 <?!= include('ui/JsClientes.js'); ?>
+<?!= include('ui/JsConfig.js'); ?>
 <script>
   KGP.init();
 </script>
